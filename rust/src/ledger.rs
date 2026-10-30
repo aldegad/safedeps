@@ -320,7 +320,7 @@ fn context_kinds_match_cli() {
     let closure = include_str!("../../lib/npm/closure.sh");
     let calls: Vec<Vec<&str>> = closure.lines().map(str::trim_start).filter(|line| !line.starts_with('#'))
         .filter_map(|line| line.split_once("safedeps_npm_write_source \"").map(|(_, rest)| rest.split_whitespace().collect())).collect();
-    assert_eq!(calls.len(), 8, "the writer's calls");
+    assert_eq!(calls.len(), 7, "the writer's calls");
     let declared = |arg: &str, prefixes: &[&str]| prefixes.iter().any(|p| arg.starts_with(&format!("\"${{{p}"))) && arg.ends_with("}\"");
     for args in &calls {
         assert!(declared(args[1], &["SAFEDEPS_SOURCE_", "SAFEDEPS_CONTEXT_"]), "a closure source type is a declaration: {args:?}");

@@ -15,13 +15,8 @@ fn plain(id: &[u8]) -> bool {
 ///
 /// The shell reads it through `$(jq -r ...)`, which drops NUL bytes and the
 /// newlines that end the output before the test, so they are dropped here.
-pub fn call_id(input: &Value) -> Option<String> {
-    let Value::Str(raw) = input.get("tool_use_id")? else { return None };
-    validated(json::captured(&[raw.clone()]))
-}
-
-/// The same filter over a hook's JSON stream. Multiple values can emit one
-/// id, no id, or multiple lines; only the captured result is validated.
+/// Multiple values can emit one id, no id, or multiple lines; only the
+/// captured result is validated.
 pub fn from_stream(input: &json::Stream) -> Option<String> {
     let (lines, rc) = json::each(input, |v| Ok(match jq::field(v, "tool_use_id")? {
         Value::Str(raw) => vec![raw.clone()],

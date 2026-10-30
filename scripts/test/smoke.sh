@@ -1490,7 +1490,7 @@ grep -q 'suspicious dependency change detected' < "${tamper_post_file}" || fail 
 pass "post hook reorgs safedeps ledger tamper script"
 
 fixture_json="${tmp_root}/recheck-fixture.json"
-printf '%s\n' '{"command":"re-check","checked":2,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[]}' > "${fixture_json}"
+printf '%s\n' '{"command":"re-check","checked":2,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[],"suspected_forgery":[]}' > "${fixture_json}"
 SAFEDEPS_NOTIFY=0 \
   HOME="${tmp_root}/home-recheck" \
   SAFEDEPS_HOME="${tmp_root}/safe-recheck" \

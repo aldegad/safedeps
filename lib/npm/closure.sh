@@ -1051,9 +1051,7 @@ safedeps_npm_resolve_spec_closure() {
   local status=$?
   local overrides_context_file=""
   if [[ -n "${source_file}" ]]; then
-    if [[ "${project_context_status}" -eq 0 ]]; then
-      safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}" "${project_context_file}" "${SAFEDEPS_NPM_PROJECT_CLOSURE_UNAVAILABLE}"
-    elif [[ "${project_context_status}" -eq 2 ]]; then
+    if [[ "${project_context_status}" -eq 2 ]]; then
       safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}" "" "${SAFEDEPS_NPM_PROJECT_CONTEXT_INVALID}"
     else
       overrides_context_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-ctx.XXXXXX") || overrides_context_file=""
