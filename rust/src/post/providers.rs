@@ -19,6 +19,17 @@ fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wa
 fn obj0(path:&Path)->Result<Value,()>{let s=jv::read_file(path).ok_or(())?;if s.failed{return Err(())}Ok(first(s))}
 fn first(s:jv::Stream)->Value{s.values.into_iter().next().filter(jv::truthy).unwrap_or_else(||jv::obj(vec![("vulns",Value::Arr(Vec::new()))]))}
 fn tsv(s:&[u8])->W{let mut out=Vec::new();for b in s{match b{b'\\'=>out.extend(b"\\\\"),b'\t'=>out.extend(b"\\t"),b'\r'=>out.extend(b"\\r"),b'\n'=>out.extend(b"\\n"),_=>out.push(*b)}}out}
+/// The advisory status one provider answer gives one package. The CLI
+/// declares the same names and the same rule in lib/providers/providers.sh,
+/// and `provider_statuses_match_cli` holds the two together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Status { HardBlock, Vulnerable, Clean }
+impl Status {
+    /// A KEV listing outranks any number of OSV records.
+    fn of(exploited: bool, records: usize) -> Self {
+        if exploited { Self::HardBlock } else if records > 0 { Self::Vulnerable } else { Self::Clean }
+    }
+}
 struct Scratch(PathBuf);
 impl Drop for Scratch{fn drop(&mut self){sh::rm_rf(&self.0);}}
 
@@ -79,7 +90,7 @@ impl Providers{
     /// Status per package, with the ids of the OSV records it has; post uses
     /// the hard_block and vulnerable summaries, and the ids name what an
     /// install kept under SAFEDEPS_ACCEPT_RISK accepted.
-    pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,&'static str,Vec<W>)>,()>{
+    pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,Status,Vec<W>)>,()>{
         self.init();let temp=sh::mktemp_dir(&sh::tmp_prefix("safedeps-providers")).ok_or(())?;let scratch=Scratch(temp);
         let mut items:Vec<(W,W,PathBuf,Option<Value>)>=Vec::new();
         for spec in specs{
@@ -127,7 +138,7 @@ impl Providers{
             let catalog=catalog.get_or_insert_with(||self.kev());let mut exploited=false;
             if let Some(c)=catalog{if let Ok(Value::Arr(a))=jv::field(c,"vulnerabilities"){exploited=a.iter().any(|v|matches!(jv::field(v,"cveID"),Ok(Value::Str(s)) if cves.contains(s)));}}
             let count=match vulns{Value::Arr(a)=>a.len(),Value::Obj(o)=>o.len(),Value::Str(s)=>String::from_utf8_lossy(s).chars().count(),Value::Null|Value::Bool(false)=>0,_=>return Err(())};
-            output.push((package,version,if exploited{"hard_block"}else if count>0{"vulnerable"}else{"clean"},ids));
+            output.push((package,version,Status::of(exploited,count),ids));
         }Ok(output)
     }
 }
@@ -145,6 +156,33 @@ fn provider_endpoints_match_cli() {
         assert!(cli.lines().any(|line| line == assignment), "CLI request default {name}");
         assert!(cli.contains(&format!("\"${{SAFEDEPS_{name}}}\" 2>/dev/null")), "CLI request uses {name}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_statuses_match_cli() {
+    let cli = include_str!("../../../lib/providers/providers.sh");
+    let named = [(Status::HardBlock, "HARD_BLOCK", "hard_block"), (Status::Vulnerable, "VULNERABLE", "vulnerable"), (Status::Clean, "CLEAN", "clean")];
+    let name = |status: Status| named.iter().find(|(s, _, _)| *s == status).unwrap().2;
+    for (_, constant, value) in named {
+        assert!(cli.lines().any(|line| line == format!("SAFEDEPS_STATUS_{constant}=\"{value}\"")), "CLI declares status {value}");
+    }
+    // Every status the CLI writes is one of its declarations; a status a
+    // writer spells out again is a second truth the compiler never sees.
+    let declarations: Vec<&str> = cli.lines().filter(|line| line.starts_with("SAFEDEPS_STATUS_")).collect();
+    for line in declarations.iter().filter(|line| !line.starts_with("SAFEDEPS_STATUS_JQ=")) {
+        let value = line.split_once('=').unwrap().1;
+        assert!(value.len() > 2 && value.starts_with('"') && value.ends_with('"') && !value.contains('$'), "a status is a plain literal: {line}");
+        let spelled: Vec<&str> = cli.lines().filter(|other| other.contains(value) && !declarations.contains(other)).collect();
+        assert!(spelled.is_empty(), "status {value} spelled outside its declaration: {spelled:?}");
+    }
+    // The jq reading of the same declarations gives the rule the core gives.
+    let script = format!("{}\njq -nc \"$SAFEDEPS_STATUS_JQ\"'[status_of(true; []), status_of(true; [1]), status_of(false; [1]), status_of(false; [])]'", declarations.join("\n"));
+    let out = std::process::Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["-c", &script, "status-contract"]).output().unwrap();
+    assert!(out.status.success(), "CLI status rule: {}", String::from_utf8_lossy(&out.stderr));
+    let core: Vec<String> = [(true, 0), (true, 1), (false, 1), (false, 0)].iter().map(|(e, n)| format!("\"{}\"", name(Status::of(*e, *n)))).collect();
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("[{}]\n", core.join(",")));
 }
 
 #[cfg(test)]
@@ -230,11 +268,11 @@ mod catalog_tests {
         let names: Vec<String> = osv.iter().map(|(n, _)| n.to_string()).collect();
         let mut f = fixture("states", &osv, &["CVE-2026-0001"]);
         let out = f.providers.batch(&specs(&names)).unwrap();
-        let states: Vec<(String, &str)> = out.iter().map(|(p, v, s, _)| (format!("{}@{}", String::from_utf8_lossy(p), String::from_utf8_lossy(v)), *s)).collect();
+        let states: Vec<(String, Status)> = out.iter().map(|(p, v, s, _)| (format!("{}@{}", String::from_utf8_lossy(p), String::from_utf8_lossy(v)), *s)).collect();
         assert_eq!(states, vec![
-            ("fixture-kev@1.0.0".to_string(), "hard_block"),
-            ("fixture-vuln@1.0.0".to_string(), "vulnerable"),
-            ("fixture-clean@1.0.0".to_string(), "clean"),
+            ("fixture-kev@1.0.0".to_string(), Status::HardBlock),
+            ("fixture-vuln@1.0.0".to_string(), Status::Vulnerable),
+            ("fixture-clean@1.0.0".to_string(), Status::Clean),
         ]);
         let ids: Vec<Vec<W>> = out.iter().map(|(_, _, _, ids)| ids.clone()).collect();
         assert_eq!(ids, vec![vec![b"GHSA-xxxx".to_vec()], vec![b"CVE-2026-0002".to_vec()], vec![]], "each package keeps the ids of its OSV records");

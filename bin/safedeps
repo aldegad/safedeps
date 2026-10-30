@@ -363,7 +363,7 @@ sf_npm_emit_closure_block_json() {
     --arg version "${version}" \
     --slurpfile closure "${closure_file}" \
     --slurpfile source "${source_file}" \
-    '{
+    "${SAFEDEPS_STATUS_JQ}"'{
       command:"check",
       ecosystem:$ecosystem,
       package:$package,
@@ -375,7 +375,7 @@ sf_npm_emit_closure_block_json() {
       resolved_closure: $closure[0],
       closure_vulnerabilities: [
         .[]
-        | select((.status == "vulnerable") or (.status == "hard_block"))
+        | select(.status | status_risky)
         | {
             package: .package,
             version: .version,
@@ -442,15 +442,15 @@ sf_cmd_check_npm_full_closure() {
   fi
   sf_spinner_stop
 
-  vulnerable_count=$(jq '[.[] | select(.status == "vulnerable")] | length' "${batch_file}")
-  kev_count=$(jq '[.[] | select(.status == "hard_block")] | length' "${batch_file}")
+  vulnerable_count=$(jq "${SAFEDEPS_STATUS_JQ}"'[.[] | select(.status == status_vulnerable)] | length' "${batch_file}")
+  kev_count=$(jq "${SAFEDEPS_STATUS_JQ}"'[.[] | select(.status == status_hard_block)] | length' "${batch_file}")
   direct_status=$(jq -r --arg package "${pkg}" --arg version "${version}" '
     map(select(.package == $package and .version == $version)) | .[0].status // "missing"
   ' "${batch_file}")
 
   if [[ "${kev_count}" -gt 0 ]]; then
     local kev_summary
-    kev_summary=$(jq -r '[.[] | select(.status == "hard_block") | "\(.package)@\(.version)" + (if .direct then " (direct)" else " (transitive)" end)] | join(", ")' "${batch_file}")
+    kev_summary=$(jq -r "${SAFEDEPS_STATUS_JQ}"'[.[] | select(.status == status_hard_block) | "\(.package)@\(.version)" + (if .direct then " (direct)" else " (transitive)" end)] | join(", ")' "${batch_file}")
     sf_err "KEV-matched package in closure — install blocked: ${kev_summary}"
     sf_advisory_log "check block(KEV closure) package=${pkg} version=${version} affected=${kev_summary}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
@@ -462,7 +462,7 @@ sf_cmd_check_npm_full_closure() {
 
   if [[ "${vulnerable_count}" -gt 0 ]]; then
     local block_result="closure_vulnerable"
-    if [[ "${direct_status}" == "vulnerable" ]]; then
+    if [[ "${direct_status}" == "${SAFEDEPS_STATUS_VULNERABLE}" ]]; then
       local direct_json
       local direct_evidence
       local patched_versions=()
@@ -484,7 +484,7 @@ sf_cmd_check_npm_full_closure() {
           rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
           return 4
         fi
-        vulnerable_count=$(jq '[.[] | select(.status == "vulnerable" or .status == "hard_block")] | length' "${batch_file}")
+        vulnerable_count=$(jq "${SAFEDEPS_STATUS_JQ}"'[.[] | select(.status | status_risky)] | length' "${batch_file}")
         if [[ "${vulnerable_count}" -ne 0 ]]; then
           continue
         fi
@@ -528,7 +528,7 @@ sf_cmd_check_npm_full_closure() {
     fi
 
     local affected_summary
-    affected_summary=$(jq -r '[.[] | select(.status == "vulnerable") | "\(.package)@\(.version)" + (if .direct then " (direct)" else " (transitive)" end)] | join(", ")' "${batch_file}")
+    affected_summary=$(jq -r "${SAFEDEPS_STATUS_JQ}"'[.[] | select(.status == status_vulnerable) | "\(.package)@\(.version)" + (if .direct then " (direct)" else " (transitive)" end)] | join(", ")' "${batch_file}")
     sf_warn "vulnerable package in closure — approval withheld: ${affected_summary}"
     sf_advisory_log "check block(vulnerable closure) package=${pkg} version=${version} affected=${affected_summary}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
@@ -718,7 +718,7 @@ cmd_check() {
   kev_exploited=$(jq -r '.kev.exploited // false' <<< "${provider_json}")
 
   case "${status}" in
-    hard_block)
+    "${SAFEDEPS_STATUS_HARD_BLOCK}")
       sf_err "KEV match — ${pkg}@${version} is exploited in the wild. install blocked."
       local kev_cves
       kev_cves=$(jq -r '[.kev.matches[]?.cveID] | unique | join(", ")' <<< "${provider_json}")
@@ -736,7 +736,7 @@ cmd_check() {
       return 3
       ;;
 
-    vulnerable)
+    "${SAFEDEPS_STATUS_VULNERABLE}")
       local patched_versions=()
       local patched_version
       while IFS= read -r patched_version; do
@@ -771,7 +771,7 @@ cmd_check() {
 
           narrow_status=$(jq -r '.status' <<< "${narrow_json}")
           last_status="${narrow_status}"
-          if [[ "${narrow_status}" != "clean" ]]; then
+          if [[ "${narrow_status}" != "${SAFEDEPS_STATUS_CLEAN}" ]]; then
             sf_warn "patch candidate ${patched_version} is not clean either (status=${narrow_status}); trying the next candidate."
             continue
           fi
@@ -824,7 +824,7 @@ cmd_check() {
       fi
       ;;
 
-    clean)
+    "${SAFEDEPS_STATUS_CLEAN}")
       local spec_json
       spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${tmp_evidence}")
       rm -f "${tmp_evidence}"
@@ -1101,23 +1101,23 @@ cmd_recheck() {
     fi
     local s; s=$(jq -r '.status' <<< "${pj}")
     case "${s}" in
-      clean)
+      "${SAFEDEPS_STATUS_CLEAN}")
         still_clean=$(( still_clean + 1 ))
         ;;
-      vulnerable|hard_block)
+      "${SAFEDEPS_STATUS_VULNERABLE}"|"${SAFEDEPS_STATUS_HARD_BLOCK}")
         local reason="re-check ${s}"
         safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" "${context_hash}" >/dev/null
         sf_advisory_log "re-check revoke ecosystem=${ecosystem} package=${pkg} version=${version} status=${s}"
-        if [[ "${s}" == "hard_block" ]]; then
+        if [[ "${s}" == "${SAFEDEPS_STATUS_HARD_BLOCK}" ]]; then
           sf_err "  KEV match -> revoked"
           kev_hit_arr=$(jq -c \
             --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" \
-            '. + [{ecosystem:$ecosystem, package:$package, version:$version, status:"hard_block"}]' <<< "${kev_hit_arr}")
+            "${SAFEDEPS_STATUS_JQ}"'. + [{ecosystem:$ecosystem, package:$package, version:$version, status:status_hard_block}]' <<< "${kev_hit_arr}")
         else
           sf_warn "  new CVE match -> revoked"
           newly_vuln_arr=$(jq -c \
             --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" \
-            '. + [{ecosystem:$ecosystem, package:$package, version:$version, status:"vulnerable"}]' <<< "${newly_vuln_arr}")
+            "${SAFEDEPS_STATUS_JQ}"'. + [{ecosystem:$ecosystem, package:$package, version:$version, status:status_vulnerable}]' <<< "${newly_vuln_arr}")
         fi
         revoked_arr=$(jq -c \
           --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg reason "${reason}" \

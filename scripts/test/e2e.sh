@@ -623,6 +623,35 @@ set -e
 [[ "$(jq -r '.result' <<< "${kev_json}")" == "kev_hard_block" ]] || fail "kev fixture reports kev_hard_block"
 pass "block classifications"
 
+# A patch candidate whose closure holds a KEV-listed package is no patch. The
+# candidate loop counts both risky statuses of the batch, and a status it reads
+# under a name the writer does not use counts nothing: the candidate is then
+# approved and written to the ledger, KEV listing and all. The exit code alone
+# cannot tell this apart from a jq error (3), so the whole answer is read.
+kev_candidate_closure="${tmp_root}/closure-kev-candidate.json"
+cat > "${kev_candidate_closure}" <<'EOF'
+{
+  "fixture-vuln@1.0.0": [{"package":"fixture-vuln","version":"1.0.0","direct":true}],
+  "fixture-vuln@1.0.1": [{"package":"fixture-vuln","version":"1.0.1","direct":true},{"package":"fixture-kev","version":"1.0.0","direct":false}]
+}
+EOF
+kev_candidate_home="${tmp_root}/safe-kev-candidate"
+set +e
+kev_candidate_json=$(SAFEDEPS_HOME="${kev_candidate_home}" SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON="${kev_candidate_closure}" ./bin/safedeps --json check npm fixture-vuln@1.0.0)
+kev_candidate_status=$?
+set -e
+[[ "${kev_candidate_status}" -eq 2 ]] || fail "a patch candidate with KEV in its closure exits 2 (got ${kev_candidate_status})"
+jq -e '.result == "cve_unpatched" and .approved == false and (has("suggested_spec") | not)
+  and ([.closure_vulnerabilities[] | select(.package == "fixture-kev" and .result == "hard_block")] | length) == 1' \
+  <<< "${kev_candidate_json}" >/dev/null || fail "a patch candidate with KEV in its closure is reported unpatched: ${kev_candidate_json}"
+if find "${kev_candidate_home}/approved-specs" -name '*.json' -type f -print -quit 2>/dev/null | grep . >/dev/null; then
+  fail "a patch candidate with KEV in its closure writes no approval"
+fi
+if grep -q 'check approve' "${kev_candidate_home}/advisory.log" 2>/dev/null; then
+  fail "a patch candidate with KEV in its closure logs no approval"
+fi
+pass "a patch candidate with a KEV-listed package in its closure is not approved"
+
 project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"

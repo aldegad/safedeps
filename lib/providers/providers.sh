@@ -36,6 +36,21 @@ SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-${SAFEDEPS_DEFAULT_OSV
 SAFEDEPS_KEV_CATALOG_URL="${SAFEDEPS_KEV_CATALOG_URL:-${SAFEDEPS_DEFAULT_KEV_CATALOG_URL}}"
 SAFEDEPS_GHSA_API_URL="${SAFEDEPS_GHSA_API_URL:-${SAFEDEPS_DEFAULT_GHSA_API_URL}}"
 
+# The advisory status one provider answer gives one package, declared once:
+# every writer and reader of a status names it through these. They are plain
+# assignments, never `${VAR:-...}`, so the environment cannot rename a status,
+# and SAFEDEPS_STATUS_JQ is code in every jq program it is put in front of.
+# The core's post::providers::Status is held to the first three and to
+# status_of by provider_statuses_match_cli. `blocked` is the answer of a query
+# that failed closed; no reader branches on it.
+SAFEDEPS_STATUS_HARD_BLOCK="hard_block"
+SAFEDEPS_STATUS_VULNERABLE="vulnerable"
+SAFEDEPS_STATUS_CLEAN="clean"
+SAFEDEPS_STATUS_BLOCKED="blocked"
+# The same names in a jq program. status_of takes filters, not values, so
+# `vulns` is not evaluated when `exploited` holds, as in the `if` it replaces.
+SAFEDEPS_STATUS_JQ="def status_hard_block: \"${SAFEDEPS_STATUS_HARD_BLOCK}\"; def status_vulnerable: \"${SAFEDEPS_STATUS_VULNERABLE}\"; def status_clean: \"${SAFEDEPS_STATUS_CLEAN}\"; def status_blocked: \"${SAFEDEPS_STATUS_BLOCKED}\"; def status_of(exploited; vulns): if exploited then status_hard_block elif (vulns | length) > 0 then status_vulnerable else status_clean end; def status_risky: . == status_vulnerable or . == status_hard_block; "
+
 safedeps_providers_init() {
   umask 077
   mkdir -p \
@@ -629,12 +644,12 @@ safedeps_providers_query() {
       --arg package "${package_name}" \
       --arg version "${version}" \
       --arg queried_at "${queried_at}" \
-      '{
+      "${SAFEDEPS_STATUS_JQ}"'{
         ecosystem: $ecosystem,
         package: $package,
         version: $version,
         queried_at: $queried_at,
-        status: "blocked",
+        status: status_blocked,
         reason: "provider temp dir creation failed",
         vulnerabilities: [],
         kev: {queried_at: $queried_at, status: "not_queried", exploited: false, matches: []},
@@ -658,12 +673,12 @@ safedeps_providers_query() {
       --arg package "${package_name}" \
       --arg version "${version}" \
       --arg queried_at "${queried_at}" \
-      '{
+      "${SAFEDEPS_STATUS_JQ}"'{
         ecosystem: $ecosystem,
         package: $package,
         version: $version,
         queried_at: $queried_at,
-        status: "blocked",
+        status: status_blocked,
         reason: "OSV primary provider unavailable and no fresh cache",
         vulnerabilities: [],
         kev: {queried_at: $queried_at, status: "not_queried", exploited: false, matches: []},
@@ -688,7 +703,7 @@ safedeps_providers_query() {
     --arg queried_at "${queried_at}" \
     --slurpfile osv "${osv_file}" \
     --slurpfile kev "${kev_file}" \
-    --slurpfile ghsa "${ghsa_file}" '
+    --slurpfile ghsa "${ghsa_file}" "${SAFEDEPS_STATUS_JQ}"'
       ($osv[0].vulns // []) as $vulns
       | ($kev[0]) as $kev_result
       | ($ghsa[0]) as $ghsa_result
@@ -697,7 +712,7 @@ safedeps_providers_query() {
           package: $package,
           version: $version,
           queried_at: $queried_at,
-          status: (if $kev_result.exploited then "hard_block" elif ($vulns | length) > 0 then "vulnerable" else "clean" end),
+          status: status_of($kev_result.exploited; $vulns),
           vulnerabilities: $vulns,
           kev: $kev_result,
           advisories: ($ghsa_result.advisories // []),
@@ -737,12 +752,7 @@ safedeps_providers_query_batch() {
     osv_file="${temp_dir}/osv-item.json"
     jq -c '.osv' <<< "${item}" > "${osv_file}"
     kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}")
-    status=$(jq -r --argjson kev "${kev_json}" '
-      if $kev.exploited then "hard_block"
-      elif ((.osv.vulns // []) | length) > 0 then "vulnerable"
-      else "clean"
-      end
-    ' <<< "${item}")
+    status=$(jq -r --argjson kev "${kev_json}" "${SAFEDEPS_STATUS_JQ}"'status_of($kev.exploited; .osv.vulns // [])' <<< "${item}")
     jq -cn \
       --argjson item "${item}" \
       --arg queried_at "${queried_at}" \

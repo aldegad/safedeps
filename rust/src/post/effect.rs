@@ -1,5 +1,5 @@
 //! One closure over npm's two records, one ledger index, and one OSV batch.
-use super::{closure, jv, providers::Providers, report::cat, sh, snapshot::Store, trace};
+use super::{closure, jv, providers::{Providers, Status}, report::cat, sh, snapshot::Store, trace};
 use crate::{json::Value, ledger, os, state};
 use std::io::Write;
 
@@ -79,12 +79,12 @@ pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mu
     let Ok(results) = Providers::new(&store.home).batch(&all) else {
         reasons.push(b"npm closure OSV batch verification failed; fail-closed".to_vec()); return
     };
-    for (status, label) in [("hard_block", "KEV-blocked"), ("vulnerable", "vulnerable")] {
+    for (status, label) in [(Status::HardBlock, "KEV-blocked"), (Status::Vulnerable, "vulnerable")] {
         let found: Vec<_> = results.iter().filter(|(_,_,s,_)| *s == status).collect();
         if found.is_empty() { continue }
         let packages: Vec<_> = found.iter().map(|(p,v,_,_)| cat(&[p,b"@",v])).collect();
         let problem = cat(&[b"npm closure contains ", label.as_bytes(), b" package(s): ", &packages.join(b", ".as_slice())]);
-        match accepted.as_deref_mut().filter(|_| status == "vulnerable") {
+        match accepted.as_deref_mut().filter(|_| status == Status::Vulnerable) {
             Some(accepted) => {
                 // The ids are said where the risk is accepted, so the record
                 // names what was accepted and not only a package.
