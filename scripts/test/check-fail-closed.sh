@@ -151,6 +151,38 @@ control_clean() {
 }
 row "control: the stub in front of jq changes nothing a clean package answers" control_clean
 
+# The writers themselves, called under `if` as the check calls them, which is
+# what turns errexit off. The rows above read the check, which also refuses what
+# a failed writer leaves behind, so they cannot say the writer returned at all.
+writer_rc() {
+  local match="$1"
+  shift
+  fresh_home
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${stub_bin}:${PATH}" STUB_MATCH="${match}" \
+    bash -c 'source lib/providers/providers.sh; if "$@"; then exit 0; fi; exit 1' writer "$@" >/dev/null 2>&1 || rc=$?
+}
+one_package="${tmp_root}/one-package.json"
+printf '%s\n' '[{"package":"fixture-clean","version":"1.0.0","direct":true}]' > "${one_package}"
+writer_returns() {
+  local match="$1"
+  shift
+  writer_rc 'a call no writer makes' "$@"
+  [[ "${rc}" == 0 ]] || no "the control exits ${rc}"
+  writer_rc "${match}" "$@"
+  [[ "${rc}" != 0 ]] || no "the writer returned 0"
+}
+row "a jq error in the last step of the OSV batch reaches its caller" \
+  writer_returns 'sort_by(.index)' safedeps_osv_query_batch npm "${one_package}"
+row "a jq error in the status writer of the batch reaches its caller" \
+  writer_returns "${writer_batch}" safedeps_providers_query_batch npm "${one_package}"
+row "a jq error in the last step of the batch query reaches its caller" \
+  writer_returns 'sort_by(.index)'$'\n''results' safedeps_providers_query_batch npm "${one_package}"
+row "a jq error in the last step of the single query reaches its caller" \
+  writer_returns "${writer_one}" safedeps_providers_query pypi fixture-clean 1.0.0
+row "a jq error in the KEV overlay reaches the query's caller" \
+  writer_returns "${writer_overlay}" safedeps_providers_query pypi fixture-clean 1.0.0
+
 status_rewritten() {
   local ecosystem="$1" spec="$2" writer="$3" status="$4"
   faulted "${ecosystem}" "${spec}" "${writer}" STUB_STATUS="${status}"
