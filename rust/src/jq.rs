@@ -284,18 +284,34 @@ pub fn system_message(message: &[u8]) -> String {
 
 /// The runtimes read these bytes, so the event name and the key order are
 /// part of the answer, and a reason that is not UTF-8 is written as `--arg`
-/// writes it. No other file of the hooks spells an answer's keys.
+/// writes it: jq reads a cut sequence as one U+FFFD where Rust's lossy
+/// decoder writes one per byte. No source file but this one and the tests
+/// spells an answer's keys, in any quoting.
 #[cfg(test)]
 #[test]
 fn hook_answers_are_pinned() {
     assert_eq!(deny("no \"x\"\n"), r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"no \"x\"\n"}}"#);
     assert_eq!(deny(b"a\xffb".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}b\"}}");
+    assert_eq!(deny(b"a\xe0\x80b".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}b\"}}");
     assert_eq!(allow_rewrite(b"npm i --ignore-scripts"), r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":"npm i --ignore-scripts"}}}"#);
+    assert_eq!(allow_rewrite(b"npm i a\xf0\x80\x80b"), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"npm i a\u{fffd}b\"}}}");
     assert_eq!(system_message(b"rolled back\n\tx\xc3"), "{\"systemMessage\":\"rolled back\\n\\tx\u{fffd}\"}");
-    for (file, text) in [("pre.rs", include_str!("pre.rs")), ("pre/install.rs", include_str!("pre/install.rs")),
-                         ("post/run.rs", include_str!("post/run.rs")), ("main.rs", include_str!("main.rs"))] {
-        for key in ["hookSpecificOutput", "hookEventName", "permissionDecision", "permissionDecisionReason", "updatedInput", "systemMessage"] {
-            assert!(!text.contains(&format!("\"{key}\"")), "{file} spells {key}: the answer is built in jq.rs");
+    assert_eq!(system_message(b"a\xed\xa0\x80b"), "{\"systemMessage\":\"a\u{fffd}b\"}");
+    fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() { sources(&path, out) }
+            else if path.extension().is_some_and(|e| e == "rs") { out.push((path.display().to_string(), std::fs::read_to_string(&path).unwrap())) }
+        }
+    }
+    let mut files = Vec::new();
+    sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    assert!(files.len() > 40, "the walk found the core's sources");
+    for (file, text) in files.iter().filter(|(f, _)| !f.ends_with("/src/jq.rs") && !f.ends_with("_tests.rs")) {
+        for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
+            for key in ["hookSpecificOutput", "hookEventName", "permissionDecision", "updatedInput", "systemMessage"] {
+                assert!(!line.contains(key), "{file} spells {key}: the answer is built in jq.rs: {line}");
+            }
         }
     }
 }
