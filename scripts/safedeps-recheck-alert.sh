@@ -84,12 +84,15 @@ fi
 # the run above, and that is the recheck_failed alert it has always been.
 report_source="${BASH_SOURCE[0]}"
 while [[ -h "${report_source}" ]]; do
-  report_dir=$(cd -P "$(dirname "${report_source}")" && pwd)
+  report_dir=$(cd -P -- "$(dirname "${report_source}")" >/dev/null && pwd)
   report_source=$(readlink "${report_source}")
   [[ "${report_source}" != /* ]] && report_source="${report_dir}/${report_source}"
 done
-report_declaration="$(cd -P "$(dirname "${report_source}")/.." && pwd)/lib/ledger/recheck-report.sh"
-if [[ ! -f "${report_declaration}" ]]; then
+report_declaration="$(cd -P -- "$(dirname "${report_source}")/.." >/dev/null && pwd)/lib/ledger/recheck-report.sh"
+# The declaration is tried in a subshell first: under bash 3.2 a source that
+# cannot read or parse its file ends this script, alert unwritten.
+# shellcheck source=../lib/ledger/recheck-report.sh
+if ! ( source "${report_declaration}" && [[ -n "${SAFEDEPS_RECHECK_REPORT_JQ:-}" ]] ) >/dev/null 2>&1; then
   alert=$(jq -cn \
     --arg at "${run_at}" \
     --arg stderr "cannot read ${report_declaration}" \
