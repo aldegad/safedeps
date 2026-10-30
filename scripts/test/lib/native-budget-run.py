@@ -11,9 +11,10 @@ The budget is wall clock and so is this fixture's start, so on a busy machine
 the deadline can land first. That is the answer a stalled row asks for, and the
 result records it (held false). npm's own eight seconds can land first too, on
 a row with a longer budget: the hook then answers as it answers a slow npm, and
-the run saw no stalled judgment. The result records that as well (ask_limit),
-from the line the hook wrote. Anything else that leaves the judgment unheld is
-an error.
+the run saw no stalled judgment. The fixture stops the judgment before anything
+else it does, so only a start past those eight seconds loses that race, and the
+result records it as well (ask_limit), from the line the hook wrote. Anything
+else that leaves the judgment unheld is an error.
 """
 import argparse,json,math,os,shutil,signal,subprocess,sys,time
 from pathlib import Path
@@ -35,29 +36,20 @@ def record(role):
 def expire(*unused):
     (box/('expired-'+str(os.getpid()))).write_text('expired')
     os._exit(125)
+def children(pid):
+    return subprocess.run(['pgrep','-P',str(pid)],capture_output=True,text=True).stdout.split()
 def no_judgment(parent):
     (box/'no-judgment').write_text('parent '+str(parent)+' is '+(owners.command(parent) or 'gone'))
     raise SystemExit('no judgment process')
 if delay:
     signal.signal(signal.SIGTERM,signal.SIG_IGN)
     signal.signal(signal.SIGALRM,expire);signal.alarm(math.ceil(delay)+8)
-    if sys.argv[1:2]==['config']:time.sleep(settings['late_question'])
-    record('npm')
-    if os.fork()==0:
-        signal.signal(signal.SIGALRM,expire);signal.alarm(math.ceil(delay)+8)
-        record('descendant')
-        time.sleep(delay+1)
-        os._exit(0)
+    if settings['all_late'] or sys.argv[1:2]==['config']:time.sleep(settings['late_question'])
     try:
         fd=os.open(str(box/'leader'),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     except FileExistsError:fd=None
     if fd is not None:
         os.write(fd,str(os.getpid()).encode());os.close(fd)
-        # The alarm bounds this wait: the others start when the machine lets them.
-        while True:
-            rows=[json.loads(line) for line in (box/'pids.jsonl').read_text().splitlines()]
-            if sum(r['role']=='npm' for r in rows)>=3 and sum(r['role']=='descendant' for r in rows)>=3:break
-            time.sleep(.01)
         if settings['orphan_judgment']:
             # The deadline's TERM ends the judgment 50 ms before its KILL reaches
             # this group. A session of its own holds that window open.
@@ -66,16 +58,34 @@ if delay:
         parent=os.getppid()
         ancestor=owners.judgment(parent,settings['root'])
         if ancestor is None:no_judgment(parent)
+        # npm's own eight seconds run in the judgment, so stopping it stops them.
+        # That comes first: the rest of this fixture starts when the machine lets
+        # it, and only the three questions have to exist, not to have answered.
         try:
+            while len(children(parent))<3:time.sleep(.01)
             owners.register(lease,parent,'judgment')
             owners.register(lease,ancestor,'supervisor-or-entry')
+            os.kill(parent,signal.SIGSTOP)
+        except (RuntimeError,ProcessLookupError):no_judgment(parent)
+    record('npm')
+    if os.fork()==0:
+        signal.signal(signal.SIGALRM,expire);signal.alarm(math.ceil(delay)+8)
+        record('descendant')
+        time.sleep(delay+1)
+        os._exit(0)
+    if fd is not None:
+        # The alarm bounds this wait: the others start when the machine lets them.
+        while True:
+            rows=[json.loads(line) for line in (box/'pids.jsonl').read_text().splitlines()]
+            if sum(r['role']=='npm' for r in rows)>=3 and sum(r['role']=='descendant' for r in rows)>=3:break
+            time.sleep(.01)
+        try:
             if settings['kill_judgment']:
                 (box/'judgment.tmp').write_text(json.dumps(dict(pid=parent,action='KILL',acted_at=time.monotonic())))
                 os.replace(box/'judgment.tmp',box/'judgment.json')
                 os.kill(parent,signal.SIGKILL)
                 time.sleep(delay)
             else:
-                os.kill(parent,signal.SIGSTOP)
                 (box/'judgment.tmp').write_text(json.dumps(dict(pid=parent,action='STOP',stopped_at=time.monotonic())))
                 os.replace(box/'judgment.tmp',box/'judgment.json')
                 time.sleep(delay)
@@ -111,12 +121,12 @@ def main():
     p.add_argument('--suite-pid',required=True);p.add_argument('--seconds',default='');p.add_argument('--ignore-term',action='store_true')
     p.add_argument('--delay',type=float,default=0);p.add_argument('--pause-supervisor',action='store_true')
     p.add_argument('--kill-judgment',action='store_true');p.add_argument('--orphan-judgment',action='store_true')
-    p.add_argument('--late-question',type=float,default=0)
+    p.add_argument('--late-question',type=float,default=0);p.add_argument('--all-late',action='store_true')
     a=p.parse_args();box=Path(a.box);project=Path(a.project).resolve();root=Path(a.root).resolve()
     for name in ['bin','home','tmp','state']:(box/name).mkdir()
     lease=owners.create(a.suite_pid)
     (box/'lease').write_text(str(lease))
-    settings=dict(delay=a.delay,kill_judgment=a.kill_judgment,orphan_judgment=a.orphan_judgment,late_question=a.late_question,root=str(root),project=str(project),helpers=str(Path(__file__).resolve().parent),lease=str(lease))
+    settings=dict(delay=a.delay,kill_judgment=a.kill_judgment,orphan_judgment=a.orphan_judgment,late_question=a.late_question,all_late=a.all_late,root=str(root),project=str(project),helpers=str(Path(__file__).resolve().parent),lease=str(lease))
     (box/'settings.json').write_text(json.dumps(settings))
     npm=box/'bin/npm';npm.write_text('#!'+sys.executable+' -B\n'+FIXTURE);npm.chmod(0o755)
     env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_') and not k.lower().startswith('npm_config_')}

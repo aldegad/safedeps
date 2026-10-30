@@ -51,7 +51,7 @@ python3 "${ROOT_DIR}/scripts/test/lib/native-budget-lease-control.py" "${ROOT_DI
 never=60
 [[ "${1:-}" != --deadline-control-row ]] || never=4
 GUARD_IGNORE_TERM=""; GUARD_SECONDS=""
-GUARD_DELAY=0; GUARD_LOAD=""; GUARD_KILL_JUDGMENT=""; GUARD_ORPHAN=""; GUARD_LATE=0
+GUARD_DELAY=0; GUARD_LOAD=""; GUARD_KILL_JUDGMENT=""; GUARD_ORPHAN=""; GUARD_LATE=0; GUARD_ALL_LATE=""
 GUARD_HELPER_RC=0
 STALLED_ROWS=0; HELD_ROWS=0; UNCOUNTED_RUNS=0
 # The machine can spoil a stalled run in two ways, and neither says anything
@@ -82,6 +82,7 @@ guard() {
   [[ -z "${GUARD_KILL_JUDGMENT}" ]] || args+=(--kill-judgment)
   [[ -z "${GUARD_ORPHAN}" ]] || args+=(--orphan-judgment)
   [[ "${GUARD_LATE}" == 0 ]] || args+=(--late-question "${GUARD_LATE}")
+  [[ -z "${GUARD_ALL_LATE}" ]] || args+=(--all-late)
   GUARD_BOX="${safe}"
   python3 "${ROOT_DIR}/scripts/test/lib/native-budget-run.py" "${args[@]}" > "${safe}/transport.json" || rc=$?
   GUARD_ASK_LIMIT=$(jq -r .ask_limit "${safe}/result.json" 2>/dev/null || true)
@@ -293,8 +294,9 @@ pass "judgment killed before its deadline yields UNDECIDED with exit status, wit
 # The fixture is a Python program three npm questions have to start, and on a
 # busy machine that outlasts a small budget. These rows make it late on purpose,
 # so what load does to it is checked on every run, on a quiet machine too.
-GUARD_LATE=3
+GUARD_LATE=3; GUARD_ALL_LATE=1
 slow_guard "${never}" "echo ${big}" "${tiny_budget}"
+GUARD_ALL_LATE=""
 [[ "${GUARD_DECISION}" == deny ]] || fail "a deadline ahead of the fixture is still denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "a deadline ahead of the fixture is undecided"
 (( GUARD_ELAPSED_MS >= tiny_budget * 1000 )) \
@@ -312,14 +314,16 @@ grep -Fq 'the judgment process ended without a usable answer (signal 9)' <<< "${
   || fail "the fixture reached the judgment after the late question (got: ${GUARD_REASON})"
 pass "a question that starts late does not end the fixture's wait for it"
 
-GUARD_LATE=6
+GUARD_LATE=6; GUARD_ALL_LATE=1
 paused_guard "pip install requests==2.31.0 # ${big}" 4
+GUARD_ALL_LATE=""
 [[ "${GUARD_DECISION}" == deny ]] || fail "a supervisor paused ahead of the fixture is denied (got: ${GUARD_DECISION})"
 pass "the supervisor is paused from outside, so the load rows do not wait for the fixture to start"
 
-# A question later than npm's own eight seconds lands that limit first, every
-# time, so the machine's way of spoiling a row is checked on a quiet one too.
-if ( row_runs=2; GUARD_LATE=9; slow_guard "${never}" "echo ${big}" 20 ) > "${tmp_root}/ask-limit" 2>&1; then
+# A fixture that starts later than npm's own eight seconds lands that limit
+# first, every time, so the machine's way of spoiling a row is checked on a quiet
+# one too.
+if ( row_runs=2; GUARD_LATE=9; GUARD_ALL_LATE=1; slow_guard "${never}" "echo ${big}" 20 ) > "${tmp_root}/ask-limit" 2>&1; then
   fail "a row npm's own limit answered in every run is not a pass"
 fi
 grep -q 'the row observed nothing' "${tmp_root}/ask-limit" \
@@ -595,8 +599,14 @@ pass "a non-numeric engage size falls back to the default and says so"
 # The delay is short here because this case has to wait it out, and it is still
 # longer than the budget: the elapsed check is what proves the deny above came
 # from the deadline and not from something the delay did to the judgment.
+#
+# This row does not run again when npm's own limit lands, because that is no
+# other observation: the judgment outlasted the budget, nothing cut it, and it
+# answered. A fixture that starts slowly enough always lands it here.
 mutation_delay=4
-slow_guard "${mutation_delay}" "echo ${big}" "${tiny_budget}" 1024 1
+GUARD_DELAY="${mutation_delay}"
+guard "npm ci; echo ${big}" "${tiny_budget}" 1024 1
+GUARD_DELAY=0
 [[ "${GUARD_DECISION}" == "allow" ]] \
   || fail "with the deadline disabled the same command is allowed (got: ${GUARD_DECISION})"
 jq -e '.hookSpecificOutput.updatedInput.command | contains("npm ci") and contains("--ignore-scripts")' \
@@ -623,7 +633,7 @@ pass "a disabled deadline announces itself every time it is used"
 # named one, measured at 32s on an input that answers in 3s. It travels in argv
 # now, and the engines invoke the hook through a shim that passes no arguments,
 # so there is no route from the environment into it.
-slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 1024 "" 1
+row_within 12000 slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 1024 "" 1
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "the deadline runs even with the old marker exported (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
