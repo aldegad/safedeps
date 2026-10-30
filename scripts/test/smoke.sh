@@ -221,6 +221,16 @@ check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {p
   || fail "every check result bin/safedeps names is declared"
 check_spelled=$(grep -nE 'result:[[:space:]]*\\?"' bin/safedeps || true)
 [[ -z "${check_spelled}" ]] || fail "no check report spells its result outside the declarations: ${check_spelled}"
+# A result reaches a report only as the first argument of its assembler, and
+# that argument is a declaration or the variable an assembler's caller set
+# from one; a word there, misspelt or not, is a second truth.
+check_args=$(grep -nE '(sf_check_json|sf_npm_emit_closure_block_json)[[:space:]]' bin/safedeps | grep -vE '^[0-9]+:[[:space:]]*#' \
+  | grep -vE '(sf_check_json|sf_npm_emit_closure_block_json)[[:space:]]+"\$\{(SAFEDEPS_CHECK_[A-Z_]+|result|block_result)\}"' || true)
+[[ -z "${check_args}" ]] || fail "every check report takes its result from a declaration: ${check_args}"
+check_block=$(grep -nE '(^|[[:space:]])block_result=' bin/safedeps | grep -vE 'block_result="\$\{SAFEDEPS_CHECK_[A-Z_]+\}"$' || true)
+[[ -z "${check_block}" ]] || fail "a closure block's result is a declaration: ${check_block}"
+check_quoted=$(grep -nE "[\"'](${check_declared//$'\n'/|})[\"']" bin/safedeps | grep -vE '^[0-9]+:SAFEDEPS_CHECK_' || true)
+[[ -z "${check_quoted}" ]] || fail "bin/safedeps quotes a check result outside its declaration: ${check_quoted}"
 pass "the check results are declared once, and SKILL.md's table names them"
 
 # Regression: a global install must resolve its package dir through the symlink.
