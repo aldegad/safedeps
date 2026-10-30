@@ -761,7 +761,7 @@ GHSA / NVD — 응답 무
   • OSV 결과로만 진행 + "GHSA cross-check skipped" 로그
 ```
 
-설계 원칙: **silent fallback 금지.** canonical truth(OSV)가 응답하지 못하고 cache 도 없으면, safedeps 는 secondary truth 나 숨은 bypass 를 만들지 않고 fail-closed 한다.
+설계 원칙: **silent fallback 금지.** canonical truth(OSV)가 응답하지 못하고 cache 도 없으면, safedeps 는 secondary truth 나 숨은 bypass 를 만들지 않고 fail-closed 한다. hard block 을 낼 수 있는 유일한 overlay 인 KEV 도 같다. 읽을 catalog 가 없는 것은 등재 없음이 아니다.
 
 ---
 

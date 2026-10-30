@@ -761,7 +761,7 @@ GHSA / NVD — no response
   • proceed on OSV alone and log "GHSA cross-check skipped"
 ```
 
-Design principle: **no silent fallback.** When the canonical truth (OSV) cannot answer and the cache misses, safedeps fails closed instead of inventing a secondary truth or hidden bypass.
+Design principle: **no silent fallback.** When the canonical truth (OSV) cannot answer and the cache misses, safedeps fails closed instead of inventing a secondary truth or hidden bypass. The same holds for KEV, the one overlay that can hard-block: no catalog to read is not no listing.
 
 ---
 
