@@ -73,6 +73,8 @@
 #[allow(dead_code)]
 mod ask;
 mod callid;
+#[cfg(test)]
+mod cli_text;
 mod core;
 mod ere;
 mod extract;

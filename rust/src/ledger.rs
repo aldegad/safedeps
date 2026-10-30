@@ -301,13 +301,24 @@ fn context_kinds_match_cli() {
         assert!(case.contains(&format!("\"${{SAFEDEPS_CONTEXT_{constant}}}\"")), "safedeps_context_kind_scopes names {constant}");
     }
     assert_eq!((scopes.matches(". == ").count(), case.matches('|').count() + 1), (named.len(), named.len()), "the scoping kinds are the core's: {scopes} / {case}");
+    // What the two predicates answer is the core's answer, for every type the
+    // declaration names and one it does not: a second definition, a changed
+    // operator or a changed return shows here, whatever its text.
+    let types: Vec<&str> = kinds.lines().filter(|line| line.starts_with("SAFEDEPS_CONTEXT_") || line.starts_with("SAFEDEPS_SOURCE_"))
+        .filter_map(|line| line.split_once("=\"").map(|(_, v)| v.trim_end_matches('"'))).filter(|v| !v.contains('$')).chain(["other"]).collect();
+    assert_eq!(types.len(), 8, "the declared types and one more: {types:?}");
+    let script = format!("{kinds}\nfor t in \"$@\"; do if safedeps_context_kind_scopes \"$t\"; then printf 1; else printf 0; fi; jq -jn --arg t \"$t\" \"$SAFEDEPS_CONTEXT_JQ\"'if ($t | context_scopes) then 1 else 0 end'; done");
+    let out = std::process::Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .arg("-c").arg(&script).arg("context-contract").args(&types).output().unwrap();
+    assert!(out.status.success(), "CLI scoping predicates: {}", String::from_utf8_lossy(&out.stderr));
+    let core: String = types.iter().map(|t| if ContextKind::parse(t).is_some() { "11" } else { "00" }).collect();
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), core, "the shell's and jq's scoping kinds are the core's, for {types:?}");
     // A kind, a source type or the materialization is spelled in its
     // declaration and in no file of the CLI that writes or reads it: not in a
     // string, a case pattern or a comment. A spelling counts as a word, so
     // `fixture` inside `safedeps_npm_fixture_closure` is not one; and a
-    // spelling that is one plain word is prose too, so it counts only where
-    // code has it: quoted either way, as a case pattern, or on the right of a
-    // test or an assignment.
+    // spelling that is one plain word is prose too, so it counts wherever it
+    // stands in code (cli_text), whatever its form.
     // A closure source reaches its writer only as a declaration: the type is
     // its second argument and the reason, where there is one, its fourth, so
     // a word there, misspelt or not, is a second truth.
@@ -320,16 +331,26 @@ fn context_kinds_match_cli() {
         assert!(declared(args[1], &["SAFEDEPS_SOURCE_", "SAFEDEPS_CONTEXT_"]), "a closure source type is a declaration: {args:?}");
         assert!(args.len() < 4 || declared(args[3], &["SAFEDEPS_NPM_"]), "a closure source's reason is a declaration: {args:?}");
     }
-    // The fields that carry the reason are SAFEDEPS_NPM_SOURCE_JQ's: no jq
-    // text of the CLI reads or writes them by name.
+    // The fields that carry the reason are SAFEDEPS_NPM_SOURCE_JQ's: outside
+    // it a field's name stands in no file of the CLI but as prose (cli_text),
+    // whatever its form. Inside it the writer and the readers name each field
+    // once each, so what the readers read back is what the writer wrote.
+    let part = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     for (file, text) in [("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")), ("lib/npm/closure.sh", closure),
                          ("bin/safedeps", include_str!("../../bin/safedeps"))] {
         for field in ["project_resolution_status", "approval_scope"] {
-            let lines: Vec<&str> = text.lines().filter(|line| !line.starts_with("SAFEDEPS_NPM_SOURCE_JQ="))
-                .filter(|line| line.contains(&format!(".{field}")) || line.contains(&format!("{field}:"))).collect();
+            let lines: Vec<&str> = crate::cli_text::code_lines(text, field, part).into_iter()
+                .filter(|line| !line.starts_with("SAFEDEPS_NPM_SOURCE_JQ=")).collect();
             assert!(lines.is_empty(), "{file} spells the closure source's {field}: {lines:?}");
         }
     }
+    let source_jq: Vec<&str> = closure.lines().filter(|line| line.starts_with("SAFEDEPS_NPM_SOURCE_JQ=")).collect();
+    let script = format!("{}\njq -cn \"$SAFEDEPS_NPM_SOURCE_JQ\"'[(source_deny_only(\"why\"; \"scope\"), source_deny_only(\"\"; \"scope\")) | [keys_unsorted, source_resolution_status, source_approval_scope]]'", source_jq.join("\n"));
+    let out = std::process::Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["-c", &script, "source-contract"]).output().unwrap();
+    assert!(out.status.success(), "CLI closure source fields: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "[[[\"project_resolution_status\",\"approval_scope\"],\"why\",\"scope\"],[[],null,null]]\n",
+        "the closure source's readers read what its writer writes");
     let mut spellings: Vec<(String, bool)> = kinds.lines()
         .filter_map(|line| line.strip_prefix("SAFEDEPS_").and_then(|line| line.split_once('=')))
         .filter_map(|(_, value)| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
@@ -337,20 +358,15 @@ fn context_kinds_match_cli() {
     spellings.push((MATERIALIZE_COMMAND.into(), false));
     assert_eq!(spellings.len(), 8, "the declared spellings: {spellings:?}");
     let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
-    let code = |line: &str, at: usize, len: usize| {
-        let (before, after) = (line[..at].chars().last(), line[at + len..].chars().next());
-        let lead = line[..at].trim();
-        matches!((before, after), (Some('\''), Some('\'')) | (Some('"'), Some('"')))
-            || ((lead.is_empty() || lead == "(" || before == Some('|')) && matches!(after, Some(')') | Some('|')))
-            || lead.ends_with("==") || lead.ends_with("!=") || before == Some('=')
-    };
+    let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-');
     for (file, text) in [("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")),
                          ("lib/npm/closure.sh", include_str!("../../lib/npm/closure.sh")),
                          ("bin/safedeps", include_str!("../../bin/safedeps"))] {
         for (spelling, plain) in &spellings {
-            let lines: Vec<&str> = text.lines().filter(|line| line.match_indices(spelling.as_str()).any(|(at, _)|
-                !word(line.as_bytes().get(at.wrapping_sub(1))) && !word(line.as_bytes().get(at + spelling.len()))
-                    && (!plain || code(line, at, spelling.len())))).collect();
+            let lines: Vec<&str> = if *plain { crate::cli_text::code_lines(text, spelling, part) } else {
+                text.lines().filter(|line| line.match_indices(spelling.as_str()).any(|(at, _)|
+                    !word(line.as_bytes().get(at.wrapping_sub(1))) && !word(line.as_bytes().get(at + spelling.len())))).collect()
+            };
             assert!(lines.is_empty(), "{file} spells {spelling} outside its declaration: {lines:?}");
         }
     }

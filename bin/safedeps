@@ -547,15 +547,15 @@ sf_cmd_check_npm_full_closure() {
   fi
 
   if safedeps_npm_source_is_deny_only "${source_file}"; then
-    local project_resolution_status
-    project_resolution_status=$(jq -r "${SAFEDEPS_NPM_SOURCE_JQ}"'source_resolution_status' "${source_file}")
-    sf_err "Yarn project closure is unavailable (${project_resolution_status}) — approval withheld"
-    sf_advisory_log "check fail-closed yarn-project-closure package=${pkg} version=${version} reason=${project_resolution_status}"
+    local resolution_status
+    resolution_status=$(jq -r "${SAFEDEPS_NPM_SOURCE_JQ}"'source_resolution_status' "${source_file}")
+    sf_err "Yarn project closure is unavailable (${resolution_status}) — approval withheld"
+    sf_advisory_log "check fail-closed yarn-project-closure package=${pkg} version=${version} reason=${resolution_status}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
         '{approved:false, error:$error, closure_source:$source[0], resolved_closure:$closure[0]}' \
         -n --arg version "${version}" \
-        --arg error "${project_resolution_status}" \
+        --arg error "${resolution_status}" \
         --slurpfile source "${source_file}" --slurpfile closure "${closure_file}"
     fi
     rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"

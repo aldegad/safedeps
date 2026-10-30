@@ -3299,7 +3299,7 @@ recheck_json=$(./bin/safedeps --json re-check)
 pass "re-check revocation"
 
 # An approval whose package is KEV-listed after it is revoked as a KEV hit.
-# Re-check branches on the status a provider batch gives, under the names the
+# Re-check branches on the status a provider query gives, under the names the
 # CLI declares; a status it read under another name would leave the approval
 # live and the report without the hit. The exit code is 0 either way, so the
 # report and the ledger entry are read.

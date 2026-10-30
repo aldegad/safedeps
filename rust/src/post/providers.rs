@@ -168,37 +168,41 @@ fn provider_statuses_match_cli() {
         assert!(cli.lines().any(|line| line == format!("SAFEDEPS_STATUS_{constant}=\"{value}\"")), "CLI declares status {value}");
     }
     // Every status the CLI writes is one of its declarations; a status a
-    // writer spells out again is a second truth the compiler never sees.
-    // A spelling is the word quoted, a case pattern, or the right side of a
-    // test or an assignment. Each name is assigned once: a second assignment
-    // after SAFEDEPS_STATUS_JQ would part the shell's names from jq's.
+    // writer spells out again is a second truth the compiler never sees. A
+    // status word stands in the CLI only in its declaration, in the check
+    // result SAFEDEPS_CHECK_CLEAN (a word of its own) and as prose
+    // (cli_text): anywhere else it is a spelling, whatever its form. The
+    // files are the CLI and every file it sources, and in them each name is
+    // assigned once: a second assignment after SAFEDEPS_STATUS_JQ would part
+    // the shell's names from jq's.
     let bin = include_str!("../../../bin/safedeps");
+    let files = [("lib/providers/providers.sh", cli), ("bin/safedeps", bin),
+                 ("lib/truth-sources.sh", include_str!("../../../lib/truth-sources.sh")),
+                 ("lib/advisory-log-rotate.sh", include_str!("../../../lib/advisory-log-rotate.sh")),
+                 ("lib/ledger/ledger.sh", include_str!("../../../lib/ledger/ledger.sh")),
+                 ("lib/ledger/context-kinds.sh", include_str!("../../../lib/ledger/context-kinds.sh")),
+                 ("lib/ledger/recheck-report.sh", include_str!("../../../lib/ledger/recheck-report.sh")),
+                 ("lib/npm/closure.sh", include_str!("../../../lib/npm/closure.sh")),
+                 ("lib/npm/ask.sh", include_str!("../../../lib/npm/ask.sh"))];
+    for (file, text) in files {
+        for target in text.lines().filter_map(|line| line.trim_start().strip_prefix("source \"")) {
+            let name = target.trim_end_matches('"').rsplit('/').next().unwrap();
+            assert!(files.iter().any(|(other, _)| other.ends_with(&format!("/{name}"))), "{file} sources {name}, which this test reads too");
+        }
+    }
     let declarations: Vec<&str> = cli.lines().filter(|line| line.starts_with("SAFEDEPS_STATUS_")).collect();
-    let spells = |line: &str, word: &str| {
-        let code = line.trim_start();
-        let word_at = |i: usize| {
-            let (before, after) = (code[..i].chars().last(), code[i + word.len()..].chars().next());
-            let edge = |c: Option<char>| !c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !edge(before) || !edge(after) { return false }
-            let lead = code[..i].trim_end();
-            matches!((before, after), (Some('\''), Some('\'')) | (Some('"'), Some('"')))
-                || ((lead.is_empty() || lead == "(" || before == Some('|')) && matches!(after, Some(')') | Some('|')))
-                || lead.ends_with("==") || lead.ends_with("!=") || before == Some('=')
-        };
-        !code.starts_with('#') && code.match_indices(word).any(|(i, _)| word_at(i))
-    };
+    let part = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     for line in declarations.iter().filter(|line| !line.starts_with("SAFEDEPS_STATUS_JQ=")) {
         let (name, value) = line.split_once('=').unwrap();
         assert!(value.len() > 2 && value.starts_with('"') && value.ends_with('"') && !value.contains('$'), "a status is a plain literal: {line}");
-        let assigned = cli.lines().chain(bin.lines()).filter(|other| other.contains(&format!("{name}="))).count();
+        let assigned = files.iter().flat_map(|(_, text)| text.lines()).filter(|other| other.contains(&format!("{name}="))).count();
         assert_eq!(assigned, 1, "{name} is assigned once");
         let word = value.trim_matches('"');
-        let spelled: Vec<&str> = cli.lines().filter(|other| spells(other, word) && !declarations.contains(other)).collect();
-        assert!(spelled.is_empty(), "status {value} spelled outside its declaration: {spelled:?}");
-        // bin/safedeps reads the statuses through the same names. Its check
-        // result `clean` is a word of its own, declared as SAFEDEPS_CHECK_CLEAN.
-        let read: Vec<&str> = bin.lines().filter(|other| spells(other, word) && !other.starts_with("SAFEDEPS_CHECK_")).collect();
-        assert!(read.is_empty(), "bin/safedeps spells status {value}: {read:?}");
+        for (file, text) in files {
+            let spelled: Vec<&str> = crate::cli_text::code_lines(text, word, part).into_iter()
+                .filter(|other| !declarations.contains(other) && !(file == "bin/safedeps" && other.starts_with("SAFEDEPS_CHECK_"))).collect();
+            assert!(spelled.is_empty(), "{file} spells status {value} outside its declaration: {spelled:?}");
+        }
     }
     // The jq reading of the same declarations gives the rule the core gives.
     let script = format!("{}\njq -nc \"$SAFEDEPS_STATUS_JQ\"'[status_of(true; []), status_of(true; [1]), status_of(false; [1]), status_of(false; [])]'", declarations.join("\n"));
