@@ -21,6 +21,10 @@
 #
 # Every row runs and reports whatever another one answered: a row's state root
 # is its own, and one run says which rows a change turns red.
+#
+# No row reaches a package manager. Each name a check could ask for is answered
+# by a stand-in in this root, before anything else on PATH: a real one goes to a
+# public registry. A row that needs an answer puts its own stand-in in front.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -53,6 +57,15 @@ cleanup() {
   return "${rc}"
 }
 trap cleanup EXIT
+
+guard_bin="${tmp_root}/guard-bin"
+guard_names=(npm npx yarn yarnpkg pnpm pnpx corepack pip pip3 pipx uv poetry cargo go gem bundle mvn dotnet nuget)
+mkdir -p "${guard_bin}"
+for tool in "${guard_names[@]}"; do
+  printf '#!/bin/sh\nexit 127\n' > "${guard_bin}/${tool}"
+done
+chmod +x "${guard_bin}"/*
+PATH="${guard_bin}:${PATH}"
 
 port_file="${tmp_root}/port"
 state_file="${tmp_root}/state.json"
@@ -137,11 +150,49 @@ printf '200'
 STUB
 chmod +x "${stub_bin}/curl"
 
+# A file replaced after the read that checked it: the tool runs, then the file
+# SWAP_FILE holds SWAP_BODY when the arguments hold SWAP_AFTER, and the tool's own
+# exit stands. A second read of that file sees what the check never saw.
+swap_bin="${tmp_root}/swap-bin"
+mkdir -p "${swap_bin}"
+real_mv=$(command -v mv)
+for tool in jq mv cp; do
+  real=$(command -v "${tool}")
+  cat > "${swap_bin}/${tool}" <<STUB
+#!/usr/bin/env bash
+"${real}" "\$@"
+status=\$?
+if [[ "\$*" == *"\${SWAP_AFTER}"* ]]; then
+  printf '%s' "\${SWAP_BODY}" > "\${SWAP_FILE}.swap"
+  "${real_mv}" -f "\${SWAP_FILE}.swap" "\${SWAP_FILE}"
+fi
+exit "\${status}"
+STUB
+done
+chmod +x "${swap_bin}"/*
+# The swap reached the file, so a row that holds says something: a needle that
+# stopped matching would leave the row green with nothing injected.
+swap_fired() {
+  [[ "$(cat "$1")" == "$2" ]] || no "the file was not replaced: $(cat "$1")"
+}
+
 # The two status writers, the overlay and the line one package's answer is.
 writer_batch='status_of($kev.exploited; .osv.vulns'
 writer_one='status_of($kev_result.exploited'
 writer_overlay='.cveID as $id'
 writer_item='index: $item.index'
+
+# Every PATH a row runs with, and what answers on it for each package manager.
+only_stand_ins() {
+  local path tool found
+  for path in "${PATH}" "${stub_bin}:${PATH}" "${swap_bin}:${PATH}"; do
+    for tool in "${guard_names[@]}"; do
+      found=$(PATH="${path}" command -v "${tool}") || no "nothing answers for ${tool}"
+      [[ "${found}" == "${tmp_root}/"* ]] || no "${tool} is ${found}"
+    done
+  done
+}
+row "only stand-ins answer for ${guard_names[*]}" only_stand_ins
 
 # A run in a state root of its own: leaves `home`, `json` and `rc`.
 fresh_home() { home=$(mktemp -d "${tmp_root}/home.XXXXXX"); }
@@ -385,7 +436,7 @@ kev_reader_rc() {
   fresh_home
   [[ "${state}" == absent ]] || plant_kev "${state}" "${age}"
   rc=0
-  env SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_require_http_client() { return 1; }; if safedeps_kev_refresh_catalog; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
+  env SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_require_http_client() { return 1; }; if safedeps_kev_refresh_catalog "$1"; then exit 0; fi; exit 1' reader "${home}/catalog.json" >/dev/null 2>&1 || rc=$?
 }
 kev_no_curl() {
   local want="$1" state="$2" age="${3:-fresh}"
@@ -424,8 +475,48 @@ kev_overlay_refuses() {
   kev_overlay_rc "$(kev_file)"
   [[ "${rc}" != 0 ]] || no "the overlay answered from '$1'"
 }
-for body in '' 'null' '{}' '{"vulnerabilities":null}'; do
+for body in '' 'null' '{}' '{"vulnerabilities":null}' '{"vulnerabilities":[]}' '{"vulnerabilities":{}}' '{"vulnerabilities":[{}]}'; do
   row "the overlay does not read '${body}' as a catalog with nothing listed" kev_overlay_refuses "${body}"
+done
+
+# The catalog a package is looked up in is the one the rule read. Replaced after
+# that read, it changes nothing: what the rule passed still answers, listing
+# included, and the replacement waits for the next run's read. It once read the
+# file again: a catalog that listed a package passed the rule, the replacement
+# was looked up in, and an empty list approved what the rule never saw.
+kev_swapped() {
+  local ecosystem="$1" spec="$2" answer="$3" source="$4" body="$5"
+  local env_args=(PATH="${swap_bin}:${PATH}" SWAP_AFTER=known_exploited_vulnerabilities SWAP_BODY="${body}")
+  fresh_home
+  case "${source}" in
+    fresh) plant_kev "${kev_catalog}"; env_args+=("${kev_down[@]}") ;;
+    stale) plant_kev "${kev_catalog}" stale; env_args+=("${kev_down[@]}") ;;
+    live) ;;
+  esac
+  check_in "${ecosystem}" "${spec}" "${env_args[@]}" SWAP_FILE="$(kev_file)"
+  "${answer}"
+  swap_fired "$(kev_file)" "${body}"
+}
+for body in '' 'null' '{"vulnerabilities":[]}' '{"vulnerabilities":{}}' '{"vulnerabilities":[{}]}' '{"vulnerabilities":[{"cveID":"CVE-2026-0001"}]}'; do
+  for source in fresh stale live; do
+    for ecosystem in npm pypi; do
+      row "${ecosystem}: a ${source} KEV catalog replaced by '${body}' after its read still lists" kev_swapped "${ecosystem}" fixture-kev@1.0.0 hard_blocked "${source}" "${body}"
+    done
+  done
+  row "npm: a KEV catalog replaced by '${body}' after its read still clears what it does not list" kev_swapped npm fixture-clean@1.0.0 passed_clean fresh "${body}"
+  row "non-npm: a KEV catalog replaced by '${body}' after its read still clears what it does not list" kev_swapped pypi fixture-clean@1.0.0 passed_clean fresh "${body}"
+done
+
+# The next run reads what the replacement left, by the rule.
+kev_replaced_then_read() {
+  local ecosystem="$1" body="$2"
+  kev_swapped "${ecosystem}" fixture-kev@1.0.0 hard_blocked fresh "${body}"
+  check_in "${ecosystem}" fixture-clean@1.0.0 "${kev_down[@]}"
+  unavailable
+}
+for body in '{"vulnerabilities":[]}' '{"vulnerabilities":{}}' '{"vulnerabilities":[{}]}'; do
+  row "npm: what replaced a KEV catalog is read by the rule on the next run: '${body}'" kev_replaced_then_read npm "${body}"
+  row "non-npm: what replaced a KEV catalog is read by the rule on the next run: '${body}'" kev_replaced_then_read pypi "${body}"
 done
 
 kev_said_once() {
@@ -539,6 +630,40 @@ for ecosystem in npm pypi; do
     row "${ecosystem}: a cached answer of '${body}' is a hit with OSV down" cache_answers "${ecosystem}" fixture-clean@1.0.0 "${body}"
   done
   row "${ecosystem}: a cached advisory is a hit with OSV down" cached_advisory "${ecosystem}" fixture-clean@1.0.0
+done
+
+# The answer judged is the one the rule read. A cached advisory replaced after
+# that read still counts: an empty file there once read as no advisories. npm
+# asks about a vulnerable direct package a second time, and that second read
+# meets the replacement by the rule, so its answer is 2 or 4 and approves nothing.
+advisory_stands() {
+  [[ "${rc}" == 2 || "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  no_approval
+}
+osv_swapped() {
+  local ecosystem="$1" body="$2" file
+  fresh_home
+  plant_osv "${ecosystem}" fixture-clean@1.0.0 '{"vulns":[{"id":"CVE-2026-1002"}]}'
+  file=$(osv_cache_file "${ecosystem}" fixture-clean@1.0.0)
+  check_in "${ecosystem}" fixture-clean@1.0.0 "${osv_down[@]}" PATH="${swap_bin}:${PATH}" SWAP_AFTER="${file}" SWAP_FILE="${file}" SWAP_BODY="${body}"
+  advisory_stands
+  swap_fired "${file}" "${body}"
+}
+# And an answer just stored is the one the rule read, not what stands there next.
+osv_live_swapped() {
+  local ecosystem="$1" body="$2" file
+  fresh_home
+  mkdir -p "${home}/cache/osv"
+  file=$(osv_cache_file "${ecosystem}" fixture-unpatched@1.0.0)
+  check_in "${ecosystem}" fixture-unpatched@1.0.0 PATH="${swap_bin}:${PATH}" SWAP_AFTER="${file}" SWAP_FILE="${file}" SWAP_BODY="${body}"
+  advisory_stands
+  swap_fired "${file}" "${body}"
+}
+for body in '' 'null' '{}' '{"vulns":[]}'; do
+  for ecosystem in npm pypi; do
+    row "${ecosystem}: a cached advisory replaced by '${body}' after its read still counts" osv_swapped "${ecosystem}" "${body}"
+    row "${ecosystem}: an answer replaced by '${body}' once stored still counts" osv_live_swapped "${ecosystem}" "${body}"
+  done
 done
 
 cache_is_a_directory() {
@@ -708,6 +833,56 @@ listing_expiry() {
   [[ "$(jq -r '.result' <<< "${json}")" == "clean" ]] || no "check reads the entry as live: ${json}"
 }
 row "the ledger listing and check read an unpadded expires_at the way the core does" listing_expiry
+
+# An entry is judged whole from the one read the predicate passed. Replaced at any
+# point after that, the answer is still that entry's. An empty file behind a
+# passed check once came out as approved with no spec.
+ledger_swapped() {
+  local after="$1" body="$2" entry file answer
+  fresh_home
+  entry=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0)
+  file=$(find "${home}/approved-specs" -name '*.json' -type f)
+  [[ "${body}" != other ]] || body=$(jq -c '.package = "fixture-other"' <<< "${entry}")
+  rc=0
+  answer=$(env SAFEDEPS_HOME="${home}" PATH="${swap_bin}:${PATH}" SWAP_AFTER="${after}" SWAP_FILE="${file}" SWAP_BODY="${body}" \
+    bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_check pypi fixture-clean 1.0.0' 2>/dev/null) || rc=$?
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${answer}"
+  jq -e --argjson entry "${entry}" '.approved == true and .reason == "hit" and .spec == $entry' <<< "${answer}" >/dev/null || no "the answer: ${answer}"
+  swap_fired "${file}" "${body}"
+}
+ledger_read_swapped() {
+  local body="$1" entry file answer
+  fresh_home
+  entry=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0)
+  file=$(find "${home}/approved-specs" -name '*.json' -type f)
+  [[ "${body}" != other ]] || body=$(jq -c '.package = "fixture-other"' <<< "${entry}")
+  rc=0
+  answer=$(env SAFEDEPS_HOME="${home}" PATH="${swap_bin}:${PATH}" SWAP_AFTER='(.[0] | ledger_is_valid)' SWAP_FILE="${file}" SWAP_BODY="${body}" \
+    bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_read pypi fixture-clean 1.0.0' 2>/dev/null) || rc=$?
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${answer}"
+  jq -e --argjson entry "${entry}" '. == $entry' <<< "${answer}" >/dev/null || no "the answer: ${answer}"
+  swap_fired "${file}" "${body}"
+}
+ledger_hit_swapped() {
+  local body="$1" file
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  file=$(find "${home}/approved-specs" -name '*.json' -type f)
+  check_in pypi fixture-clean@1.0.0 PATH="${swap_bin}:${PATH}" SWAP_AFTER='--argjson now_epoch' SWAP_FILE="${file}" SWAP_BODY="${body}"
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "already_approved" and (.expires_at | test("^[0-9]{4}-"))' <<< "${json}" >/dev/null || no "the report: ${json}"
+  swap_fired "${file}" "${body}"
+}
+for body in '' 'null' '{}' other; do
+  row "a ledger entry replaced by '${body}' after the predicate read it answers as that entry" ledger_swapped '(.[0] | ledger_is_valid)' "${body}"
+  row "a ledger entry replaced by '${body}' after its hash read answers as that entry" ledger_swapped '-r .hash' "${body}"
+  row "a ledger entry replaced by '${body}' after its expiry read answers as that entry" ledger_swapped '--argjson now_epoch' "${body}"
+  row "a ledger read replaced by '${body}' after the predicate read it prints that entry" ledger_read_swapped "${body}"
+done
+for body in '' 'null' '{}'; do
+  row "non-npm: a ledger hit replaced by '${body}' before its report is that entry's report" ledger_hit_swapped "${body}"
+done
 
 # ---- a tool that prints, then fails ---------------------------------------
 #
@@ -937,7 +1112,7 @@ row "control: a ledger entry reads as approved under the stubs" ledger_check_con
 row "a ledger read returns when shasum prints and fails" ledger_read_failed
 row "a ledger check returns when shasum prints and fails" ledger_with_entry "${hash_tool}" "${hash_match}"
 row "a ledger check does not take a stored hash jq printed and failed on" ledger_with_entry jq '-r .hash'
-row "a ledger check does not take a stored context jq printed and failed on" ledger_with_entry jq 'ledger_context_hash /'
+row "a ledger check does not take a stored context jq printed and failed on" ledger_with_entry jq $'-r \nledger_context_hash'
 atomic_write_run() {
   rc=0
   env SAFEDEPS_HOME="${home}" PATH="${after_path}" "$@" \
@@ -1212,6 +1387,32 @@ overrides_lookup_failed() {
 }
 row "overrides that did not read find no entry under the global key" overrides_lookup_failed 'to_entries' STUB_BEFORE=1
 row "overrides with no context find no entry under the global key" overrides_lookup_failed 'overrides_sha256: $overrides_sha256'
+# The set an overrides read returns is the set the read that found it saw. A
+# manifest replaced between the two read as a project with none, and the entry
+# the global key finds was approved for no overrides at all.
+overrides_swapped() {
+  local body="$1" answer
+  overrides_project
+  rc=0
+  answer=$(cd "${project}" && env PATH="${swap_bin}:${PATH}" SWAP_AFTER='.overrides | type' SWAP_FILE="${project}/package.json" SWAP_BODY="${body}" \
+    bash -c 'source "$1/lib/npm/closure.sh"; safedeps_npm_repo_overrides_json' overrides "${ROOT_DIR}" 2>/dev/null) || rc=$?
+  [[ "${rc}" == 0 && "${answer}" == '{"fixture-child":"1.0.0"}' ]] || no "exit ${rc}: ${answer}"
+  swap_fired "${project}/package.json" "${body}"
+}
+overrides_lookup_swapped() {
+  local body="$1"
+  project_dir
+  in_project npm fixture-clean@1.0.0 'a call no row fails'
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  printf '{"name":"p","version":"0.0.0","overrides":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
+  project_check npm fixture-clean@1.0.0 'a call no row fails' PATH="${swap_bin}:${after_path}" SWAP_AFTER='.overrides | type' SWAP_FILE="${project}/package.json" SWAP_BODY="${body}"
+  jq -e '.result != "already_approved"' <<< "${json}" >/dev/null || no "the global entry answered: ${json}"
+  swap_fired "${project}/package.json" "${body}"
+}
+for body in '' 'null' '{}'; do
+  row "overrides replaced by '${body}' after the read that found them are still those overrides" overrides_swapped "${body}"
+  row "overrides replaced by '${body}' after the read that found them find no entry under the global key" overrides_lookup_swapped "${body}"
+done
 overrides_context_rc() {
   local want="$1" source="$2"
   shift 2

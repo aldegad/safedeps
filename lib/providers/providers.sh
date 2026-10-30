@@ -200,12 +200,14 @@ safedeps_cache_is_fresh() {
 # empty file, a file this user cannot read and a `null` hold no answer, and none
 # of them reads as no advisories. The core reads an answer by the same rule
 # (osv_answer in rust/src/post/providers.rs), and `osv_answers_match_cli` holds
-# the two together.
-safedeps_osv_is_answer() {
-  jq -es 'length == 1 and (.[0] | type == "object" and (.vulns | type == "array" or . == null))' "$1" >/dev/null 2>&1
+# the two together. The answer this prints is the one the rule read, and it is
+# the only copy a verdict reads: the file may hold something else by the time
+# anything opens it again.
+safedeps_osv_answer() {
+  jq -ces 'select(length == 1 and (.[0] | type == "object" and (.vulns | type == "array" or . == null))) | .[0]' "$1" 2>/dev/null
 }
 
-# A cache hit is a fresh file that holds an answer. A fresh file that holds none
+# A cache hit prints the answer a fresh file holds. A fresh file that holds none
 # is a miss with a line in the record: the query is asked again, its answer
 # replaces the file, and a failed query fails closed as any other miss does.
 safedeps_osv_cache_hit() {
@@ -215,9 +217,15 @@ safedeps_osv_cache_hit() {
   local version="$4"
 
   safedeps_cache_is_fresh "${path}" || return 1
-  safedeps_osv_is_answer "${path}" && return 0
+  safedeps_osv_answer "${path}" && return 0
   safedeps_provider_log "WARN" "OSV cache unreadable; asking again ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
   return 1
+}
+
+# Puts a checked file where the cache keeps it. mv moves a file into a directory
+# that stands at the target and returns 0, and that is not the cache holding it.
+safedeps_cache_store() {
+  [[ ! -d "$2" ]] && mv -f "$1" "$2"
 }
 
 safedeps_cache_key() {
@@ -272,6 +280,7 @@ safedeps_osv_query() {
   local payload
   local response_file
   local http_status
+  local answer
 
   safedeps_require_json_tools || return 1
   safedeps_providers_init
@@ -280,9 +289,9 @@ safedeps_osv_query() {
   cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}") || return 1
   cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
 
-  if safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"; then
+  if answer=$(safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"); then
     safedeps_provider_log "INFO" "OSV cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-    cat "${cache_path}"
+    printf '%s\n' "${answer}"
     return
   fi
 
@@ -310,9 +319,9 @@ safedeps_osv_query() {
     -d "${payload}" \
     "${SAFEDEPS_OSV_API_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
 
-  if [[ "${http_status}" == "200" ]] && safedeps_osv_is_answer "${response_file}" && mv -f "${response_file}" "${cache_path}"; then
+  if [[ "${http_status}" == "200" ]] && answer=$(safedeps_osv_answer "${response_file}") && safedeps_cache_store "${response_file}" "${cache_path}"; then
     safedeps_provider_log "INFO" "OSV live query ok ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-    cat "${cache_path}"
+    printf '%s\n' "${answer}"
     return
   fi
 
@@ -378,6 +387,7 @@ safedeps_osv_query_batch() {
   local package_name
   local version
   local direct
+  local answer
 
   safedeps_require_json_tools || return 1
   safedeps_providers_init
@@ -408,16 +418,15 @@ safedeps_osv_query_batch() {
     }
     cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
 
-    if safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"; then
+    if answer=$(safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"); then
       safedeps_provider_log "INFO" "OSV batch cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-      if ! jq -cn \
+      if ! jq -c \
         --argjson index "${index}" \
         --arg ecosystem "${ecosystem}" \
         --arg package "${package_name}" \
         --arg version "${version}" \
         --argjson direct "${direct}" \
-        --slurpfile osv "${cache_path}" \
-        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:$osv[0]}' >> "${all_items_file}"; then
+        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:.}' <<< "${answer}" >> "${all_items_file}"; then
         safedeps_provider_log "ERROR" "OSV cache unreadable ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
         rm -rf "${temp_dir}"
         return 1
@@ -489,14 +498,15 @@ safedeps_osv_query_batch() {
         return 1
       fi
       if ! jq -c --argjson i "${miss_i}" '.results[$i]' "${response_file}" > "${response_item_file}" \
-        || ! safedeps_osv_is_answer "${response_item_file}"; then
+        || ! answer=$(safedeps_osv_answer "${response_item_file}"); then
         safedeps_provider_log "ERROR" "OSV batch result is not an answer ecosystem=${osv_ecosystem} index=${miss_i}"
         rm -f "${response_item_file}"
         rm -rf "${temp_dir}"
         return 1
       fi
-      if ! mv -f "${response_item_file}" "${cache_path}" || ! jq -cn --argjson miss "${miss_item}" --slurpfile osv "${cache_path}" \
-        '$miss | del(.cache_path) | . + {osv: $osv[0]}' >> "${all_items_file}"; then
+      if ! safedeps_cache_store "${response_item_file}" "${cache_path}" || ! jq -c --argjson miss "${miss_item}" \
+        '. as $osv | $miss | del(.cache_path) | . + {osv: $osv}' <<< "${answer}" >> "${all_items_file}"; then
+        rm -f "${response_item_file}"
         rm -rf "${temp_dir}"
         return 1
       fi
@@ -536,26 +546,40 @@ safedeps_kev_catalog_path() {
 # user cannot read, an empty list and a list whose entries name nothing say
 # nothing about what is exploited, and none of them reads as no listing. The core
 # reads a catalog by the same rule (kev_answer in rust/src/post/providers.rs), and
-# `kev_answers_match_cli` holds the two together.
+# `kev_answers_match_cli` holds the two together. The rule reads the array -s
+# makes of the file, so a file with two values is no catalog.
+SAFEDEPS_KEV_JQ='def kev_answer: length == 1 and (.[0] | type == "object" and (.vulnerabilities | type == "array" and length > 0 and all(.[]; type == "object" and (.cveID | type == "string"))));'
+
 safedeps_kev_is_answer() {
-  jq -es 'length == 1 and (.[0] | type == "object" and (.vulnerabilities | type == "array" and length > 0 and all(.[]; type == "object" and (.cveID | type == "string"))))' "$1" >/dev/null 2>&1
+  jq -es "${SAFEDEPS_KEV_JQ}"'kev_answer' "$1" >/dev/null 2>&1
+}
+
+# The one read of a catalog: a private copy, which is what the rule checks and
+# what every package is then looked up in. The file may hold something else by
+# the time anything opens it again. The copy keeps the file's time, which says
+# how old the catalog is.
+safedeps_kev_take() {
+  cp -pf "$1" "$2" 2>/dev/null && safedeps_kev_is_answer "$2"
 }
 
 # A cache hit is a fresh file that holds a catalog. A fresh file that holds none
 # is a miss with a line in the record.
 safedeps_kev_cache_hit() {
   local path="$1"
+  local catalog_file="$2"
 
   safedeps_cache_is_fresh "${path}" || return 1
-  safedeps_kev_is_answer "${path}" && return 0
+  safedeps_kev_take "${path}" "${catalog_file}" && return 0
   safedeps_provider_log "WARN" "CISA KEV cache unreadable; asking again"
   return 1
 }
 
-# The path of a catalog that can be read. A download that fails falls back on the
-# local file, stale or not, when that file holds a catalog. With none to read this
-# returns 1, and no caller reads that as no listing.
+# Leaves a catalog that can be read in catalog_file, a private path of the caller.
+# A download that fails falls back on the local file, stale or not, when that file
+# holds a catalog. With none to read this returns 1, and no caller reads that as
+# no listing.
 safedeps_kev_refresh_catalog() {
+  local catalog_file="$1"
   local cache_path
   local response_path
   local http_status=""
@@ -564,8 +588,7 @@ safedeps_kev_refresh_catalog() {
   safedeps_providers_init
   cache_path=$(safedeps_kev_catalog_path)
 
-  if safedeps_kev_cache_hit "${cache_path}"; then
-    printf '%s' "${cache_path}"
+  if safedeps_kev_cache_hit "${cache_path}" "${catalog_file}"; then
     return 0
   fi
 
@@ -573,18 +596,16 @@ safedeps_kev_refresh_catalog() {
     response_path=$(safedeps_cache_response_temp "${cache_path}") || return 1
     http_status=$(curl -fsS --max-time 15 -o "${response_path}" -w '%{http_code}' "${SAFEDEPS_KEV_CATALOG_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
 
-    if [[ "${http_status}" == "200" ]] && safedeps_kev_is_answer "${response_path}" && mv -f "${response_path}" "${cache_path}"; then
+    if [[ "${http_status}" == "200" ]] && safedeps_kev_take "${response_path}" "${catalog_file}" && safedeps_cache_store "${response_path}" "${cache_path}"; then
       safedeps_provider_log "INFO" "CISA KEV catalog refresh ok"
-      printf '%s' "${cache_path}"
       return 0
     fi
 
     rm -f "${response_path}"
   fi
 
-  if safedeps_kev_is_answer "${cache_path}"; then
+  if safedeps_kev_take "${cache_path}" "${catalog_file}"; then
     safedeps_provider_log "WARN" "CISA KEV refresh failed; using stale local catalog status=${http_status:-none}"
-    printf '%s' "${cache_path}"
     return 0
   fi
 
@@ -592,8 +613,9 @@ safedeps_kev_refresh_catalog() {
   return 1
 }
 
-# The listing of one OSV answer in a catalog safedeps_kev_refresh_catalog gave. The
-# caller asks for the path once, because the rule reads the whole catalog.
+# The listing of one OSV answer in a catalog. The rule and the lookup are one jq
+# reading the file once, so bytes that are no catalog reach no lookup, whoever
+# named the file. The caller takes the catalog once, for the whole closure.
 safedeps_kev_overlay() {
   local osv_json="$1"
   local queried_at="$2"
@@ -614,8 +636,8 @@ safedeps_kev_overlay() {
     --arg status "${status}" \
     --arg warning "${warning}" \
     --argjson cves "${cve_array}" \
-    --slurpfile catalog "${catalog_path}" '
-      $catalog[0].vulnerabilities as $items
+    --slurpfile catalog "${catalog_path}" "${SAFEDEPS_KEV_JQ}"'
+      ($catalog | if kev_answer then .[0].vulnerabilities else error("not a KEV catalog") end) as $items
       | ($items | map(select(.cveID as $id | $cves | index($id)))) as $matches
       | {
           queried_at: $queried_at,
@@ -705,7 +727,7 @@ safedeps_providers_query() {
   local queried_at
   local osv_file
   local temp_dir
-  local catalog_path
+  local catalog_file
   local kev_file
   local ghsa_file
 
@@ -738,6 +760,7 @@ safedeps_providers_query() {
   fi
 
   osv_file="${temp_dir}/osv.json"
+  catalog_file="${temp_dir}/catalog.json"
   kev_file="${temp_dir}/kev.json"
   ghsa_file="${temp_dir}/ghsa.json"
 
@@ -767,8 +790,8 @@ safedeps_providers_query() {
     return 1
   fi
 
-  if ! catalog_path=$(safedeps_kev_refresh_catalog) \
-    || ! safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_path}" > "${kev_file}"; then
+  if ! safedeps_kev_refresh_catalog "${catalog_file}" \
+    || ! safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_file}" > "${kev_file}"; then
     safedeps_provider_log "ERROR" "KEV overlay failed ecosystem=${ecosystem} package=${package_name} version=${version}"
     rm -rf "${temp_dir}"
     return 1
@@ -814,7 +837,7 @@ safedeps_providers_query_batch() {
   local osv_batch_file
   local osv_items_file
   local results_file
-  local catalog_path
+  local catalog_file
 
   safedeps_require_json_tools || return 1
   queried_at=$(safedeps_now_iso)
@@ -822,6 +845,7 @@ safedeps_providers_query_batch() {
   osv_batch_file="${temp_dir}/osv-batch.json"
   osv_items_file="${temp_dir}/osv-items.jsonl"
   results_file="${temp_dir}/results.jsonl"
+  catalog_file="${temp_dir}/catalog.json"
   : > "${results_file}"
 
   if ! safedeps_osv_query_batch "${ecosystem}" "${closure_file}" > "${osv_batch_file}" \
@@ -829,7 +853,7 @@ safedeps_providers_query_batch() {
     rm -rf "${temp_dir}"
     return 1
   fi
-  if [[ -s "${osv_items_file}" ]] && ! catalog_path=$(safedeps_kev_refresh_catalog); then
+  if [[ -s "${osv_items_file}" ]] && ! safedeps_kev_refresh_catalog "${catalog_file}"; then
     safedeps_provider_log "ERROR" "KEV overlay failed ecosystem=${ecosystem}"
     rm -rf "${temp_dir}"
     return 1
@@ -841,7 +865,7 @@ safedeps_providers_query_batch() {
     local status
     osv_file="${temp_dir}/osv-item.json"
     if ! jq -c '.osv' <<< "${item}" > "${osv_file}" \
-      || ! kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_path}") \
+      || ! kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_file}") \
       || ! status=$(jq -r --argjson kev "${kev_json}" "${SAFEDEPS_STATUS_JQ}"'status_of($kev.exploited; .osv.vulns // [])' <<< "${item}") \
       || ! jq -cn \
       --argjson item "${item}" \

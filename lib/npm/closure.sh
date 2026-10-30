@@ -782,9 +782,13 @@ safedeps_npm_repo_overrides_json() {
   while [[ -n "${dir}" && "${dir}" != "/" ]]; do
     local pkg="${dir}/package.json"
     if [[ -f "${pkg}" ]]; then
+      local text
       local raw
       local raw_status=0
-      raw=$(jq -c 'if (.overrides | type) == "object" and (.overrides | length) > 0 then 1 else empty end' "${pkg}" 2>/dev/null) || raw_status=$?
+      # One read of the manifest, as in the core: the overrides are the ones the
+      # read that found them saw, whatever stands in the file by the next look.
+      text=$(jq -c . "${pkg}" 2>/dev/null) || raw_status=$?
+      raw=$(jq -c 'if (.overrides | type) == "object" and (.overrides | length) > 0 then 1 else empty end' <<< "${text}" 2>/dev/null) || raw_status=$?
       # A manifest that does not read declares nothing, in the core too, and npm
       # passes one above a project. One that said it declares overrides and then
       # failed did declare them, and they are what the real install resolves.
@@ -794,7 +798,7 @@ safedeps_npm_repo_overrides_json() {
       fi
       if [[ -n "${raw}" ]]; then
         [[ -z "${source_out}" ]] || printf '%s' "${pkg}" > "${source_out}"
-        jq -c "${filter}" "${pkg}" 2>/dev/null || return 1
+        jq -c "${filter}" <<< "${text}" 2>/dev/null || return 1
         return 0
       fi
     fi

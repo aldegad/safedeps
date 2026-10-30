@@ -227,22 +227,34 @@ def ledger_approved_specs:
         }));
 '
 
-safedeps_ledger_validate_json() {
+# The entry a file holds, printed by the one read that checked it. Everything said
+# about an entry is said of this text: the file may hold something else by the
+# time anything opens it again.
+safedeps_ledger_valid_entry() {
   local ledger_file="$1"
 
   safedeps_ledger_require_jq || return 1
   # One value and no more, as the core reads an entry: a file with a second
   # value is not one the writer wrote, and it is invalid, not a hash mismatch.
-  jq -es "${SAFEDEPS_LEDGER_JQ_PREDICATE} length == 1 and (.[0] | ledger_is_valid)" "${ledger_file}" >/dev/null
+  jq -ces "${SAFEDEPS_LEDGER_JQ_PREDICATE} select(length == 1 and (.[0] | ledger_is_valid)) | .[0]" "${ledger_file}"
 }
 
-# True when an entry is past its TTL. A file that is missing or does not read
-# counts as expired.
+safedeps_ledger_validate_json() {
+  safedeps_ledger_valid_entry "$1" >/dev/null
+}
+
+# True when an entry is past its TTL: the file named, or the text on stdin. One
+# that does not read counts as expired.
+safedeps_ledger_is_expired() {
+  ! jq -e --argjson now_epoch "$(date +%s)" "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_unexpired(\$now_epoch)" "$@" >/dev/null 2>&1
+}
+
+# The same of a path that may hold nothing, for the listing.
 safedeps_ledger_is_expired_file() {
   local ledger_file="$1"
 
   [[ -f "${ledger_file}" ]] || return 0
-  ! jq -e --argjson now_epoch "$(date +%s)" "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_unexpired(\$now_epoch)" "${ledger_file}" >/dev/null 2>&1
+  safedeps_ledger_is_expired "${ledger_file}"
 }
 
 safedeps_ledger_read() {
@@ -254,8 +266,7 @@ safedeps_ledger_read() {
 
   ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   [[ -f "${ledger_file}" ]] || return 1
-  safedeps_ledger_validate_json "${ledger_file}" || return 1
-  cat "${ledger_file}"
+  safedeps_ledger_valid_entry "${ledger_file}"
 }
 
 safedeps_ledger_check() {
@@ -266,6 +277,7 @@ safedeps_ledger_check() {
   local ledger_file
   local expected_hash
   local stored_hash
+  local entry
 
   ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
@@ -275,12 +287,12 @@ safedeps_ledger_check() {
     return 1
   fi
 
-  if ! safedeps_ledger_validate_json "${ledger_file}"; then
+  if ! entry=$(safedeps_ledger_valid_entry "${ledger_file}"); then
     jq -cn --arg hash "${expected_hash}" '{approved: false, reason: "invalid", hash: $hash}'
     return 1
   fi
 
-  stored_hash=$(jq -r '.hash' "${ledger_file}") || return 1
+  stored_hash=$(jq -r '.hash' <<< "${entry}") || return 1
   if [[ "${stored_hash}" != "${expected_hash}" ]]; then
     jq -cn --arg hash "${expected_hash}" --arg stored_hash "${stored_hash}" \
       '{approved: false, reason: "hash_mismatch", hash: $hash, stored_hash: $stored_hash}'
@@ -288,21 +300,19 @@ safedeps_ledger_check() {
   fi
 
   local stored_context_hash
-  stored_context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${ledger_file}") || return 1
+  stored_context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" <<< "${entry}") || return 1
   if [[ "${stored_context_hash}" != "${context_hash}" ]]; then
     jq -cn --arg hash "${expected_hash}" --arg context_hash "${context_hash}" --arg stored_context_hash "${stored_context_hash}" \
       '{approved: false, reason: "context_mismatch", hash: $hash, context_hash: $context_hash, stored_context_hash: $stored_context_hash}'
     return 1
   fi
 
-  if safedeps_ledger_is_expired_file "${ledger_file}"; then
-    jq -cn --arg hash "${expected_hash}" --slurpfile spec "${ledger_file}" \
-      '{approved: false, reason: "expired", hash: $hash, spec: $spec[0]}'
+  if safedeps_ledger_is_expired <<< "${entry}"; then
+    jq -c --arg hash "${expected_hash}" '{approved: false, reason: "expired", hash: $hash, spec: .}' <<< "${entry}"
     return 1
   fi
 
-  jq -cn --arg hash "${expected_hash}" --slurpfile spec "${ledger_file}" \
-    '{approved: true, reason: "hit", hash: $hash, spec: $spec[0]}'
+  jq -c --arg hash "${expected_hash}" '{approved: true, reason: "hit", hash: $hash, spec: .}' <<< "${entry}"
 }
 
 safedeps_ledger_atomic_write() {

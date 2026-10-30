@@ -20,7 +20,7 @@ fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wa
 /// OSV answers `{}` for a package it has nothing on, and nothing else says so:
 /// an empty file, a file this user cannot read and a `null` hold no answer, and
 /// none of them reads as no advisories. The CLI reads an answer by the same rule
-/// (safedeps_osv_is_answer), and `osv_answers_match_cli` holds the two together.
+/// (safedeps_osv_answer), and `osv_answers_match_cli` holds the two together.
 fn osv_answer(v:Value)->Option<Value>{(matches!(v,Value::Obj(_))&&matches!(jv::field(&v,"vulns"),Ok(Value::Arr(_)|Value::Null))).then_some(v)}
 /// A KEV catalog is one JSON object whose `vulnerabilities` is a list with at
 /// least one entry, and every entry is an object that names its CVE in a string
@@ -261,9 +261,9 @@ fn provider_statuses_match_cli() {
 #[test]
 fn osv_answers_match_cli() {
     let cli = include_str!("../../../lib/providers/providers.sh");
-    let head = "safedeps_osv_is_answer() {";
+    let head = "safedeps_osv_answer() {";
     let body = cli.split_once(head).unwrap().1.split_once("\n}").unwrap().0;
-    let script = format!("{head}{body}\n}}\nsafedeps_osv_is_answer \"$1\"");
+    let script = format!("{head}{body}\n}}\nsafedeps_osv_answer \"$1\" >/dev/null");
     let dir = std::env::temp_dir().join(format!("safedeps-osv-answer-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join("answer.json");
@@ -288,12 +288,19 @@ fn osv_answers_match_cli() {
 #[test]
 fn kev_answers_match_cli() {
     let cli = include_str!("../../../lib/providers/providers.sh");
+    let rule = cli.lines().find(|line| line.starts_with("SAFEDEPS_KEV_JQ=")).expect("the CLI declares the catalog rule");
     let head = "safedeps_kev_is_answer() {";
     let body = cli.split_once(head).unwrap().1.split_once("\n}").unwrap().0;
-    let script = format!("{head}{body}\n}}\nsafedeps_kev_is_answer \"$1\"");
+    let script = format!("{rule}\n{head}{body}\n}}\nsafedeps_kev_is_answer \"$1\"");
+    // The lookup answers by the rule too: bytes the rule refuses reach no listing,
+    // whoever named the file. Every answer below lists the CVE this OSV answer names.
+    let overlay = "source \"$3\" && safedeps_kev_overlay \"$2\" 2026-01-01T00:00:00Z \"$1\"";
+    let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/providers/providers.sh");
     let dir = std::env::temp_dir().join(format!("safedeps-kev-answer-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join("catalog.json");
+    let osv = dir.join("osv.json");
+    fs::write(&osv, r#"{"vulns":[{"id":"GHSA-x","aliases":["CVE-2026-1"]}]}"#).unwrap();
     let one = r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"}]}"#;
     let answers = [one.to_string(), format!("  {one}\n\n"),
         r#"{"title":"t","count":2,"vulnerabilities":[{"cveID":"CVE-2026-1","notes":""},{"cveID":"CVE-2026-2","cwes":[]}]}"#.to_string(),
@@ -316,6 +323,10 @@ fn kev_answers_match_cli() {
             let cli = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .args(["-c", &script, "answer-contract"]).arg(&file).status().unwrap();
             assert_eq!(cli.success(), answer, "the CLI on {body:?}");
+            let listed = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("SAFEDEPS_HOME", dir.join("home")).args(["-c", overlay, "overlay-contract"]).arg(&file).arg(&osv).arg(lib).output().unwrap();
+            assert_eq!(listed.status.success(), answer, "the CLI lookup on {body:?}");
+            assert_eq!(listed.stdout.windows(16).any(|w| w == b"\"exploited\":true"), answer, "the CLI listing on {body:?}");
         }
     }
     let _ = fs::remove_dir_all(&dir);
