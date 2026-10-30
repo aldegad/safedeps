@@ -756,12 +756,33 @@ CISA KEV — a catalog that cannot be read
     catalog is downloaded again and replaces the file, a fresh file leaves a
     line in `advisory.log`, and a failed download leaves no catalog to read
 
+A step that printed and then failed
+  • a read a verdict rests on answers by its exit status, not by what it
+    printed: most of these reads run where errexit is off (`if`, `!`, `||`, a
+    command substitution in an argument), so each checks its own return
+  • a provider step that failed is a miss, as above, and a local step that
+    failed is a failed check: nothing is approved and the run says so
+  • a curl that ended non-zero is a failed request, though it printed 200 and
+    left a whole body; the record says both (`status=200 exit 18`), in the CLI
+    and in the core
+  • a manifest that does not read declares nothing, in the CLI and in the core;
+    one that answered that it declares `overrides` or `resolutions` and then
+    failed is a failed read
+  • `ledger`, `revoke` and `re-check` answer `ledger_unlisted` (exit 4) when the
+    ledger's files could not be listed: that is no reading, not an empty ledger
+  • `safedeps audit` exits 2, no verdict, when it cannot read its counts or when
+    the tool exited non-zero with no finding in its report
+  • `safedeps gates run` takes a `find` that failed as no reading of the Python
+    surface, not as no surface: a warning, and a failure under `--strict`
+
 GHSA / NVD — no response
   • enrichment only, so fail-open is allowed
   • proceed on OSV alone and log "GHSA cross-check skipped"
 ```
 
 Design principle: **no silent fallback.** When the canonical truth (OSV) cannot answer and the cache misses, safedeps fails closed instead of inventing a secondary truth or hidden bypass. The same holds for KEV, the one overlay that can hard-block: no catalog to read is not no listing.
+
+**An approval is made whole, then written.** It is three things that must agree: the ledger entry the hook reads, the `check approve` line `re-check` reads, and the report. `check` makes all three, writes the entry, appends the line, and takes the entry back if the line fails. A failure at any of these steps leaves none of them and answers `ledger_write_failed` (exit 4). Nothing after them can stop the run, so a run that stopped has approved nothing. Any other command that stops a check ends in `check_did_not_finish` (exit 4), with a line in `advisory.log` and, under `--json`, one report. Only a CLI that cannot load its own libraries exits without one.
 
 ---
 

@@ -756,12 +756,31 @@ CISA KEV — 읽을 수 없는 catalog
     catalog 를 다시 받아 파일을 대체하고, fresh 파일이면 `advisory.log` 에 한
     줄을 남기며, download 가 실패하면 읽을 catalog 가 없는 경우가 된다
 
+출력한 뒤 실패한 단계
+  • 판정이 의존하는 읽기는 출력한 내용이 아니라 종료 상태로 답한다. 이런 읽기는
+    대부분 errexit 가 꺼진 곳(`if`, `!`, `||`, 인수 안의 명령 치환)에서 돌기
+    때문에, 각 읽기가 자기 반환값을 확인한다
+  • 실패한 provider 단계는 위와 같이 miss 이고, 실패한 로컬 단계는 실패한
+    check 다. 아무것도 승인하지 않고 실행이 그 사실을 알린다
+  • 0이 아닌 값으로 끝난 curl 은 200을 출력하고 본문 전체를 남겼어도 실패한
+    요청이다. 기록에는 둘 다 적힌다(`status=200 exit 18`). CLI 와 core 모두 같다
+  • 읽히지 않는 manifest 는 CLI 와 core 모두에서 아무것도 선언하지 않는다.
+    `overrides` 나 `resolutions` 를 선언한다고 답한 뒤 실패한 읽기는 실패한 읽기다
+  • `ledger`, `revoke`, `re-check` 는 ledger 파일을 나열하지 못하면
+    `ledger_unlisted`(exit 4)로 답한다. 빈 ledger 가 아니라 읽지 못한 것이다
+  • `safedeps audit` 는 집계를 읽지 못하거나, 도구가 보고서에 발견 사항 없이 0이
+    아닌 값으로 끝나면 판정 없음인 exit 2 로 끝난다
+  • `safedeps gates run` 은 실패한 `find` 를 표면 없음이 아니라 Python 표면을
+    읽지 못한 것으로 다룬다. 경고이고, `--strict` 에서는 실패다
+
 GHSA / NVD — 응답 무
   • enrichment 라 fail-open 허용
   • OSV 결과로만 진행 + "GHSA cross-check skipped" 로그
 ```
 
 설계 원칙: **silent fallback 금지.** canonical truth(OSV)가 응답하지 못하고 cache 도 없으면, safedeps 는 secondary truth 나 숨은 bypass 를 만들지 않고 fail-closed 한다. hard block 을 낼 수 있는 유일한 overlay 인 KEV 도 같다. 읽을 catalog 가 없는 것은 등재 없음이 아니다.
+
+**승인은 온전히 갖춘 뒤에 기록한다.** 승인은 서로 일치해야 하는 세 가지다. 훅이 읽는 ledger 항목, `re-check` 가 읽는 `check approve` 줄, 그리고 보고서다. `check` 는 셋을 모두 만들고, 항목을 쓰고, 줄을 덧붙이며, 줄이 실패하면 항목을 되돌린다. 이 단계 중 어디서 실패하든 아무것도 남지 않고 `ledger_write_failed`(exit 4)로 답한다. 그 뒤로는 실행을 멈출 수 있는 것이 없으므로, 멈춘 실행은 아무것도 승인하지 않은 것이다. check 를 멈추는 그 밖의 명령은 모두 `check_did_not_finish`(exit 4)로 끝나고, `advisory.log` 에 한 줄을 남기며, `--json` 에서는 보고서 하나를 낸다. 자기 라이브러리를 불러오지 못한 CLI 만 보고서 없이 끝난다.
 
 ---
 

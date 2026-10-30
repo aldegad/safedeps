@@ -45,7 +45,7 @@ safedeps check <ecosystem> <pkg>@<range> --json
 | `closure_vulnerable` | Do not install. A dependency the install would bring in has an advisory; `closure_vulnerabilities` names it. Propose an alternative. |
 | `kev_hard_block` | Do not install. Recommend an alternative — actively exploited in the wild. |
 | `provider_unavailable` | Do not install. OSV was unreachable with no fresh cache, its answer could not be read, or no CISA KEV catalog could be read. Retry later or tell the human. |
-| `error` | Read `error`. Fix the spec (e.g. an unpublished version) and retry. `ledger_write_failed` means the approval could not be written, so nothing is approved: tell the human. |
+| `error` | Read `error`. Fix the spec (e.g. an unpublished version) and retry. `ledger_write_failed` means the approval could not be written, and `check_did_not_finish` means the check stopped before it could answer. In both, nothing is approved: tell the human. |
 
 Install only after approval. If the approved version differs from your argument, the hook blocks again — re-narrow and retry.
 
@@ -107,7 +107,7 @@ safedeps version
 
 **Global flags**: `--json` (stable machine-readable schema), `--no-color`.
 
-**Exit codes**: `0` clean/approved · `2` CVE, no patch (human decision) · `3` CISA KEV hard block · `4` input error or provider unavailable (fail-closed).
+**Exit codes**: `0` clean/approved · `2` CVE, no patch (human decision) · `3` CISA KEV hard block · `4` input error, provider unavailable, a check that could not finish, or a ledger that could not be listed (fail-closed).
 
 ---
 
@@ -161,6 +161,8 @@ safedeps version
 - `ledger`: `command`, `count`, and `specs`, each with `hash`, `ecosystem`, `package`, `version`, `version_range`, `approved_at`, `expires_at`, `approved_by`, `expired` and `revoked`.
 - `revoke`: `command`, `revoked`, `reason`, and `spec`, the ledger entry after revocation.
 - `re-check`: `command`, `checked`, `still_clean`, and the lists `newly_vulnerable`, `kev_hit`, `revoked` and `suspected_forgery`.
+
+Any of the three answers `command` and `error: "ledger_unlisted"` with exit 4 when the ledger's files could not be listed. That is no reading of the ledger, not an empty one.
 
 `migrate` ignores `--json` and always prints its own JSON report, without a `command` field.
 
