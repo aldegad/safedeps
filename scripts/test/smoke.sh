@@ -207,6 +207,22 @@ for doc in SKILL.md README.md README.ko.md AGENTS.md ARCHITECTURE.md ARCHITECTUR
 done
 pass "no doc restates the hook budget figure outside the canonical sentence"
 
+# The results `check` reports are declared once, in bin/safedeps
+# (SAFEDEPS_CHECK_*), and SKILL.md's table is what an agent acts on, so the two
+# name one set. Every result the CLI names is a declared one, and no report
+# spells a result outside the declarations.
+check_declared=$(sed -nE 's/^SAFEDEPS_CHECK_[A-Z_]+="([a-z_]+)"$/\1/p' bin/safedeps | sort)
+check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {print; next} t {exit}' SKILL.md \
+  | awk -F'|' '{print $2}' | grep -oE '`[a-z_]+`' | tr -d '`' | sort)
+[[ "$(grep -c . <<< "${check_declared}")" -eq 9 ]] || fail "bin/safedeps declares the nine check results (got: ${check_declared//$'\n'/ })"
+[[ "${check_declared}" == "${check_documented}" ]] \
+  || fail "SKILL.md's result table names the declared check results (declared: ${check_declared//$'\n'/ }; table: ${check_documented//$'\n'/ })"
+[[ "$(grep -oE 'SAFEDEPS_CHECK_[A-Z_]+' bin/safedeps | sort -u)" == "$(sed -nE 's/^(SAFEDEPS_CHECK_[A-Z_]+)=.*/\1/p' bin/safedeps | sort -u)" ]] \
+  || fail "every check result bin/safedeps names is declared"
+check_spelled=$(grep -nE 'result:[[:space:]]*\\?"' bin/safedeps || true)
+[[ -z "${check_spelled}" ]] || fail "no check report spells its result outside the declarations: ${check_spelled}"
+pass "the check results are declared once, and SKILL.md's table names them"
+
 # Regression: a global install must resolve its package dir through the symlink.
 # npm -g (and ~/.local/bin via --link-bin) put a RELATIVE FILE symlink in
 # <prefix>/bin and the package under <prefix>/lib/node_modules; without symlink

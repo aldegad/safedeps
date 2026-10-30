@@ -175,6 +175,11 @@ fn provider_statuses_match_cli() {
         assert!(value.len() > 2 && value.starts_with('"') && value.ends_with('"') && !value.contains('$'), "a status is a plain literal: {line}");
         let spelled: Vec<&str> = cli.lines().filter(|other| other.contains(value) && !declarations.contains(other)).collect();
         assert!(spelled.is_empty(), "status {value} spelled outside its declaration: {spelled:?}");
+        // bin/safedeps reads the statuses through the same names. Its check
+        // result `clean` is a word of its own, declared as SAFEDEPS_CHECK_CLEAN.
+        let read: Vec<&str> = include_str!("../../../bin/safedeps").lines()
+            .filter(|other| other.contains(value) && !other.starts_with("SAFEDEPS_CHECK_")).collect();
+        assert!(read.is_empty(), "bin/safedeps spells status {value}: {read:?}");
     }
     // The jq reading of the same declarations gives the rule the core gives.
     let script = format!("{}\njq -nc \"$SAFEDEPS_STATUS_JQ\"'[status_of(true; []), status_of(true; [1]), status_of(false; [1]), status_of(false; [])]'", declarations.join("\n"));

@@ -40,7 +40,9 @@ safedeps check <ecosystem> <pkg>@<range> --json
 |---|---|
 | `clean` / `already_approved` | Install. Use `install_hint` verbatim — it pins the approved version. |
 | `patched_available` | Install `suggested_spec` instead (e.g. `^14.0.0` → `14.0.5`). |
+| `patched_still_vulnerable` | Do not install. No patch candidate is clean either; `suggested_spec` is the last one tried. Propose an alternative package. |
 | `cve_unpatched` | Do not install. Surface the CVEs, propose an alternative package. |
+| `closure_vulnerable` | Do not install. A dependency the install would bring in has an advisory; `closure_vulnerabilities` names it. Propose an alternative. |
 | `kev_hard_block` | Do not install. Recommend an alternative — actively exploited in the wild. |
 | `provider_unavailable` | Do not install. OSV unreachable, no fresh cache. Retry later or tell the human. |
 | `error` | Fix the spec (e.g. an unpublished version) and retry. |
@@ -120,7 +122,7 @@ safedeps version
   "package": "@scope/pkg",
   "input_range": "^1.2.0",
   "resolved_version": "1.2.4",
-  "result": "clean | already_approved | patched_available | cve_unpatched | kev_hard_block | patched_still_vulnerable | provider_unavailable",
+  "result": "clean",
   "approved": true,
   "spec_hash": "sha256:...",
   "expires_at": "2026-06-17T05:39:03Z",
@@ -130,6 +132,7 @@ safedeps version
 }
 ```
 
+- `result` is one of the results in the table under "Then act on `result`".
 - `patched_available` adds `suggested_spec`. `kev_hard_block` keeps `vulnerabilities` + `kev.matches`. `cve_unpatched` keeps `vulnerabilities`.
 - `closure_source.type` is `yarn-project-lockfile` when the closure came from the current directory's Yarn project (root `resolutions` + `yarn.lock`) instead of a fresh published-package probe; it then also carries `context_hash`, `project_root`, `manifest_path`, `lockfile_path`, `input_sha256`, and `input_files`. A `project_resolution_status` field (e.g. `project-closure-unavailable`, `project-context-invalid`) plus `approval_scope: "deny-only"` means a Yarn project context was detected but the requested package could not be verified in it — the check stays fail-closed even on a clean published closure.
 - `closure_source.type` is `npm-overrides-probe` when the published-package probe applied the consuming repo's npm `overrides`. It then also carries `context_hash`, `project_root`, `overrides_source` (the manifest path, or `env`), `overrides_sha256`, and the `overrides` themselves. Applying overrides makes the closure project-specific, so the approval is keyed to that override set: a repo with different overrides, or none, does not inherit it. Only concrete pins are honored; `$`-references are dropped. Overrides cannot mask a vulnerability — the probe resolves each one to a concrete version and OSV is queried for that version.
