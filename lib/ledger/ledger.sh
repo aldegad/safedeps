@@ -9,8 +9,12 @@ SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR:-${SAFEDEPS_HOME}/approved-specs}"
 SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS="${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-30}"
 
 # The project_context kinds and the materialization record the predicate checks.
+# A file sourced by a bare name has no slash for %/* to cut.
+safedeps_lib_dir="${BASH_SOURCE[0]%/*}"
+[[ "${safedeps_lib_dir}" != "${BASH_SOURCE[0]}" ]] || safedeps_lib_dir=.
 # shellcheck source=./context-kinds.sh
-source "${BASH_SOURCE[0]%/*}/context-kinds.sh"
+source "${safedeps_lib_dir}/context-kinds.sh"
+unset safedeps_lib_dir
 
 safedeps_ledger_init() {
   umask 077

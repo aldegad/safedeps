@@ -4,8 +4,12 @@
 set -euo pipefail
 
 # The closure source types, the context kinds and the materialization.
+# A file sourced by a bare name has no slash for %/* to cut.
+safedeps_lib_dir="${BASH_SOURCE[0]%/*}"
+[[ "${safedeps_lib_dir}" != "${BASH_SOURCE[0]}" ]] || safedeps_lib_dir=.
 # shellcheck source=../ledger/context-kinds.sh
-source "${BASH_SOURCE[0]%/*}/../ledger/context-kinds.sh"
+source "${safedeps_lib_dir}/../ledger/context-kinds.sh"
+unset safedeps_lib_dir
 
 # A closure source that cannot vouch for an approval says why and is
 # deny-only: written by safedeps_npm_write_source, read by
