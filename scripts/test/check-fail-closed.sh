@@ -390,6 +390,27 @@ kev_stale_answers() {
   grep -q 'WARN CISA KEV refresh failed; using stale local catalog status=' "${home}/advisory.log" \
     || no "advisory.log does not say the catalog is stale"
 }
+# The catalog read is a copy, and the copy keeps the file's time: what an approval
+# records about the catalog is what the file was.
+kev_status_recorded() {
+  local ecosystem="$1" field="$2" age="$3" want="$4" entry
+  fresh_home
+  plant_kev "${kev_catalog}" "${age}"
+  check_in "${ecosystem}" fixture-clean@1.0.0 "${kev_down[@]}"
+  passed_clean
+  entry=$(find "${home}/approved-specs" -name '*.json' -type f)
+  [[ "$(jq -r "${field}" "${entry}")" == "${want}" ]] || no "the entry says $(jq -r "${field}" "${entry}")"
+}
+# A catalog that holds no answer and that this user cannot write still gives way:
+# the copy of it is the run's own, and a second copy takes its place.
+kev_read_only_no_answer() {
+  fresh_home
+  plant_kev '{"vulnerabilities":[]}'
+  chmod 400 "$(kev_file)"
+  check_in "$1" fixture-clean@1.0.0
+  passed_clean
+  kev_replaced
+}
 kev_is_a_directory() {
   fresh_home
   mkdir -p "$(kev_file)"
@@ -404,6 +425,12 @@ for ecosystem in npm pypi; do
   row "${ecosystem}: a listing in a stale KEV catalog counts with CISA down" kev_stale_answers "${ecosystem}" fixture-kev@1.0.0 hard_blocked
   row "${ecosystem}: a directory where the KEV catalog goes approves nothing" kev_is_a_directory "${ecosystem}"
 done
+row "npm: a read-only file that holds no catalog is replaced" kev_read_only_no_answer npm
+row "pypi: a read-only file that holds no catalog is replaced" kev_read_only_no_answer pypi
+row "npm: an approval from a stale KEV catalog says it was stale" kev_status_recorded npm '.evidence.provider.results[0].kev.status' stale stale
+row "npm: an approval from a fresh KEV catalog says it was ok" kev_status_recorded npm '.evidence.provider.results[0].kev.status' fresh ok
+row "pypi: an approval from a stale KEV catalog says it was stale" kev_status_recorded pypi '.evidence.kev.status' stale stale
+row "pypi: an approval from a fresh KEV catalog says it was ok" kev_status_recorded pypi '.evidence.kev.status' fresh ok
 
 # A download that returned something other than a catalog is a failed download,
 # by the rule that reads the file: what is stored and what is read are one thing.
@@ -837,12 +864,19 @@ row "the ledger listing and check read an unpadded expires_at the way the core d
 # An entry is judged whole from the one read the predicate passed. Replaced at any
 # point after that, the answer is still that entry's. An empty file behind a
 # passed check once came out as approved with no spec.
+ledger_body() {
+  case "$1" in
+    other) jq -c '.package = "fixture-other"' <<< "${entry}" ;;
+    scoped) jq -c '.project_context = {context_hash: "sha256:other"}' <<< "${entry}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 ledger_swapped() {
   local after="$1" body="$2" entry file answer
   fresh_home
   entry=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0)
   file=$(find "${home}/approved-specs" -name '*.json' -type f)
-  [[ "${body}" != other ]] || body=$(jq -c '.package = "fixture-other"' <<< "${entry}")
+  body=$(ledger_body "${body}")
   rc=0
   answer=$(env SAFEDEPS_HOME="${home}" PATH="${swap_bin}:${PATH}" SWAP_AFTER="${after}" SWAP_FILE="${file}" SWAP_BODY="${body}" \
     bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_check pypi fixture-clean 1.0.0' 2>/dev/null) || rc=$?
@@ -855,12 +889,26 @@ ledger_read_swapped() {
   fresh_home
   entry=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0)
   file=$(find "${home}/approved-specs" -name '*.json' -type f)
-  [[ "${body}" != other ]] || body=$(jq -c '.package = "fixture-other"' <<< "${entry}")
+  body=$(ledger_body "${body}")
   rc=0
   answer=$(env SAFEDEPS_HOME="${home}" PATH="${swap_bin}:${PATH}" SWAP_AFTER='(.[0] | ledger_is_valid)' SWAP_FILE="${file}" SWAP_BODY="${body}" \
     bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_read pypi fixture-clean 1.0.0' 2>/dev/null) || rc=$?
   [[ "${rc}" == 0 ]] || no "exit ${rc}: ${answer}"
   jq -e --argjson entry "${entry}" '. == $entry' <<< "${answer}" >/dev/null || no "the answer: ${answer}"
+  swap_fired "${file}" "${body}"
+}
+ledger_expired_swapped() {
+  local body="$1" entry file answer
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  file=$(find "${home}/approved-specs" -name '*.json' -type f)
+  entry=$(jq -c '.expires_at = "2020-01-01T00:00:00Z"' "${file}")
+  printf '%s\n' "${entry}" > "${file}"
+  rc=0
+  answer=$(env SAFEDEPS_HOME="${home}" PATH="${swap_bin}:${PATH}" SWAP_AFTER='--argjson now_epoch' SWAP_FILE="${file}" SWAP_BODY="${body}" \
+    bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_check pypi fixture-clean 1.0.0' 2>/dev/null) || rc=$?
+  [[ "${rc}" == 1 ]] || no "exit ${rc}: ${answer}"
+  jq -e --argjson entry "${entry}" '.approved == false and .reason == "expired" and .spec == $entry' <<< "${answer}" >/dev/null || no "the answer: ${answer}"
   swap_fired "${file}" "${body}"
 }
 ledger_hit_swapped() {
@@ -874,13 +922,14 @@ ledger_hit_swapped() {
   jq -e '.result == "already_approved" and (.expires_at | test("^[0-9]{4}-"))' <<< "${json}" >/dev/null || no "the report: ${json}"
   swap_fired "${file}" "${body}"
 }
-for body in '' 'null' '{}' other; do
+for body in '' 'null' '{}' other scoped; do
   row "a ledger entry replaced by '${body}' after the predicate read it answers as that entry" ledger_swapped '(.[0] | ledger_is_valid)' "${body}"
   row "a ledger entry replaced by '${body}' after its hash read answers as that entry" ledger_swapped '-r .hash' "${body}"
   row "a ledger entry replaced by '${body}' after its expiry read answers as that entry" ledger_swapped '--argjson now_epoch' "${body}"
   row "a ledger read replaced by '${body}' after the predicate read it prints that entry" ledger_read_swapped "${body}"
 done
 for body in '' 'null' '{}'; do
+  row "an expired ledger entry replaced by '${body}' before its answer is that entry's answer" ledger_expired_swapped "${body}"
   row "non-npm: a ledger hit replaced by '${body}' before its report is that entry's report" ledger_hit_swapped "${body}"
 done
 
@@ -896,7 +945,7 @@ done
 # catch has a row that calls its function.
 after_bin="${tmp_root}/after-bin"
 mkdir -p "${after_bin}"
-for tool in jq date shasum sha256sum cat cut dirname mv find awk; do
+for tool in jq date shasum sha256sum cat cut dirname mv cp find awk; do
   real=$(command -v "${tool}") || continue
   cat > "${after_bin}/${tool}" <<STUB
 #!/usr/bin/env bash
@@ -1058,6 +1107,15 @@ row "npm: the count of OSV batch results is read or the batch fails" fails_as un
 row "npm: the cache path of an OSV batch miss is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '-r .cache_path'
 row "npm: a curl that printed 200 and failed is not an OSV batch answer" fails_as unavailable npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/querybatch
 row "non-npm: a curl that printed 200 and failed is not an OSV answer" fails_as unavailable pypi fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/query
+# The one read of a catalog is its copy, and the copy answers by its exit status.
+kev_copy_failed() {
+  fresh_home
+  plant_kev "${kev_catalog}"
+  check_in "$1" fixture-clean@1.0.0 "${kev_down[@]}" PATH="${after_path}" STUB_MATCH=known_exploited_vulnerabilities STUB_TOOL_ONLY=cp
+  unavailable
+}
+row "npm: a catalog cp copied and failed on is no catalog" kev_copy_failed npm
+row "non-npm: a catalog cp copied and failed on is no catalog" kev_copy_failed pypi
 row "npm: a curl that printed 200 and failed is not a KEV catalog" fails_as unavailable npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/kev.json
 row "non-npm: a curl that printed 200 and failed is not a KEV catalog" fails_as unavailable pypi fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/kev.json
 curl_failure_recorded() {
@@ -1357,6 +1415,7 @@ row "a Yarn input list jq wrote and failed on is no context" yarn_context_failed
 row "a deny-only mark that does not read is no permission" fails_as refused npm fixture-clean@1.0.0 'source_approval_scope // ""'
 row "a patch candidate whose deny-only mark does not read is no patch" fails_as candidate_withheld npm fixture-vuln@1.0.0 'source_approval_scope // ""'
 row "overrides jq printed and failed on are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 '.overrides | type'
+row "a manifest jq printed and failed on is not a project with none" overrides_refused refused npm fixture-clean@1.0.0 $'-c . /\n/package.json'
 row "overrides whose filter jq printed and failed on are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 'to_entries'
 row "overrides whose filter jq failed on before printing are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 'to_entries' STUB_BEFORE=1
 row "an overrides context jq printed and failed on is not the global key" overrides_refused refused npm fixture-clean@1.0.0 'overrides_sha256: $overrides_sha256'
@@ -1391,27 +1450,31 @@ row "overrides with no context find no entry under the global key" overrides_loo
 # manifest replaced between the two read as a project with none, and the entry
 # the global key finds was approved for no overrides at all.
 overrides_swapped() {
-  local body="$1" answer
+  local after="$1" body="$2" answer
   overrides_project
+  [[ "${after}" != manifest ]] || after="-c . ${project}/package.json"
   rc=0
-  answer=$(cd "${project}" && env PATH="${swap_bin}:${PATH}" SWAP_AFTER='.overrides | type' SWAP_FILE="${project}/package.json" SWAP_BODY="${body}" \
+  answer=$(cd "${project}" && env PATH="${swap_bin}:${PATH}" SWAP_AFTER="${after}" SWAP_FILE="${project}/package.json" SWAP_BODY="${body}" \
     bash -c 'source "$1/lib/npm/closure.sh"; safedeps_npm_repo_overrides_json' overrides "${ROOT_DIR}" 2>/dev/null) || rc=$?
   [[ "${rc}" == 0 && "${answer}" == '{"fixture-child":"1.0.0"}' ]] || no "exit ${rc}: ${answer}"
   swap_fired "${project}/package.json" "${body}"
 }
 overrides_lookup_swapped() {
-  local body="$1"
+  local after="$1" body="$2"
   project_dir
   in_project npm fixture-clean@1.0.0 'a call no row fails'
   [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
   printf '{"name":"p","version":"0.0.0","overrides":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
-  project_check npm fixture-clean@1.0.0 'a call no row fails' PATH="${swap_bin}:${after_path}" SWAP_AFTER='.overrides | type' SWAP_FILE="${project}/package.json" SWAP_BODY="${body}"
+  [[ "${after}" != manifest ]] || after="-c . ${project}/package.json"
+  project_check npm fixture-clean@1.0.0 'a call no row fails' PATH="${swap_bin}:${after_path}" SWAP_AFTER="${after}" SWAP_FILE="${project}/package.json" SWAP_BODY="${body}"
   jq -e '.result != "already_approved"' <<< "${json}" >/dev/null || no "the global entry answered: ${json}"
   swap_fired "${project}/package.json" "${body}"
 }
 for body in '' 'null' '{}'; do
-  row "overrides replaced by '${body}' after the read that found them are still those overrides" overrides_swapped "${body}"
-  row "overrides replaced by '${body}' after the read that found them find no entry under the global key" overrides_lookup_swapped "${body}"
+  row "overrides replaced by '${body}' after the read that found them are still those overrides" overrides_swapped '.overrides | type' "${body}"
+  row "overrides replaced by '${body}' after the read that found them find no entry under the global key" overrides_lookup_swapped '.overrides | type' "${body}"
+  row "overrides replaced by '${body}' after the manifest read are still those overrides" overrides_swapped manifest "${body}"
+  row "overrides replaced by '${body}' after the manifest read find no entry under the global key" overrides_lookup_swapped manifest "${body}"
 done
 overrides_context_rc() {
   local want="$1" source="$2"
