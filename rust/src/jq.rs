@@ -284,10 +284,13 @@ pub fn system_message(message: &[u8]) -> String {
 
 /// The runtimes read these bytes, so the event name and the key order are
 /// part of the answer, and a reason that is not UTF-8 is written as `--arg`
-/// writes it (jq 1.7.1, measured): jq reads a cut sequence as one U+FFFD
-/// where Rust's lossy decoder writes one per byte, reads an overlong one as
-/// one, takes the byte after a sequence cut at the end into it, and writes
-/// one per stray byte. No line of a source file outside this one and the
+/// writes it (jq 1.7.1, measured). jq reads a lead byte's whole length where
+/// it can: a sequence whose own prefix is invalid (`\xe0\x80`) is one U+FFFD
+/// where Rust's lossy decoder writes two, an overlong, surrogate or
+/// out-of-range sequence is one, and a lead byte with fewer bytes left than
+/// its length takes all of them. A byte that cannot lead (a continuation,
+/// 0xc0, 0xc1, 0xf5 and up) is one each. The inputs below hold each of these
+/// rules and each bound of the lead table and of the overlong floor. No line of a source file outside this one and the
 /// `*_tests.rs` files, `//` comment lines aside, spells an answer's keys, in
 /// any quoting.
 #[cfg(test)]
@@ -303,6 +306,10 @@ fn hook_answers_are_pinned() {
     assert_eq!(deny(b"a\xe0\x80\x80b".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}b\"}}");
     assert_eq!(deny(b"a\xe0\x80".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}\"}}");
     assert_eq!(system_message(b"x\xf0A"), "{\"systemMessage\":\"x\u{fffd}\"}");
+    for (bytes, out) in [(b"a\xc0\x80b".as_slice(), "a\u{fffd}\u{fffd}b"), (b"a\xf5\x80\x80\x80b", "a\u{fffd}\u{fffd}\u{fffd}\u{fffd}b"),
+                         (b"a\xe0\x9f\xbfb", "a\u{fffd}b"), (b"a\xf0\x8f\xbf\xbfb", "a\u{fffd}b"), (b"a\xf4\x90\x80\x80b", "a\u{fffd}b")] {
+        assert_eq!(system_message(bytes), format!("{{\"systemMessage\":\"{out}\"}}"));
+    }
     assert_eq!(allow_rewrite(b"a\xff\xffb"), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"a\u{fffd}\u{fffd}b\"}}}");
     fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(dir).unwrap() {
