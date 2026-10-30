@@ -21,11 +21,11 @@
 //! built to hide one is out of reach of a reading of the text, line by
 //! line: a name or word built at run time (`eval`, `${!x}`, `declare -n`, a
 //! word split across quotes or pieced together), a pattern that matches a
-//! word without spelling it, a line joined to the next by a backslash, a
-//! line of a heredoc body or of a multi-line quoted text read as a line of
-//! its own, and a command prefix this reading does not know in front of
-//! `source`. Reading the files with the core's lexer would close the
-//! quoting part of that list; these readings do not.
+//! word without spelling it, a line joined to the next by a backslash, and
+//! a line of a heredoc body or of a multi-line quoted text read as a line of
+//! its own. Reading the files with the core's lexer would close the quoting
+//! part of that list for the names and the prose too; today it reads only
+//! what the files source (`sourcings`).
 
 /// The CLI and every file it sources: the files these tests read.
 /// `cli_files_are_what_the_cli_sources` closes the set.
@@ -223,233 +223,101 @@ fn unquoted(code: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The shell's operators, longest first: the control and redirection
-/// operators of bash(1) and the three that open a command inside a word.
-const OPERATORS: [&str; 26] = [";;&", "<<<", "<<-", "&>>", ";;", ";&", "||", "&&", "|&", "<<", ">>", "<&", ">&", "<>", ">|", "&>",
-    "<(", ">(", "$(", "|", "&", ";", "(", ")", "<", ">"];
+/// The commands that take `source` or `.` as data among their arguments: jq,
+/// and the report assembler, which hands its arguments to jq.
+const SOURCE_AS_DATA: [&str; 2] = ["jq", "sf_check_json"];
 
-/// The words and operators of a line whose quoted text is masked, split as
-/// the shell splits them: at blanks and at its operators, longest first. A
-/// backslash keeps the next byte in the word, `${...}` and `$((...))` stay in
-/// theirs, and digits right before a redirection are part of it.
-fn shell_tokens(masked: &[u8]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut i = 0;
-    let closing = |from: usize, open: u8, close: u8| {
-        let mut depth = 0;
-        (from..masked.len()).find(|&j| { if masked[j] == open { depth += 1 } else if masked[j] == close { depth -= 1 } depth == 0 }).map_or(masked.len(), |j| j + 1)
-    };
-    while i < masked.len() {
-        let c = masked[i];
-        let rest = &masked[i..];
-        if c == b'\\' {
-            cur.extend(rest.iter().take(2).map(|&b| b as char));
-            i += 2;
-        } else if c == b' ' || c == b'\t' {
-            if !cur.is_empty() { out.push(std::mem::take(&mut cur)) }
-            i += 1;
-        } else if rest.starts_with(b"${") || rest.starts_with(b"$((") {
-            let end = if rest[1] == b'{' { closing(i + 1, b'{', b'}') } else { closing(i + 1, b'(', b')') };
-            cur.extend(masked[i..end].iter().map(|&b| b as char));
-            i = end;
-        } else if c == b'`' {
-            if !cur.is_empty() { out.push(std::mem::take(&mut cur)) }
-            out.push("`".into());
-            i += 1;
-        } else if let Some(op) = OPERATORS.iter().find(|op| rest.starts_with(op.as_bytes())) {
-            let io = op.starts_with(['<', '>']) && !op.ends_with('(') && !cur.is_empty() && cur.bytes().all(|d| d.is_ascii_digit());
-            if io { let n = std::mem::take(&mut cur); out.push(n + op) } else {
-                if !cur.is_empty() { out.push(std::mem::take(&mut cur)) }
-                out.push(op.to_string());
+/// One statement that sources a file, as the core's lexer reads the text:
+/// where it stands in the text when it is in the text itself, and its words
+/// with the quoting removed.
+#[cfg(test)]
+struct Sourcing {
+    at: Option<(usize, usize)>,
+    words: Vec<String>,
+}
+
+/// Every statement of `text` that sources a file or could, read by the
+/// core's lexer the way bash reads it (`lex::Lex`): the pieces view of the
+/// text, then the same of each text it hands on (the scripts of `sh -c`,
+/// `eval` and `env -S`, and the bodies of its substitutions), to every depth.
+/// A statement counts when its command word, the prefixes the lexer strips
+/// set aside, is `source` or `.`, and when any other of its words is, unless
+/// the command takes them as data (`SOURCE_AS_DATA`). A text the lexer
+/// cannot read to its end, a quote or a construct left open or an escape it
+/// cannot name, is an error, never a text that sources nothing. Bash is the
+/// reading, since the files are bash scripts. A text the shell runs later
+/// that the lexer does not hand on, such as a `trap` action or an alias, is
+/// out of reach, as a word built at run time is.
+#[cfg(test)]
+fn sourcings(text: &[u8]) -> Result<Vec<Sourcing>, String> {
+    use crate::lex::{Lex, Reading};
+    let core = crate::core::Core::new();
+    let mut out = Vec::new();
+    let mut texts = vec![(text.to_vec(), true)];
+    while let Some((text, own)) = texts.pop() {
+        let (pieces, side) = Lex::new(&core.g, &text, "pieces", Reading::Bash).run_pieces()
+            .map_err(|_| "the lexer has no pieces view".to_string())?;
+        if side.unterm || side.smfail || pieces.unreadable {
+            return Err(format!("the lexer cannot read to the end: {}", String::from_utf8_lossy(&text)));
+        }
+        for piece in pieces.pieces {
+            let words: Vec<String> = piece.words.iter().map(|w| String::from_utf8_lossy(&w.value).into_owned()).collect();
+            let named = |w: &String| w == "source" || w == ".";
+            let data = words.first().is_some_and(|w| SOURCE_AS_DATA.contains(&w.as_str()));
+            if words.first().is_some_and(named) || (!data && words.iter().any(named)) {
+                out.push(Sourcing { at: own.then_some((piece.start, piece.end)), words });
             }
-            i += op.len();
-        } else {
-            cur.push(c as char);
-            i += 1;
+        }
+        for view in ["cscripts", "substs"] {
+            let (payloads, side) = Lex::new(&core.g, &text, view, Reading::Bash).run_payloads()
+                .map_err(|_| format!("the lexer has no {view} view"))?;
+            if side.smfail { return Err(format!("the lexer cannot read the {view} of: {}", String::from_utf8_lossy(&text))) }
+            texts.extend(payloads.into_iter().map(|p| (p.text, false)));
         }
     }
-    if !cur.is_empty() { out.push(cur) }
-    out
+    Ok(out)
 }
 
-/// The line with what its quoted strings hold masked, read the way the shell
-/// quotes: a backslash outside single quotes keeps the next byte, `$'...'`
-/// reads backslashes, and a command substitution or a backquoted text inside
-/// double quotes is code again, so it is masked only where it quotes. The
-/// quote marks stay. A quote the line leaves open is not masked, so what
-/// follows it is read as code.
-fn mask_quotes(code: &[u8]) -> Vec<u8> {
-    let mut out = code.to_vec();
-    let mut i = 0;
-    while i < code.len() {
-        match code[i] {
-            b'\\' => i += 2,
-            b'\'' => match single_end(code, i) {
-                Some(j) => { out[i + 1..j].fill(b'x'); i = j + 1 }
-                None => i += 1,
-            },
-            b'"' => match double_end(code, i + 1) {
-                Some((j, spans)) => {
-                    out[i + 1..j].fill(b'x');
-                    for (s, e) in spans { out[s..e].copy_from_slice(&mask_quotes(&code[s..e])) }
-                    i = j + 1;
-                }
-                None => i += 1,
-            },
-            _ => i += 1,
-        }
-    }
-    out
-}
-
-/// Where the single-quoted text opened at `at` closes; `$'...'` reads a
-/// backslash as keeping the next byte.
-fn single_end(code: &[u8], at: usize) -> Option<usize> {
-    let ansi = at > 0 && code[at - 1] == b'$';
-    let mut j = at + 1;
-    while j < code.len() && code[j] != b'\'' { j += if ansi && code[j] == b'\\' { 2 } else { 1 } }
-    (j < code.len()).then_some(j)
-}
-
-/// Where the double-quoted text that starts at `from` closes, and the spans
-/// in it that are code: each `$(...)` and each backquoted text.
-fn double_end(code: &[u8], from: usize) -> Option<(usize, Vec<(usize, usize)>)> {
-    let mut spans = Vec::new();
-    let mut j = from;
-    while j < code.len() {
-        match code[j] {
-            b'\\' => j += 2,
-            b'"' => return Some((j, spans)),
-            b'$' if code[j + 1..].starts_with(b"(") && !code[j + 1..].starts_with(b"((") => {
-                let e = substitution_end(code, j + 2)?;
-                spans.push((j, e + 1));
-                j = e + 1;
-            }
-            b'`' => {
-                let e = (j + 1..code.len()).find(|&k| code[k] == b'`' && code[k - 1] != b'\\')?;
-                spans.push((j, e + 1));
-                j = e + 1;
-            }
-            _ => j += 1,
-        }
-    }
-    None
-}
-
-/// Where the command substitution whose text starts at `from` closes.
-fn substitution_end(code: &[u8], from: usize) -> Option<usize> {
-    let mut depth = 0;
-    let mut j = from;
-    while j < code.len() {
-        match code[j] {
-            b'\\' => j += 2,
-            b'\'' => j = single_end(code, j)? + 1,
-            b'"' => j = double_end(code, j + 1)?.0 + 1,
-            b'(' => { depth += 1; j += 1 }
-            b')' if depth == 0 => return Some(j),
-            b')' => { depth -= 1; j += 1 }
-            _ => j += 1,
-        }
-    }
-    None
-}
-
-/// How many commands of this line source a file: `source`, or `.` followed by
-/// a word that can be a path, where a command begins. A command begins at the
-/// line's start, after a control operator, `(`, `$(`, `<(`, `>(` or a
-/// backquote, after a reserved word a command follows, after `builtin` or
-/// `command` and the options they take, and after an assignment
-/// (`NAME=`, `NAME+=`, `NAME[...]=`) or a redirection with its word that
-/// begins one. A command substitution counts wherever it stands. A `.`
-/// before an operator or a word jq reserves is jq's, the way a line inside a
-/// multi-line jq program reads.
-fn source_commands(code: &str) -> usize {
-    // What a quoted string holds is no command word; the quotes stay, so a
-    // quoted path still follows its `.`.
-    let masked = mask_quotes(code.as_bytes());
-    // The commands a `$(...)` or a backquoted text runs, wherever it stands,
-    // quotes included: the mask hides them in a double-quoted string.
-    let b = code.as_bytes();
-    let mut inner = 0;
-    let mut at = 0;
-    while at < b.len() {
-        if b[at..].starts_with(b"$(") && !b[at..].starts_with(b"$((") {
-            let mut depth = 0;
-            let end = (at + 1..b.len()).find(|&j| { if b[j] == b'(' { depth += 1 } else if b[j] == b')' { depth -= 1 } depth == 0 }).unwrap_or(b.len());
-            inner += source_commands(&code[at + 2..end.min(b.len())]);
-            at = end + 1;
-        } else if b[at] == b'`' {
-            let end = (at + 1..b.len()).find(|&j| b[j] == b'`').unwrap_or(b.len());
-            inner += source_commands(&code[at + 1..end]);
-            at = end + 1;
-        } else {
-            at += 1;
-        }
-    }
-    let tokens = shell_tokens(&masked);
-    const JQ: [&str; 16] = ["as", "and", "or", "if", "then", "elif", "else", "end", "reduce", "foreach", "def", "try", "catch", "label", "import", "include"];
-    let path = |w: &str| w == "--" || w == "<(" || (w.starts_with(|c: char| c.is_ascii_alphanumeric() || "\"'$/~._".contains(c)) && !JQ.contains(&w));
-    let redirection = |w: &str| ["<<<", "<<-", "&>>", "<<", ">>", "<&", ">&", "<>", ">|", "&>", "<", ">"].contains(&w.trim_start_matches(|c: char| c.is_ascii_digit()));
-    let control = |w: &str| [";;&", ";;", ";&", "||", "&&", "|&", "|", "&", ";", "(", ")", "$(", "<(", ">(", "`"].contains(&w);
-    let assignment = |w: &str| w.split_once('=').is_some_and(|(n, _)| {
-        let n = n.strip_suffix('+').unwrap_or(n);
-        let n = n.strip_suffix(']').and_then(|n| n.split_once('[')).map_or(n, |(n, _)| n);
-        !n.is_empty() && n.bytes().all(word) && !n.as_bytes()[0].is_ascii_digit()
-    });
-    let mut command = true;
-    let mut target = false;
-    let mut options = false;
-    let mut found = 0;
-    for (i, w) in tokens.iter().map(String::as_str).enumerate() {
-        if target { target = false; continue }
-        if redirection(w) { target = true; continue }
-        if options && w.starts_with('-') { continue }
-        if command && (w == "source" || (w == "." && tokens.get(i + 1).is_some_and(|next| path(next)))) { found += 1 }
-        options = command && ["builtin", "command", "time"].contains(&w);
-        command = control(w) || ["then", "do", "else", "elif", "if", "while", "until", "time", "builtin", "command", "{", "!"].contains(&w)
-            || (command && assignment(w));
-    }
-    found + inner
-}
-
-/// The repo path a line of `file` sources, None when it sources nothing, and
-/// Some(None) when it sources something this reading cannot place: a target
-/// with a prefix it does not know, or a source command that is not the whole
-/// line `source "TARGET"` or `. "TARGET"`.
-fn sourced(file: &str, line: &str) -> Option<Option<String>> {
-    let commands = source_commands(line);
-    if commands == 0 { return None }
-    let code = line.trim();
-    let target = code.strip_prefix("source \"").or_else(|| code.strip_prefix(". \"")).and_then(|t| t.strip_suffix('"'))
-        .filter(|_| commands == 1);
+/// The repo path a statement of `file` sources, or None when this reading
+/// cannot place it: a statement that is not the whole line `source
+/// "TARGET"` or `. "TARGET"` of the file itself, or a target with a prefix
+/// it does not know.
+#[cfg(test)]
+fn placed(file: &str, text: &str, sourcing: &Sourcing) -> Option<String> {
+    let (start, end) = sourcing.at?;
+    let line = text[..start].rsplit('\n').next().unwrap_or("").to_string() + &text[start..];
+    let line = line.split('\n').next().unwrap_or("").trim();
+    if line != text[start..end].trim() || sourcing.words.len() != 2 { return None }
+    let target = line.strip_prefix("source \"").or_else(|| line.strip_prefix(". \"")).and_then(|t| t.strip_suffix('"'))?;
     let dir = file.rsplit_once('/').map_or("", |(d, _)| d);
-    let path = target.and_then(|t| t.strip_prefix("${SAFEDEPS_REPO_DIR}/").map(str::to_string)
-        .or_else(|| t.strip_prefix("${safedeps_lib_dir}/").or_else(|| t.strip_prefix("${BASH_SOURCE[0]%/*}/")).map(|r| format!("{dir}/{r}")))
-        .or_else(|| t.strip_prefix("$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)/").map(|r| format!("{dir}/../{r}"))));
-    Some(path.and_then(|path| {
-        let mut parts: Vec<&str> = Vec::new();
-        for part in path.split('/') {
-            match part { ".." => { parts.pop()?; } "." | "" => {} part => parts.push(part) }
-        }
-        Some(parts.join("/"))
-    }))
+    let path = target.strip_prefix("${SAFEDEPS_REPO_DIR}/").map(str::to_string)
+        .or_else(|| target.strip_prefix("${safedeps_lib_dir}/").or_else(|| target.strip_prefix("${BASH_SOURCE[0]%/*}/")).map(|r| format!("{dir}/{r}")))
+        .or_else(|| target.strip_prefix("$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)/").map(|r| format!("{dir}/../{r}")))?;
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part { ".." => { parts.pop()?; } "." | "" => {} part => parts.push(part) }
+    }
+    Some(parts.join("/"))
+}
+
+/// What a text sources, each statement placed or not, for the cases below.
+#[cfg(test)]
+fn sources_of(file: &str, text: &str) -> Result<Vec<Option<String>>, String> {
+    Ok(sourcings(text.as_bytes())?.iter().map(|s| placed(file, text, s)).collect())
 }
 
 #[test]
 fn cli_files_are_what_the_cli_sources() {
     let mut read = 0;
     for (file, text) in CLI_FILES {
-        for (line, _) in code(text) {
-            let Some(target) = sourced(file, line) else { continue };
+        for sourcing in sourcings(text.as_bytes()).unwrap_or_else(|e| panic!("{file}: {e}")) {
             read += 1;
-            let target = target.unwrap_or_else(|| panic!("{file} sources a path this test cannot place: {line}"));
+            let target = placed(file, text, &sourcing).unwrap_or_else(|| panic!("{file} sources a path this test cannot place: {:?}", sourcing.words));
             assert!(CLI_FILES.iter().any(|(other, _)| *other == target), "{file} sources {target}, which these tests read too");
             // A file that names its own directory safedeps_lib_dir sets it
             // to that directory and to nothing else, on the lines right
-            // before this one, and nothing before them can skip them: only
-            // blank lines, `set -euo pipefail` and plain assignments come
-            // first.
+            // before this one, and nothing before them can skip them.
+            let line = text[sourcing.at.unwrap().0..].split('\n').next().unwrap();
             if line.contains("${safedeps_lib_dir}/") {
                 let set = ["safedeps_lib_dir=\"${BASH_SOURCE[0]%/*}\"", "[[ \"${safedeps_lib_dir}\" != \"${BASH_SOURCE[0]}\" ]] || safedeps_lib_dir=."];
                 assert_eq!(bare_uses(text, "safedeps_lib_dir"), [set[0], set[1], "unset safedeps_lib_dir"], "{file} sets safedeps_lib_dir to its own directory");
@@ -461,7 +329,7 @@ fn cli_files_are_what_the_cli_sources() {
         }
     }
     assert_eq!(read, 9, "the CLI's source lines");
-    assert_eq!(sourced("lib/x/a.sh", ". \"${BASH_SOURCE[0]%/*}/../b.sh\""), Some(Some("lib/b.sh".into())));
+    assert_eq!(sources_of("lib/x/a.sh", ". \"${BASH_SOURCE[0]%/*}/../b.sh\"\n"), Ok(vec![Some("lib/b.sh".into())]));
     for unplaced in ["source \"${HOME}/b.sh\"", "source b.sh", ". ./b.sh", "[[ -r x ]] && source \"${SAFEDEPS_REPO_DIR}/b.sh\"",
                      "builtin source \"${SAFEDEPS_REPO_DIR}/b.sh\"", "source\t\"${SAFEDEPS_REPO_DIR}/b.sh\"", "if source \"x\"; then :; fi",
                      "x=1 . \"${SAFEDEPS_REPO_DIR}/b.sh\"", "a; source \"${SAFEDEPS_REPO_DIR}/b.sh\"", "2>/dev/null source \"x\"",
@@ -469,13 +337,19 @@ fn cli_files_are_what_the_cli_sources() {
                      ">&2 source \"x\"", "2>&1 . \"x\"", ". <(cat x)", "x=\"$(source x; echo 1)\"", "y=`. ./b.sh`", "if ! source x; then :; fi",
                      "<&0 source \"x\"", ">&- source \"x\"", ">|/dev/null source \"x\"", "echo \\\" >/dev/null; source \"x\"",
                      "printf $'it\\'s\\n' >/dev/null; source \"x\"", "x=\"$(printf '%s\"' a)\"; source \"x\"", "x=\\' source \"x\"",
-                     "x+=1 source \"x\"", "a[0]=1 source \"x\"", "builtin -- source \"x\"", "command -p source \"x\""] {
-        assert_eq!(sourced("lib/x/a.sh", unplaced), Some(None), "{unplaced}");
+                     "x+=1 source \"x\"", "a[0]=1 source \"x\"", "builtin -- source \"x\"", "command -p source \"x\"",
+                     "x=\"$(pwd)\" source \"x\"", "PATH=$(pwd)/bin:$PATH source \"x\"", ">\"$(mktemp)\" source \"x\"", "x=`pwd`y source x",
+                     "inner=${json#{}; source \"x\"", "x=$((source \"x\") )", "x=`echo \\`source \"x\"\\``", "echo $$'a\\'; source \"x\"; echo 'b'",
+                     "echo \\$'a\\'; source x; echo 'b'", "\"source\" \"x\"", "'source' x", "\\source x", "so\"\"urce x", "eval 'source x'",
+                     "bash -c 'source x'", "echo \"$(source x)\"", "cat <<EOF\n$(source x)\nEOF", "f() { source \"x\"; }",
+                     "case $a in b) source x ;; esac", "while read -r l; do . \"$l\"; done < f", "exec source x", "coproc source x"] {
+        let read = sources_of("lib/x/a.sh", unplaced);
+        assert!(read.as_ref().map_or(true, |r| r.contains(&None)), "{unplaced}: {read:?}");
     }
-    for none in ["      . + {type: $type}", "jq -r . \"$f\"", "--slurpfile source \"$f\"", "x=. y", "safedeps_lib_dir=.",
-                 "| jq -r 'if type==\"array\" then .[-1] elif type==\"string\" then . else empty end'", "sf_info \"a; source b\"",
-                 "    | . as $entry", "    | if type == \"object\" then . else {} end"] {
-        assert_eq!(sourced("lib/x/a.sh", none), None, "{none}");
+    for none in ["jq -r . \"$f\"", "jq -n --slurpfile source \"$f\" '.'", "x=. y", "safedeps_lib_dir=.", "sf_info \"a; source b\"",
+                 "x=$(jq -n '\n  . as $entry\n  | if type == \"object\" then . else {} end\n  | . + {type: $type}\n')",
+                 "cat <<'EOF'\nsource x\n. x\nEOF", "| jq -r 'if type==\"array\" then .[-1] elif type==\"string\" then . else empty end'"] {
+        assert_eq!(sources_of("lib/x/a.sh", none), Ok(vec![]), "{none}");
     }
 }
 
@@ -523,29 +397,46 @@ fn check_results_stand_only_in_their_declarations() {
         let uses: Vec<&str> = CLI_FILES.iter().flat_map(|(_, text)| bare_uses(text, name)).collect();
         assert_eq!(uses, [*line], "{name} stands only in its declaration and as a whole read");
         // A value is a word of its own too, so it stands in code only in its
-        // declaration. `clean` is a status word, held where the statuses are,
-        // and `error` also names a report field, so neither is read here.
+        // declaration. `clean` is a status word, held where the statuses
+        // are. `error` is also a word of the CLI's English and the name of a
+        // report field, so for it the reading is narrower: it may not stand
+        // as a value, a whole quoted string (`"error"`, `'error'`) or a word
+        // outside quotes, other than the name an `--arg` gives jq and jq's
+        // `error(...)` on a line of a multi-line jq program. A line whose
+        // quotes this reading cannot blank is read whole.
         let value = line.split_once('=').unwrap().1.trim_matches('"');
-        if ["clean", "error"].contains(&value) { continue }
-        let spelled: Vec<&str> = CLI_FILES.iter().flat_map(|(_, text)| code_lines(text, value, word)).collect();
+        if value == "clean" { continue }
+        let as_value = |scanned: &[u8]| if value != "error" { !stands(scanned, value, word).is_empty() } else {
+            let text = String::from_utf8_lossy(scanned);
+            let outside = unquoted(&text).unwrap_or_else(|| scanned.to_vec());
+            [format!("\"{value}\""), format!("'{value}'")].iter().any(|q| text.contains(q.as_str()))
+                || stands(&outside, value, word).into_iter().any(|at| !outside[..at].ends_with(b"--arg ") && outside.get(at + value.len()) != Some(&b'('))
+        };
+        let spelled: Vec<&str> = CLI_FILES.iter().flat_map(|(_, text)| code(text)
+            .filter(|(_, scanned)| as_value(scanned)).map(|(line, _)| line)).collect();
         assert_eq!(spelled, [*line], "the check result {value} is spelled in code only in its declaration");
     }
 }
 
-/// Whether a line can stand before a file's bootstrap without deciding
-/// whether the bootstrap runs: a blank line, `set -euo pipefail` or an
-/// assignment of a plain double-quoted value to an upper-case name.
+/// Whether a line can stand before a file's bootstrap without changing what
+/// the bootstrap runs: a blank line, `set -euo pipefail` or one assignment
+/// of the CLI's own variable, `SAFEDEPS_NAME="VALUE"`, whose value holds no
+/// quote, blank or operator. A shell variable such as `PATH` or `CDPATH`
+/// may not be set there.
 fn runs_first(line: &str) -> bool {
-    line.is_empty() || line == "set -euo pipefail" || line.split_once("=\"").is_some_and(|(n, v)| n.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-        && v.ends_with('"') && !v.bytes().any(|b| b";&|()`<>".contains(&b)))
+    line.is_empty() || line == "set -euo pipefail" || line.strip_prefix("SAFEDEPS_").and_then(|l| l.split_once("=\""))
+        .is_some_and(|(n, v)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            && v.strip_suffix('"').is_some_and(|v| !v.bytes().any(|b| b"\"' \t;&|()`<>".contains(&b))))
 }
 
-/// The CLI finds its own files from the path it runs from, and from nothing
-/// a caller sets: the names that hold that path are assigned only on these
-/// lines, which derive it from `${BASH_SOURCE[0]}`, and read whole anywhere
-/// else. The lines are one block at the top of `bin/safedeps`, and only
-/// lines that cannot skip it come before it. So every target written under
-/// `${SAFEDEPS_REPO_DIR}/` is a path in the repository.
+/// The CLI finds its own files from the path it runs from: the names that
+/// hold that path are assigned only on these lines, which derive it from
+/// `${BASH_SOURCE[0]}`, and read whole anywhere else. The lines are one
+/// block at the top of `bin/safedeps`, and only lines that cannot change
+/// what it runs come before it. So no line of the CLI files moves
+/// `${SAFEDEPS_REPO_DIR}`. The block runs `cd`, `dirname` and `readlink`,
+/// which the caller's `CDPATH` and `PATH` reach; the bootstrap has worked
+/// that way since it was written, and this test does not hold it.
 #[test]
 fn the_repo_dir_comes_from_the_script() {
     let bootstrap = ["SAFEDEPS_SOURCE=\"${BASH_SOURCE[0]}\"", "while [[ -h \"${SAFEDEPS_SOURCE}\" ]]; do",

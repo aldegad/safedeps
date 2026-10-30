@@ -258,7 +258,7 @@ check_block=$(sed -E 's/(local[[:space:]]+)?block_result="\$\{SAFEDEPS_CHECK_[A-
 # report carries that result. It runs with one set of the other arguments,
 # so an edit that rewrites the result whatever they are is red here, and
 # one that depends on them is not read. A result spelled in such an edit is
-# a value outside its declaration, which the core test holds. A filter a
+# a value outside its declaration, which the core tests hold. A filter a
 # caller puts after the assembler to rewrite the text it prints is not read
 # here either.
 check_assembled=$(
