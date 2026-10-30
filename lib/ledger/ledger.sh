@@ -44,16 +44,6 @@ safedeps_ledger_add_days_iso() {
   fi
 }
 
-safedeps_ledger_epoch() {
-  local timestamp="$1"
-
-  if date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "${timestamp}" +%s >/dev/null 2>&1; then
-    date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "${timestamp}" +%s
-  else
-    date -u -d "${timestamp}" +%s
-  fi
-}
-
 safedeps_ledger_sha256_hex() {
   local input="$1"
 
@@ -171,18 +161,51 @@ def ledger_is_valid:
       )
     ));
 
-# Live = not revoked and not past its TTL. An expires_at that is missing or does
-# not parse counts as expired, which is what the per-file reader has always done
-# (safedeps_ledger_is_expired_file returns "expired" for both).
+# The instant an expires_at names, or null, by the rule of the core, which is
+# what the hooks judge by (ledger::epoch; the two are held to one answer by
+# readers_match_cli). The ISO UTC form the writer writes and nothing near it:
+# fromdateiso8601 and date(1) also take an unpadded date, which the hook reads as
+# expired, so the CLI said already_approved of an entry the hook denied.
+# A field is parsed the way Rust parses an integer, sign included.
+def ledger_epoch:
+    . as $text
+    | def field($from; $to): $text[$from:$to] | ltrimstr("+") | tonumber;
+    if type == "string" and length == 20
+      and test("^([0-9]{4}|[-+][0-9]{3})-([0-9]{2}|[-+][0-9])-([0-9]{2}|[-+][0-9])T([0-9]{2}|[-+][0-9]):([0-9]{2}|[-+][0-9]):([0-9]{2}|[-+][0-9])Z$")
+    then
+      field(0; 4) as $year | field(5; 7) as $month | field(8; 10) as $day
+      | field(11; 13) as $hour | field(14; 16) as $minute | field(17; 19) as $second
+      | if $month < 1 or $month > 12 or $day < 1 or $day > 31 or $hour > 23 or $minute > 59 or $second > 60 then null
+        else
+          ($year - (if $month <= 2 then 1 else 0 end)) as $y
+          | (($y / 400) | floor) as $era
+          | ($y - $era * 400) as $yoe
+          | ($month + (if $month > 2 then -3 else 9 end)) as $mp
+          | ($era * 146097 + $yoe * 365 + (($yoe / 4) | floor) - (($yoe / 100) | floor)
+             + (((153 * $mp + 2) / 5) | floor) + $day - 1 - 719468) * 86400
+            + $hour * 3600 + $minute * 60 + $second
+        end
+    else null end;
+
+# Not past its TTL. An expires_at that is missing or does not parse has no
+# instant, and null sorts below every number, so it counts as expired.
+def ledger_unexpired($now_epoch): (.expires_at | ledger_epoch) > $now_epoch;
+
+# Live = not revoked and not past its TTL.
 def ledger_is_live($now_epoch):
     (.revoked_at // "") == ""
-    and ((try (.expires_at | fromdateiso8601) catch -1) > $now_epoch);
+    and ledger_unexpired($now_epoch);
+
+# The context an approval is keyed to, or "" for one with none. A project_context
+# of false or null is no context, as ledger_is_valid and the core read it.
+def ledger_context_hash:
+    (if (.project_context | type) == "object" then .project_context.context_hash else null end) // "";
 
 # An approval with no project_context answers only context-free questions, and
 # one carrying a context answers only that context.
 def ledger_matches_context($context_hash):
     if $context_hash == "" then (.project_context // null) == null
-    else (.project_context.context_hash // "") == $context_hash
+    else ledger_context_hash == $context_hash
     end;
 
 # Every (ecosystem, package, version) this ledger entry approves: the entry own
@@ -206,25 +229,18 @@ safedeps_ledger_validate_json() {
   local ledger_file="$1"
 
   safedeps_ledger_require_jq || return 1
-  jq -e "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_is_valid" "${ledger_file}" >/dev/null
+  # One value and no more, as the core reads an entry: a file with a second
+  # value is not one the writer wrote, and it is invalid, not a hash mismatch.
+  jq -es "${SAFEDEPS_LEDGER_JQ_PREDICATE} length == 1 and (.[0] | ledger_is_valid)" "${ledger_file}" >/dev/null
 }
 
+# True when an entry is past its TTL. A file that is missing or does not read
+# counts as expired.
 safedeps_ledger_is_expired_file() {
   local ledger_file="$1"
-  local expires_at
-  local expires_epoch
-  local now_epoch
 
   [[ -f "${ledger_file}" ]] || return 0
-  expires_at=$(jq -r '.expires_at // empty' "${ledger_file}" 2>/dev/null || true)
-  [[ -n "${expires_at}" ]] || return 0
-
-  if ! expires_epoch=$(safedeps_ledger_epoch "${expires_at}" 2>/dev/null); then
-    return 0
-  fi
-
-  now_epoch=$(date +%s)
-  [[ "${expires_epoch}" -le "${now_epoch}" ]]
+  ! jq -e --argjson now_epoch "$(date +%s)" "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_unexpired(\$now_epoch)" "${ledger_file}" >/dev/null 2>&1
 }
 
 safedeps_ledger_read() {
@@ -270,7 +286,7 @@ safedeps_ledger_check() {
   fi
 
   local stored_context_hash
-  stored_context_hash=$(jq -r '.project_context.context_hash // ""' "${ledger_file}")
+  stored_context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${ledger_file}")
   if [[ "${stored_context_hash}" != "${context_hash}" ]]; then
     jq -cn --arg hash "${expected_hash}" --arg context_hash "${context_hash}" --arg stored_context_hash "${stored_context_hash}" \
       '{approved: false, reason: "context_mismatch", hash: $hash, context_hash: $context_hash, stored_context_hash: $stored_context_hash}'
@@ -403,7 +419,7 @@ safedeps_ledger_write_approved_spec() {
           package: .package,
           version: (.version | tostring)
         }) | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version))
-      }' | safedeps_ledger_atomic_write "${target_path}"
+      }' | safedeps_ledger_atomic_write "${target_path}" || return 1
   else
     jq -cn \
       --arg hash "${hash}" \
@@ -433,7 +449,7 @@ safedeps_ledger_write_approved_spec() {
           package: .package,
           version: (.version | tostring)
         }) | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version))
-      }' | safedeps_ledger_atomic_write "${target_path}"
+      }' | safedeps_ledger_atomic_write "${target_path}" || return 1
   fi
 
   cat "${target_path}"
@@ -450,11 +466,13 @@ safedeps_ledger_write_approved_spec() {
 # a closure of FOUR packages (scripts/measure/effect-gate-cost.sh). Reading the
 # ledger once turns that into O(closure + ledger).
 #
-# jq stops at the first file it cannot parse, so files are handed over in
-# chunks, and a chunk that fails is retried one file at a time. That keeps a
-# single corrupt ledger entry from emptying the index -- an empty index means
-# every package reads as unapproved, which means a rollback of a clean install.
-# The retry is not a quiet fallback: the file that broke is named on stderr.
+# Files are handed over in chunks, and a chunk that fails is retried one file at
+# a time. That keeps a single corrupt ledger entry from emptying the index -- an
+# empty index means every package reads as unapproved, which means a rollback of
+# a clean install. The retry is not a quiet fallback: the file that broke is
+# named on stderr. The program reads with -n and inputs because then any failure
+# ends the run: without them jq goes on to the next file and exits with the
+# status of the last one, and a bad file inside a chunk kept the rows it printed.
 safedeps_ledger_effect_index() {
   local context_hash="${1:-}"
   local now_epoch
@@ -467,7 +485,8 @@ safedeps_ledger_effect_index() {
   now_epoch=$(date -u +%s)
 
   program="${SAFEDEPS_LEDGER_JQ_PREDICATE}"'
-    select(ledger_is_valid)
+    inputs
+    | select(ledger_is_valid)
     | select(ledger_is_live($now_epoch))
     | select(ledger_matches_context($context_hash))
     | . as $entry
@@ -487,17 +506,20 @@ safedeps_ledger_effect_index() {
     # filesystem's directory order: APFS happened to put the broken file first,
     # ext4 did not, so the duplicates only showed on Linux (measured on
     # ubuntu:24.04: 4 index lines for 2 live specs).
-    if out=$(jq -r --argjson now_epoch "${now_epoch}" --arg context_hash "${context_hash}" \
+    if out=$(jq -rn --argjson now_epoch "${now_epoch}" --arg context_hash "${context_hash}" \
       "${program}" "${files[@]}" 2>/dev/null); then
       [[ -z "${out}" ]] || printf '%s\n' "${out}"
       return 0
     fi
     # One of these did not parse. Take them one at a time so the rest survive,
-    # and say which one broke.
+    # and say which one broke. Held here too: a file with a good value before
+    # the bad one is one unreadable file, and it approves nothing, as in the core.
     local one
     for one in "${files[@]}"; do
-      if ! jq -r --argjson now_epoch "${now_epoch}" --arg context_hash "${context_hash}" \
-        "${program}" "${one}" 2>/dev/null; then
+      if out=$(jq -rn --argjson now_epoch "${now_epoch}" --arg context_hash "${context_hash}" \
+        "${program}" "${one}" 2>/dev/null); then
+        [[ -z "${out}" ]] || printf '%s\n' "${out}"
+      else
         printf 'safedeps ledger: skipping unreadable ledger entry %s\n' "${one}" >&2
       fi
     done

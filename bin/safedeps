@@ -922,9 +922,7 @@ cmd_ledger() {
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
     local merged='[]'
     for f in "${entries[@]+${entries[@]}}"; do
-      local now_iso
-      now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-      merged=$(jq -c --slurpfile spec "${f}" --arg now "${now_iso}" '
+      merged=$(jq -c --slurpfile spec "${f}" --argjson now_epoch "$(date +%s)" "${SAFEDEPS_LEDGER_JQ_PREDICATE}"'
         . + [
           ($spec[0]) as $s |
           {
@@ -936,7 +934,7 @@ cmd_ledger() {
             approved_at: $s.approved_at,
             expires_at: $s.expires_at,
             approved_by: $s.approved_by,
-            expired: ($s.expires_at < $now),
+            expired: ($s | ledger_unexpired($now_epoch) | not),
             revoked: (($s.revoked_at // null) != null)
           }
         ]
@@ -964,13 +962,7 @@ cmd_ledger() {
     revoked_at=$(jq -r '.revoked_at // ""' "${f}")
 
     expired=0
-    if [[ -n "${expires_at}" ]]; then
-      local exp_epoch now_epoch
-      if exp_epoch=$(safedeps_ledger_epoch "${expires_at}" 2>/dev/null); then
-        now_epoch=$(date +%s)
-        [[ "${exp_epoch}" -le "${now_epoch}" ]] && expired=1
-      fi
-    fi
+    safedeps_ledger_is_expired_file "${f}" && expired=1
 
     if [[ -n "${revoked_at}" ]]; then
       state="REVOKED"; state_color="${C_GRAY}"
@@ -1070,7 +1062,7 @@ cmd_revoke() {
   pkg=$(jq -r '.package' "${target_file}")
   version=$(jq -r '.version' "${target_file}")
   local context_hash
-  context_hash=$(jq -r '.project_context.context_hash // ""' "${target_file}")
+  context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${target_file}")
 
   local revoked_json
   revoked_json=$(safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" "${context_hash}")
@@ -1112,7 +1104,7 @@ cmd_recheck() {
     version=$(jq -r '.version' "${f}")
     revoked_at=$(jq -r '.revoked_at // ""' "${f}")
     hash=$(jq -r '.hash // ""' "${f}")
-    context_hash=$(jq -r '.project_context.context_hash // ""' "${f}")
+    context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${f}")
     [[ -n "${revoked_at}" ]] && continue
     local expected_hash forgery_reason=""
     if [[ "${ecosystem}" == *[[:cntrl:]]* || "${pkg}" == *[[:cntrl:]]* || "${version}" == *[[:cntrl:]]* ]]; then

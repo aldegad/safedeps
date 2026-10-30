@@ -407,35 +407,44 @@ fn context_kinds_match_cli() {
     }
 }
 
-/// The CLI's approval predicate and `valid` give one answer: the base
-/// approval, each field of it and of each context kind set to each of a list
-/// of values or removed, and a few texts only a parser sees.
 #[cfg(test)]
-#[test]
-fn valid_matches_cli_predicate() {
-    use std::io::Write;
-    fn parse(text: &str) -> Value { json::parse_one(text.as_bytes()).unwrap() }
-    fn dump(v: &Value) -> String { jq::compact(&jq::from_value(v)) }
-    fn keys(v: &Value) -> Vec<String> { match v { Value::Obj(o) => o.iter().map(|(k, _)| String::from_utf8(k.clone()).unwrap()).collect(), _ => Vec::new() } }
-    fn put(v: &Value, path: &[&str], value: Option<&Value>) -> Value {
-        let mut v = v.clone();
-        let mut at = &mut v;
-        for key in &path[..path.len() - 1] {
-            let Value::Obj(o) = at else { unreachable!() };
-            at = &mut o.iter_mut().find(|(k, _)| k == key.as_bytes()).unwrap().1;
-        }
+fn parse(text: &str) -> Value { json::parse_one(text.as_bytes()).unwrap() }
+#[cfg(test)]
+fn dump(v: &Value) -> String { jq::compact(&jq::from_value(v)) }
+#[cfg(test)]
+fn keys(v: &Value) -> Vec<String> { match v { Value::Obj(o) => o.iter().map(|(k, _)| String::from_utf8(k.clone()).unwrap()).collect(), _ => Vec::new() } }
+#[cfg(test)]
+fn put(v: &Value, path: &[&str], value: Option<&Value>) -> Value {
+    let mut v = v.clone();
+    let mut at = &mut v;
+    for key in &path[..path.len() - 1] {
         let Value::Obj(o) = at else { unreachable!() };
-        let key = path[path.len() - 1].as_bytes().to_vec();
-        match value { Some(x) => json::set(o, key, x.clone()), None => o.retain(|(k, _)| *k != key) }
-        v
+        at = &mut o.iter_mut().find(|(k, _)| k == key.as_bytes()).unwrap().1;
     }
-    let values: Vec<Option<Value>> = std::iter::once(None)
-        .chain(["null", "false", "true", "0", "1", "\"\"", "\"x\"", "\"sha256\"", "\"sha256:\"", "\"sha256:x\"", "[]", "[1]", "{}", "{\"a\":1}"].map(|t| Some(parse(t)))).collect();
+    let Value::Obj(o) = at else { unreachable!() };
+    let key = path[path.len() - 1].as_bytes().to_vec();
+    match value { Some(x) => json::set(o, key, x.clone()), None => o.retain(|(k, _)| *k != key) }
+    v
+}
+#[cfg(test)]
+fn field_values() -> Vec<Option<Value>> {
+    std::iter::once(None)
+        .chain(["null", "false", "true", "0", "1", "\"\"", "\"x\"", "\"sha256\"", "\"sha256:\"", "\"sha256:x\"", "[]", "[1]", "{}", "{\"a\":1}"].map(|t| Some(parse(t)))).collect()
+}
+#[cfg(test)]
+const BASE_APPROVAL: &str = r#"{"hash":"sha256:aa","ecosystem":"npm","package":"p","version":"1.0.0","version_range":"^1","approved_at":"2020-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","approved_by":"cli","evidence":{},"transitive_specs":[]}"#;
+
+/// The base approval, each field of it and of each context kind set to each of
+/// a list of values or removed, and a few texts only a parser sees. The last
+/// three of the second list are the complete approvals of the three kinds.
+#[cfg(test)]
+fn approval_cases() -> (Vec<(String, String)>, Vec<String>) {
+    let values = field_values();
     let mut cases: Vec<(String, String)> = Vec::new();
     let vary = |cases: &mut Vec<(String, String)>, label: &str, v: &Value, path: &[&str], with: &[Option<Value>]| {
         for x in with { cases.push((format!("{label} {}={}", path.join("."), x.as_ref().map_or("missing".into(), dump)), dump(&put(v, path, x.as_ref())))); }
     };
-    let base = parse(r#"{"hash":"sha256:aa","ecosystem":"npm","package":"p","version":"1.0.0","version_range":"^1","approved_at":"2020-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","approved_by":"cli","evidence":{},"transitive_specs":[]}"#);
+    let base = parse(BASE_APPROVAL);
     let overrides = parse(&format!(r#"{{"type":"{}","context_hash":"sha256:c","project_root":"/r","overrides_source":"/r/package.json","overrides_sha256":"sha256:o","overrides":{{"x":"1"}}}}"#, ContextKind::NpmOverrides.as_str()));
     let lockfile = parse(&format!(r#"{{"type":"{}","context_hash":"sha256:c","project_root":"/r","manifest_path":"/r/package.json","lockfile_path":"/r/yarn.lock","resolutions_sha256":"sha256:r","lockfile_sha256":"sha256:l","input_sha256":"sha256:i","input_files":[{{"path":"package.json","sha256":"sha256:f"}}]}}"#, ContextKind::YarnLockfile.as_str()));
     let materialization = parse(&format!(r#"{{"candidate":"p@npm:1.0.0","input_sha256":"sha256:i","generated_lockfile_sha256":"sha256:g","command":"{MATERIALIZE_COMMAND}","isolation":"{MATERIALIZE_ISOLATION}"}}"#));
@@ -465,6 +474,15 @@ fn valid_matches_cli_predicate() {
     cases.push(("a second hash, first".into(), format!("{{\"hash\":5,{}", &text[1..])));
     cases.push(("an escaped input hash".into(), complete[2].replacen("\"input_sha256\":\"sha256:i\",\"input_files\"", "\"input_sha256\":\"\\u0073ha256:i\",\"input_files\"", 1)));
     cases.push(("a NUL package".into(), text.replacen("\"package\":\"p\"", "\"package\":\"\\u0000\"", 1)));
+    (cases, complete)
+}
+
+/// The CLI's approval predicate and `valid` give one answer.
+#[cfg(test)]
+#[test]
+fn valid_matches_cli_predicate() {
+    use std::io::Write;
+    let (cases, complete) = approval_cases();
     for text in &complete { assert!(valid(&parse(text)), "complete context is valid: {text}"); }
 
     let source = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/ledger/ledger.sh");
@@ -483,4 +501,125 @@ fn valid_matches_cli_predicate() {
         (*answer != if core { "true" } else { "false" }).then(|| format!("{label}: core {core}, CLI {answer}"))
     }).collect();
     assert!(differ.is_empty(), "{} of {} cases differ:\n{}", differ.len(), cases.len(), differ.join("\n"));
+}
+
+/// The CLI's readers answer what the hook's readers answer of the same files:
+/// the instant of an expires_at, `check` of one entry and the effect index of
+/// a directory. The hook is the side that judges, so this is the shell held to
+/// the core; a difference in the shell's favour is an already_approved the
+/// hook then denies.
+#[cfg(test)]
+#[test]
+fn readers_match_cli() {
+    use std::io::Write;
+    struct Dir(PathBuf);
+    impl Drop for Dir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let root = Dir(std::env::temp_dir().join(format!("safedeps-ledger-readers-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&root.0);
+    let (index_dir, check_dir, case_dir) = (root.0.join("index"), root.0.join("check"), root.0.join("cases"));
+    for dir in [&index_dir, &check_dir, &case_dir] { std::fs::create_dir_all(dir).unwrap(); }
+    let source = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/ledger/ledger.sh");
+    let bash = |dir: &Path, script: &str, args: &[&str], input: &str| -> (String, String) {
+        let mut child = std::process::Command::new("/bin/bash").env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default()).env("HOME", "fixture home").env("SAFEDEPS_LEDGER_DIR", dir)
+            .args(["-c", &format!("source \"$1\"\nshift\nset +e\n{script}"), "ledger-readers", source]).args(args)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "CLI readers: {}", String::from_utf8_lossy(&out.stderr));
+        (String::from_utf8(out.stdout).unwrap(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+
+    // A form each reader might read differently, around the one the writer writes.
+    let dates = ["2099-01-01T00:00:00Z", "2000-01-01T00:00:00Z", "1970-01-01T00:00:00Z", "2024-02-29T12:30:45Z", "2100-03-01T00:00:00Z", "0000-01-01T00:00:00Z",
+        "2099-1-1T00:00:00Z", "2099-01-1T00:00:00Z", "2099-1-01T00:00:00Z", "2099-01-01T0:00:00Z", "2099-01-01", "2099-01-01T00:00:00", "2099-01-01T00:00:00+00:00", "2099-01-01 00:00:00Z",
+        "2099-13-01T00:00:00Z", "2099-00-01T00:00:00Z", "2099-01-32T00:00:00Z", "2099-01-00T00:00:00Z", "2099-02-31T00:00:00Z",
+        "2099-01-01T24:00:00Z", "2099-01-01T00:60:00Z", "2099-01-01T00:00:60Z", "2099-01-01T00:00:61Z",
+        "2099-+1-01T00:00:00Z", "2099--1-01T00:00:00Z", "2099-01-+1T00:00:00Z", "2099-01--1T00:00:00Z", "2099-01-01T+1:00:00Z", "2099-01-01T-1:00:00Z", "2099-01-01T00:-1:00Z", "2099-01-01T00:00:-1Z",
+        "+099-01-01T00:00:00Z", "-099-01-01T00:00:00Z", "2099-01-01T00:00:00z", "2099-01-01t00:00:00Z", " 099-01-01T00:00:00Z", "209 -01-01T00:00:00Z", "2099-01-01T00:00:0\nZ", "2099-01-01T00:00:00Z\n",
+        "\u{ff12}099-01-01T00:00:00Z", "", "x"];
+    let lines: Vec<String> = dates.iter().map(|d| dump(&Value::Str(d.as_bytes().to_vec()))).chain(["null".into(), "1".into(), "[]".into(), "{}".into()]).collect();
+    let (answers, _) = bash(&check_dir, "exec jq -c \"${SAFEDEPS_LEDGER_JQ_PREDICATE}\"' try ledger_epoch catch \"error\"'", &[], &lines.iter().map(|l| format!("{l}\n")).collect::<String>());
+    let answers: Vec<&str> = answers.lines().collect();
+    assert_eq!(answers.len(), lines.len(), "one CLI instant per form");
+    let differ: Vec<String> = dates.iter().map(|d| epoch(d)).chain([None; 4]).zip(&answers).zip(&lines)
+        .filter_map(|((core, cli), line)| (*cli != core.map_or("null".into(), |t| t.to_string())).then(|| format!("{line}: core {core:?}, CLI {cli}"))).collect();
+    assert!(differ.is_empty(), "instants differ:\n{}", differ.join("\n"));
+
+    // One entry under each form of each field `check` reads, each read with no
+    // context and with one. The expected hash is what the entry is filed under.
+    let base = parse(BASE_APPROVAL);
+    let string = |s: &str| Some(Value::Str(s.as_bytes().to_vec()));
+    let hashes = |context: &str| put(&base, &["hash"], string(&hash("npm", "p", "1.0.0", context)).as_ref());
+    let (_, complete) = approval_cases();
+    let mut entries: Vec<(&str, String)> = Vec::new();
+    for context in ["", "sha256:c"] {
+        let filed = hashes(context);
+        let text = dump(&filed);
+        for date in dates { entries.push((context, dump(&put(&filed, &["expires_at"], string(date).as_ref())))); }
+        for value in field_values() {
+            entries.push((context, dump(&put(&filed, &["project_context"], value.as_ref()))));
+            entries.push((context, dump(&put(&filed, &["hash"], value.as_ref()))));
+        }
+        for text in &complete { entries.push((context, dump(&put(&parse(text), &["hash"], string(&hash("npm", "p", "1.0.0", context)).as_ref())))); }
+        for written in [text.clone(), format!("{text}\n{text}\n"), format!("{text}\nx"), format!("x\n{text}"), format!("{text}\n{{}}"), format!("{{}}\n{text}"), "x".into(), String::new(), " \n".into(), "null".into(), "[]".into(), "{}".into()] {
+            entries.push((context, written));
+        }
+    }
+    let mut script = String::from("for ((i = 1; i < $#; i += 2)); do j=$((i + 1)); cp \"${!j}\" \"$SAFEDEPS_LEDGER_DIR/$(basename \"$(safedeps_ledger_path npm p 1.0.0 \"${!i}\")\")\"; ");
+    script.push_str("safedeps_ledger_check npm p 1.0.0 \"${!i}\" 2>/dev/null; printf '\\n'; rm -f \"$SAFEDEPS_LEDGER_DIR\"/*.json; done");
+    let mut args: Vec<String> = Vec::new();
+    for (n, (context, text)) in entries.iter().enumerate() {
+        let path = case_dir.join(format!("{n}.json"));
+        std::fs::write(&path, text).unwrap();
+        args.push((*context).into());
+        args.push(path.to_str().unwrap().into());
+    }
+    let (answers, _) = bash(&check_dir, &script, &args.iter().map(String::as_str).collect::<Vec<_>>(), "");
+    let answers: Vec<&str> = answers.split('\n').filter(|line| !line.is_empty()).collect();
+    assert_eq!(answers.len(), entries.len(), "one CLI answer per entry");
+    let differ: Vec<String> = entries.iter().zip(&answers).filter_map(|((context, text), cli)| {
+        let path = check_dir.join(filename(&hash("npm", "p", "1.0.0", context)));
+        std::fs::write(&path, text).unwrap();
+        let core = jq::compact(&check(&check_dir, "npm", "p", "1.0.0", context, now).unwrap().answer);
+        std::fs::remove_file(&path).unwrap();
+        (*cli != core).then(|| format!("{context:?} {text:?}\n  core {core}\n  CLI  {cli}"))
+    }).collect();
+    assert!(differ.is_empty(), "{} of {} entries differ:\n{}", differ.len(), entries.len(), differ.join("\n"));
+
+    // Every approval above and the forms only the index reads, in one
+    // directory, which is what splits a chunk jq cannot finish into its files.
+    let (cases, _) = approval_cases();
+    // A NUL in a package is left out: jq's @tsv spells it, and how depends on
+    // the jq, while the core keeps the byte. The text is this seam's only.
+    let mut files: Vec<String> = cases.into_iter().map(|(_, text)| text).filter(|text| !text.contains("\\u0000")).collect();
+    let named = |n: usize, v: &Value| put(v, &["package"], string(&format!("indexed-{n}")).as_ref());
+    for (n, date) in dates.iter().enumerate() { files.push(dump(&put(&named(n, &base), &["expires_at"], string(date).as_ref()))); }
+    for (n, value) in field_values().iter().enumerate() {
+        files.push(dump(&put(&named(n + 100, &base), &["revoked_at"], value.as_ref())));
+        files.push(dump(&put(&named(n + 200, &base), &["project_context"], value.as_ref())));
+        files.push(dump(&put(&named(n + 300, &base), &["transitive_specs"], value.as_ref())));
+    }
+    for (n, specs) in [r#"[{"package":"a","version":"1"}]"#, r#"[{"package":"a","version":1}]"#, r#"[{"package":"a"}]"#, r#"[{"version":"1"}]"#, "[null]", "[1]", "[\"x\"]", "[[]]", "[{}, 1]",
+        r#"[{"package":[],"version":"1"}]"#, r#"[{"package":{},"version":"1"}]"#, r#"[{"package":"a","version":[1]}]"#, r#"[{"package":"a","version":"1","ecosystem":"pypi"}]"#,
+        r#"[{"package":"a","version":"1","ecosystem":false}]"#, r#"[{"package":"a","version":"1","ecosystem":[]}]"#, r#"[{"package":"a\tb","version":"1\n2"}]"#].iter().enumerate() {
+        files.push(dump(&put(&named(n + 400, &base), &["transitive_specs"], Some(&parse(specs)))));
+    }
+    for n in 0..6 {
+        let text = dump(&named(n + 500, &base));
+        files.push([format!("{text}\n{text}\n"), format!("{text}\nx"), format!("x\n{text}"), format!("{text}\n{{}}\n"), format!("{{}}\n{text}\n"), format!("{text}\n[1,")][n].clone());
+    }
+    files.extend(["x".into(), String::new(), " \n".into(), "null".into(), "[]".into(), "{}".into()]);
+    for (n, text) in files.iter().enumerate() { std::fs::write(index_dir.join(format!("{n}.json")), text).unwrap(); }
+    for context in ["", "sha256:c"] {
+        let mut warnings = Vec::new();
+        let index = effect_index(&index_dir, context, now, &mut warnings).unwrap();
+        let (cli, errors) = bash(&index_dir, "safedeps_ledger_effect_index \"$1\"", &[context], "");
+        let sorted = |text: &str| { let mut lines: Vec<String> = text.lines().map(str::to_string).collect(); lines.sort(); lines };
+        let (core, cli) = (sorted(&index.tsv()), sorted(&cli));
+        assert!(core == cli, "index {context:?}: only the core: {:?}; only the CLI: {:?}",
+            core.iter().filter(|l| !cli.contains(l)).collect::<Vec<_>>(), cli.iter().filter(|l| !core.contains(l)).collect::<Vec<_>>());
+        assert_eq!(sorted(&String::from_utf8(warnings).unwrap()), sorted(&errors), "the entries each reader says it set aside, {context:?}");
+    }
 }
