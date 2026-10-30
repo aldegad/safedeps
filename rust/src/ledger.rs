@@ -313,15 +313,10 @@ fn context_kinds_match_cli() {
     assert!(out.status.success(), "CLI scoping predicates: {}", String::from_utf8_lossy(&out.stderr));
     let core: String = types.iter().map(|t| if ContextKind::parse(t).is_some() { "11" } else { "00" }).collect();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), core, "the shell's and jq's scoping kinds are the core's, for {types:?}");
-    // A kind, a source type or the materialization is spelled in its
-    // declaration and in no file of the CLI that writes or reads it: not in a
-    // string, a case pattern or a comment. A spelling counts as a word, so
-    // `fixture` inside `safedeps_npm_fixture_closure` is not one; and a
-    // spelling that is one plain word is prose too, so it counts wherever it
-    // stands in code (cli_text), whatever its form.
     // A closure source reaches its writer only as a declaration: the type is
     // its second argument and the reason, where there is one, its fourth, so
     // a word there, misspelt or not, is a second truth.
+    use crate::cli_text::{bare_uses, code_lines, definitions, word, CLI_FILES};
     let closure = include_str!("../../lib/npm/closure.sh");
     let calls: Vec<Vec<&str>> = closure.lines().map(str::trim_start).filter(|line| !line.starts_with('#'))
         .filter_map(|line| line.split_once("safedeps_npm_write_source \"").map(|(_, rest)| rest.split_whitespace().collect())).collect();
@@ -331,15 +326,32 @@ fn context_kinds_match_cli() {
         assert!(declared(args[1], &["SAFEDEPS_SOURCE_", "SAFEDEPS_CONTEXT_"]), "a closure source type is a declaration: {args:?}");
         assert!(args.len() < 4 || declared(args[3], &["SAFEDEPS_NPM_"]), "a closure source's reason is a declaration: {args:?}");
     }
+    // Each name the declarations give stands in the CLI files
+    // (cli_text::CLI_FILES) only in its declaration and as a whole read, so
+    // no assignment of any form follows it; the shell's scoping predicate and
+    // each jq function they define are defined there and nowhere else.
+    let npm: Vec<&str> = closure.lines().filter(|line| line.starts_with("SAFEDEPS_NPM_")).collect();
+    assert_eq!(npm.len(), 5, "the closure source's declarations: {npm:?}");
+    let declarations: Vec<&str> = kinds.lines().filter(|line| line.starts_with("SAFEDEPS_")).chain(npm.iter().copied()).collect();
+    for line in &declarations {
+        let name = line.split_once('=').unwrap().0;
+        let uses: Vec<&str> = CLI_FILES.iter().flat_map(|(_, text)| bare_uses(text, name)).collect();
+        assert_eq!(uses, [*line], "{name} stands only in its declaration and as a whole read");
+    }
+    let defined = |name: &str| -> Vec<&str> { CLI_FILES.iter().flat_map(|(_, text)| definitions(text, name)).collect() };
+    assert_eq!(defined("safedeps_context_kind_scopes"), ["safedeps_context_kind_scopes() {"], "the shell's scoping predicate is defined once");
+    for line in declarations.iter().filter(|line| line.contains("_JQ=")) {
+        for def in line.split("def ").skip(1).map(|rest| rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next().unwrap()) {
+            assert_eq!(defined(def), [*line], "jq's {def} is defined once, in its declaration");
+        }
+    }
     // The fields that carry the reason are SAFEDEPS_NPM_SOURCE_JQ's: outside
     // it a field's name stands in no file of the CLI but as prose (cli_text),
     // whatever its form. Inside it the writer and the readers name each field
     // once each, so what the readers read back is what the writer wrote.
-    let part = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    for (file, text) in [("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")), ("lib/npm/closure.sh", closure),
-                         ("bin/safedeps", include_str!("../../bin/safedeps"))] {
+    for (file, text) in CLI_FILES {
         for field in ["project_resolution_status", "approval_scope"] {
-            let lines: Vec<&str> = crate::cli_text::code_lines(text, field, part).into_iter()
+            let lines: Vec<&str> = code_lines(text, field, word).into_iter()
                 .filter(|line| !line.starts_with("SAFEDEPS_NPM_SOURCE_JQ=")).collect();
             assert!(lines.is_empty(), "{file} spells the closure source's {field}: {lines:?}");
         }
@@ -351,22 +363,45 @@ fn context_kinds_match_cli() {
     assert!(out.status.success(), "CLI closure source fields: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "[[[\"project_resolution_status\",\"approval_scope\"],\"why\",\"scope\"],[[],null,null]]\n",
         "the closure source's readers read what its writer writes");
+    // The shell reader reads what the writer wrote, on both of the writer's
+    // branches: a read misspelt is a word no reading of the text knows.
+    let function = |name: &str| -> String {
+        let head = format!("{name}() {{");
+        let body = closure.split_once(&head).unwrap().1.split_once("\n}").unwrap().0;
+        format!("{head}{body}\n}}\n")
+    };
+    let script = format!("{}\n{}{}d=$(mktemp -d) && trap 'rm -rf \"$d\"' EXIT && cd \"$d\" && printf '{{}}' > ctx || exit 1\n\
+        for c in '' ctx; do for r in why ''; do safedeps_npm_write_source out t \"$c\" \"$r\"; if safedeps_npm_source_is_deny_only out; then printf 1; else printf 0; fi; done; done",
+        npm.join("\n"), function("safedeps_npm_write_source"), function("safedeps_npm_source_is_deny_only"));
+    let out = std::process::Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["-c", &script, "source-reader"]).output().unwrap();
+    assert!(out.status.success(), "CLI closure source reader: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "1010", "a closure source the writer made deny-only reads as deny-only, and no other");
+    // A kind, a source type, the materialization or a closure source's reason
+    // is spelled in its declaration and nowhere else in the CLI files. A
+    // spelling counts as a word, so `fixture` inside
+    // `safedeps_npm_fixture_closure` is not one. A spelling with a hyphen or
+    // a space is no word of prose, so it counts in every line, comments
+    // included; a plain word, and the reasons' words, which the comments
+    // use, count wherever they stand in code (cli_text), whatever the form.
     let mut spellings: Vec<(String, bool)> = kinds.lines()
         .filter_map(|line| line.strip_prefix("SAFEDEPS_").and_then(|line| line.split_once('=')))
         .filter_map(|(_, value)| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
         .filter(|value| !value.contains('$')).map(|value| (value.into(), value.bytes().all(|b| b.is_ascii_lowercase()))).collect();
     spellings.push((MATERIALIZE_COMMAND.into(), false));
     assert_eq!(spellings.len(), 8, "the declared spellings: {spellings:?}");
-    let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    let reasons: Vec<(String, bool)> = npm.iter().filter_map(|line| line.split_once("=\"")).map(|(_, v)| (v.trim_end_matches('"').into(), true)).collect();
+    assert_eq!(reasons.len(), 4, "the closure source's reasons: {reasons:?}");
+    spellings.extend(reasons);
+    let hyphened = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
     let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-');
-    for (file, text) in [("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")),
-                         ("lib/npm/closure.sh", include_str!("../../lib/npm/closure.sh")),
-                         ("bin/safedeps", include_str!("../../bin/safedeps"))] {
+    for (file, text) in CLI_FILES {
         for (spelling, plain) in &spellings {
-            let lines: Vec<&str> = if *plain { crate::cli_text::code_lines(text, spelling, part) } else {
+            let lines: Vec<&str> = if *plain { code_lines(text, spelling, part) } else {
                 text.lines().filter(|line| line.match_indices(spelling.as_str()).any(|(at, _)|
-                    !word(line.as_bytes().get(at.wrapping_sub(1))) && !word(line.as_bytes().get(at + spelling.len())))).collect()
+                    !hyphened(line.as_bytes().get(at.wrapping_sub(1))) && !hyphened(line.as_bytes().get(at + spelling.len())))).collect()
             };
+            let lines: Vec<&str> = lines.into_iter().filter(|line| !declarations.contains(line)).collect();
             assert!(lines.is_empty(), "{file} spells {spelling} outside its declaration: {lines:?}");
         }
     }
