@@ -220,19 +220,32 @@ check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {p
 [[ "$(grep -oE 'SAFEDEPS_CHECK_[A-Z_]+' bin/safedeps | sort -u)" == "$(sed -nE 's/^(SAFEDEPS_CHECK_[A-Z_]+)=.*/\1/p' bin/safedeps | sort -u)" ]] \
   || fail "every check result bin/safedeps names is declared"
 # A result reaches a report only through its assemblers, so the words that
-# carry one are an allow-list over bin/safedeps, comment lines aside. The word
-# `result` is written only inside the two assemblers' bodies. Every other
-# mention of an assembler is its definition or a call whose first argument is
-# a declaration or the variable its caller set from one, and every mention of
+# carry one are an allow-list over bin/safedeps, comment lines aside, and
+# every allowed form is counted. Each assembler is defined once. The word
+# `result` stands only in the assemblers' own forms: each takes it as $1,
+# sf_check_json binds it to jq and writes it after HEAD, the closure block
+# passes it on, and its entries carry a status under the same key. Each
+# declared name is assigned once, by its declaration, and read only whole.
+# Every other mention of an assembler is a call whose first argument is a
+# declaration or the variable its caller set from one, and every mention of
 # that variable is an assignment from a declaration or that argument. What is
 # left after the allowed forms are taken out is a second truth, misspelt or
 # not, and a call this row cannot read on one line is red with it.
 check_code=$(grep -nvE '^[[:space:]]*#' bin/safedeps)
-check_outside=$(awk '{line = $0; sub(/^[0-9]+:/, "", line)}
-  line ~ /^(sf_check_json|sf_npm_emit_closure_block_json)\(\) \{$/ {inside = 1; next}
-  inside && line ~ /^}$/ {inside = 0; next}
-  !inside' <<< "${check_code}" | grep -E '(^|[^A-Za-z0-9_])result([^A-Za-z0-9_]|$)' || true)
-[[ -z "${check_outside}" ]] || fail "only the check report assemblers write a result: ${check_outside}"
+for check_form in 'sf_check_json() {:1' 'sf_npm_emit_closure_block_json() {:1' 'local result="$1":2' '--arg result "${result}":1' \
+    '{result:\$result}:1' 'result: .status,:1' 'sf_check_json "${result}":1'; do
+  [[ "$(grep -oF -- "${check_form%:*}" <<< "${check_code}" | grep -c .)" -eq "${check_form##*:}" ]] \
+    || fail "bin/safedeps writes \`${check_form%:*}\` ${check_form##*:} time(s)"
+done
+check_outside=$(awk '{
+    line = $0
+    n = split("local result=\"$1\"|--arg result \"${result}\"|{result:\\$result}|result: .status,|sf_check_json \"${result}\"", forms, "|")
+    for (i = 1; i <= n; i++) while ((at = index(line, forms[i])) > 0) line = substr(line, 1, at - 1) " " substr(line, at + length(forms[i]))
+    print line
+  }' <<< "${check_code}" | grep -E '(^|[^A-Za-z0-9_])result([^A-Za-z0-9_]|$)' || true)
+[[ -z "${check_outside}" ]] || fail "the word result stands in bin/safedeps only in its assemblers' forms: ${check_outside}"
+check_names=$(sed -E 's/^[0-9]+:SAFEDEPS_CHECK_[A-Z_]+="[a-z_]+"$//; s/"\$\{SAFEDEPS_CHECK_[A-Z_]+\}"//g' <<< "${check_code}" | grep -E 'SAFEDEPS_CHECK_' || true)
+[[ -z "${check_names}" ]] || fail "a check result's name is assigned by its declaration and read whole: ${check_names}"
 check_args=$(sed -E 's/(sf_check_json|sf_npm_emit_closure_block_json)(\(\) \{|[[:space:]]+"\$\{(SAFEDEPS_CHECK_[A-Z_]+|result|block_result)\}"([[:space:]]|$))//g' <<< "${check_code}" \
   | grep -E '(^|[^A-Za-z0-9_])(sf_check_json|sf_npm_emit_closure_block_json)([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_args}" ]] || fail "every check report takes its result from a declaration: ${check_args}"
