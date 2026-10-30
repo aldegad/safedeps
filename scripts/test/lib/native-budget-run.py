@@ -36,8 +36,9 @@ def record(role):
 def expire(*unused):
     (box/('expired-'+str(os.getpid()))).write_text('expired')
     os._exit(125)
-def children(pid):
-    return subprocess.run(['pgrep','-P',str(pid)],capture_output=True,text=True).stdout.split()
+def questions(parent):
+    # Not pgrep: on macOS it leaves out its own ancestors, and this process is one.
+    return subprocess.run(['ps','-A','-o','ppid='],capture_output=True,text=True).stdout.split().count(str(parent))
 def no_judgment(parent):
     (box/'no-judgment').write_text('parent '+str(parent)+' is '+(owners.command(parent) or 'gone'))
     raise SystemExit('no judgment process')
@@ -62,7 +63,7 @@ if delay:
         # That comes first: the rest of this fixture starts when the machine lets
         # it, and only the three questions have to exist, not to have answered.
         try:
-            while len(children(parent))<3:time.sleep(.01)
+            while questions(parent)<3:time.sleep(.01)
             owners.register(lease,parent,'judgment')
             owners.register(lease,ancestor,'supervisor-or-entry')
             os.kill(parent,signal.SIGSTOP)
