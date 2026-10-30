@@ -10,7 +10,7 @@ SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS="${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-30}"
 
 # The project_context kinds and the materialization record the predicate checks.
 # shellcheck source=./context-kinds.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/context-kinds.sh"
+source "${BASH_SOURCE[0]%/*}/context-kinds.sh"
 
 safedeps_ledger_init() {
   umask 077

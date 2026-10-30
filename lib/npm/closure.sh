@@ -5,7 +5,7 @@ set -euo pipefail
 
 # The closure source types, the context kinds and the materialization.
 # shellcheck source=../ledger/context-kinds.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ledger/context-kinds.sh"
+source "${BASH_SOURCE[0]%/*}/../ledger/context-kinds.sh"
 
 # A closure source that cannot vouch for an approval says why and is
 # deny-only: written by safedeps_npm_write_source, read by
@@ -14,6 +14,9 @@ SAFEDEPS_NPM_DENY_ONLY="deny-only"
 SAFEDEPS_NPM_PROJECT_CLOSURE_UNAVAILABLE="project-closure-unavailable"
 SAFEDEPS_NPM_CANDIDATE_UNAVAILABLE="project-candidate-materialization-unavailable"
 SAFEDEPS_NPM_PROJECT_CONTEXT_INVALID="project-context-invalid"
+# The fields that carry them, in a jq program: put this in front of its text.
+# shellcheck disable=SC2016  # jq text
+SAFEDEPS_NPM_SOURCE_JQ='def source_deny_only($reason; $deny_only): if $reason == "" then {} else {project_resolution_status: $reason, approval_scope: $deny_only} end; def source_resolution_status: .project_resolution_status; def source_approval_scope: .approval_scope; '
 
 safedeps_npm_require_jq() {
   if ! command -v jq >/dev/null 2>&1; then
@@ -692,21 +695,21 @@ safedeps_npm_write_source() {
   local reason="${4:-}"
 
   if [[ -n "${context_file}" && -f "${context_file}" ]]; then
-    jq -c --arg type "${type}" --arg reason "${reason}" --arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}" '
+    jq -c --arg type "${type}" --arg reason "${reason}" --arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}" "${SAFEDEPS_NPM_SOURCE_JQ}"'
       . + {type: $type}
-      + (if $reason == "" then {} else {project_resolution_status: $reason, approval_scope: $deny_only} end)
+      + source_deny_only($reason; $deny_only)
     ' "${context_file}" > "${output_file}"
   else
-    jq -cn --arg type "${type}" --arg reason "${reason}" --arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}" '
+    jq -cn --arg type "${type}" --arg reason "${reason}" --arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}" "${SAFEDEPS_NPM_SOURCE_JQ}"'
       {type: $type}
-      + (if $reason == "" then {} else {project_resolution_status: $reason, approval_scope: $deny_only} end)
+      + source_deny_only($reason; $deny_only)
     ' > "${output_file}"
   fi
 }
 
 # True when the closure source in this file is deny-only.
 safedeps_npm_source_is_deny_only() {
-  [[ "$(jq -r '.approval_scope // ""' "$1")" == "${SAFEDEPS_NPM_DENY_ONLY}" ]]
+  [[ "$(jq -r "${SAFEDEPS_NPM_SOURCE_JQ}"'source_approval_scope // ""' "$1")" == "${SAFEDEPS_NPM_DENY_ONLY}" ]]
 }
 
 # Discover the consuming repo's npm `overrides` so the closure probe resolves

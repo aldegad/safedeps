@@ -283,12 +283,13 @@ SAFEDEPS_CHECK_ERROR="error"
 # answer on stdin), HEAD the fields between input_range and result, TAIL the
 # fields after result. The jq arguments bind what HEAD and TAIL name and give
 # the input; a field keeps its place in the report. TAIL may call
-# install_hint(version) and the status names of SAFEDEPS_STATUS_JQ.
+# install_hint(version), the status names of SAFEDEPS_STATUS_JQ and the
+# closure source fields of SAFEDEPS_NPM_SOURCE_JQ.
 sf_check_json() {
   local result="$1" ecosystem="$2" package="$3" range="$4" base="$5" head="$6" tail="$7"
   shift 7
   jq -c --arg result "${result}" --arg ecosystem "${ecosystem}" --arg package "${package}" --arg range "${range}" \
-    "${SAFEDEPS_STATUS_JQ}"'def install_hint($v): "install with " + $package + "@" + $v; '"(${base}) + {command:\"check\", ecosystem:\$ecosystem, package:\$package, input_range:\$range} + (${head}) + {result:\$result} + (${tail})" "$@"
+    "${SAFEDEPS_STATUS_JQ}${SAFEDEPS_NPM_SOURCE_JQ}"'def install_hint($v): "install with " + $package + "@" + $v; '"(${base}) + {command:\"check\", ecosystem:\$ecosystem, package:\$package, input_range:\$range} + (${head}) + {result:\$result} + (${tail})" "$@"
 }
 
 sf_closure_temp_file() {
@@ -430,7 +431,7 @@ sf_cmd_check_npm_full_closure() {
     rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
-        '{approved:false, error:(if $closure_source.project_resolution_status? then $closure_source.project_resolution_status else "npm_closure_resolution_failed" end), closure_source:$closure_source}' \
+        '{approved:false, error:(if ($closure_source | source_resolution_status?) then ($closure_source | source_resolution_status) else "npm_closure_resolution_failed" end), closure_source:$closure_source}' \
         -n --arg version "${version}" --argjson closure_source "${closure_source_json}"
     fi
     return 4
@@ -547,7 +548,7 @@ sf_cmd_check_npm_full_closure() {
 
   if safedeps_npm_source_is_deny_only "${source_file}"; then
     local project_resolution_status
-    project_resolution_status=$(jq -r '.project_resolution_status' "${source_file}")
+    project_resolution_status=$(jq -r "${SAFEDEPS_NPM_SOURCE_JQ}"'source_resolution_status' "${source_file}")
     sf_err "Yarn project closure is unavailable (${project_resolution_status}) — approval withheld"
     sf_advisory_log "check fail-closed yarn-project-closure package=${pkg} version=${version} reason=${project_resolution_status}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then

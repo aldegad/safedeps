@@ -284,29 +284,73 @@ fn ledger_defaults_match_cli() {
 #[test]
 fn context_kinds_match_cli() {
     let kinds = include_str!("../../lib/ledger/context-kinds.sh");
-    for (kind, constant) in [(ContextKind::NpmOverrides, "NPM_OVERRIDES"), (ContextKind::YarnLockfile, "YARN_LOCKFILE"), (ContextKind::YarnMaterialized, "YARN_MATERIALIZED")] {
+    let named = [(ContextKind::NpmOverrides, "NPM_OVERRIDES"), (ContextKind::YarnLockfile, "YARN_LOCKFILE"), (ContextKind::YarnMaterialized, "YARN_MATERIALIZED")];
+    assert!(ContextKind::ALL.iter().all(|kind| named.iter().any(|(k, _)| k == kind)), "every core kind is named here");
+    for (kind, constant) in named {
         assert!(kinds.lines().any(|line| line == format!("SAFEDEPS_CONTEXT_{constant}=\"{}\"", kind.as_str())), "CLI declares context kind {}", kind.as_str());
     }
     assert!(kinds.lines().any(|line| line == format!("SAFEDEPS_CONTEXT_MATERIALIZE=({MATERIALIZE_COMMAND})")), "CLI materialization command");
     assert!(kinds.lines().any(|line| line == format!("SAFEDEPS_CONTEXT_MATERIALIZE_ISOLATION=\"{MATERIALIZE_ISOLATION}\"")), "CLI materialization isolation");
+    // The kinds that scope an approval are listed twice in the declaration,
+    // as jq's context_scopes and as the shell's case; both name the core's
+    // three kinds and nothing else.
+    let scopes = kinds.split("def context_scopes:").nth(1).and_then(|rest| rest.split(';').next()).unwrap();
+    let case = kinds.lines().find(|line| line.trim_start().starts_with("\"${SAFEDEPS_CONTEXT_")).unwrap();
+    for (_, constant) in named {
+        assert!(scopes.contains(&format!(". == context_{}", constant.to_ascii_lowercase())), "context_scopes names {constant}");
+        assert!(case.contains(&format!("\"${{SAFEDEPS_CONTEXT_{constant}}}\"")), "safedeps_context_kind_scopes names {constant}");
+    }
+    assert_eq!((scopes.matches(". == ").count(), case.matches('|').count() + 1), (named.len(), named.len()), "the scoping kinds are the core's: {scopes} / {case}");
     // A kind, a source type or the materialization is spelled in its
     // declaration and in no file of the CLI that writes or reads it: not in a
     // string, a case pattern or a comment. A spelling counts as a word, so
     // `fixture` inside `safedeps_npm_fixture_closure` is not one; and a
-    // spelling that is one plain word is prose too, so it counts only quoted.
-    let mut spellings: Vec<String> = kinds.lines()
+    // spelling that is one plain word is prose too, so it counts only where
+    // code has it: quoted either way, as a case pattern, or on the right of a
+    // test or an assignment.
+    // A closure source reaches its writer only as a declaration: the type is
+    // its second argument and the reason, where there is one, its fourth, so
+    // a word there, misspelt or not, is a second truth.
+    let closure = include_str!("../../lib/npm/closure.sh");
+    let calls: Vec<Vec<&str>> = closure.lines().map(str::trim_start).filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once("safedeps_npm_write_source \"").map(|(_, rest)| rest.split_whitespace().collect())).collect();
+    assert_eq!(calls.len(), 8, "the writer's calls");
+    let declared = |arg: &str, prefixes: &[&str]| prefixes.iter().any(|p| arg.starts_with(&format!("\"${{{p}"))) && arg.ends_with("}\"");
+    for args in &calls {
+        assert!(declared(args[1], &["SAFEDEPS_SOURCE_", "SAFEDEPS_CONTEXT_"]), "a closure source type is a declaration: {args:?}");
+        assert!(args.len() < 4 || declared(args[3], &["SAFEDEPS_NPM_"]), "a closure source's reason is a declaration: {args:?}");
+    }
+    // The fields that carry the reason are SAFEDEPS_NPM_SOURCE_JQ's: no jq
+    // text of the CLI reads or writes them by name.
+    for (file, text) in [("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")), ("lib/npm/closure.sh", closure),
+                         ("bin/safedeps", include_str!("../../bin/safedeps"))] {
+        for field in ["project_resolution_status", "approval_scope"] {
+            let lines: Vec<&str> = text.lines().filter(|line| !line.starts_with("SAFEDEPS_NPM_SOURCE_JQ="))
+                .filter(|line| line.contains(&format!(".{field}")) || line.contains(&format!("{field}:"))).collect();
+            assert!(lines.is_empty(), "{file} spells the closure source's {field}: {lines:?}");
+        }
+    }
+    let mut spellings: Vec<(String, bool)> = kinds.lines()
         .filter_map(|line| line.strip_prefix("SAFEDEPS_").and_then(|line| line.split_once('=')))
         .filter_map(|(_, value)| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
-        .filter(|value| !value.contains('$')).map(|value| if value.bytes().all(|b| b.is_ascii_lowercase()) { format!("\"{value}\"") } else { value.into() }).collect();
-    spellings.push(MATERIALIZE_COMMAND.into());
+        .filter(|value| !value.contains('$')).map(|value| (value.into(), value.bytes().all(|b| b.is_ascii_lowercase()))).collect();
+    spellings.push((MATERIALIZE_COMMAND.into(), false));
     assert_eq!(spellings.len(), 8, "the declared spellings: {spellings:?}");
     let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    let code = |line: &str, at: usize, len: usize| {
+        let (before, after) = (line[..at].chars().last(), line[at + len..].chars().next());
+        let lead = line[..at].trim();
+        matches!((before, after), (Some('\''), Some('\'')) | (Some('"'), Some('"')))
+            || ((lead.is_empty() || lead == "(" || before == Some('|')) && matches!(after, Some(')') | Some('|')))
+            || lead.ends_with("==") || lead.ends_with("!=") || before == Some('=')
+    };
     for (file, text) in [("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")),
                          ("lib/npm/closure.sh", include_str!("../../lib/npm/closure.sh")),
                          ("bin/safedeps", include_str!("../../bin/safedeps"))] {
-        for spelling in &spellings {
+        for (spelling, plain) in &spellings {
             let lines: Vec<&str> = text.lines().filter(|line| line.match_indices(spelling.as_str()).any(|(at, _)|
-                !word(line.as_bytes().get(at.wrapping_sub(1))) && !word(line.as_bytes().get(at + spelling.len())))).collect();
+                !word(line.as_bytes().get(at.wrapping_sub(1))) && !word(line.as_bytes().get(at + spelling.len()))
+                    && (!plain || code(line, at, spelling.len())))).collect();
             assert!(lines.is_empty(), "{file} spells {spelling} outside its declaration: {lines:?}");
         }
     }
