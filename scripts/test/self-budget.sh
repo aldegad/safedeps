@@ -304,9 +304,11 @@ grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "a deadline ahead of the fixtu
 slow_sleeper_gone || fail "a deadline ahead of the fixture leaves no process of the fixture behind"
 pass "a deadline that lands before the fixture is ready is the answer the row asks for, recorded as unheld"
 
-# The other questions wait for the late one for as long as the machine takes.
-# The killed judgment ends the row at about the delay, not at its 20 seconds.
-GUARD_LATE=3; GUARD_KILL_JUDGMENT=1
+# The fixture waits for the late question for as long as the machine takes. That
+# question comes after npm's own eight seconds, and they do not land, because
+# the stopped judgment is not running them. The killed judgment ends the row at
+# about the delay, not at its 20 seconds.
+GUARD_LATE=9; GUARD_KILL_JUDGMENT=1
 slow_guard "${never}" "echo ${big}" 20
 GUARD_KILL_JUDGMENT=""
 [[ "${GUARD_HELD}" == true ]] || fail "a question that starts late still reaches the judgment that has the time"
