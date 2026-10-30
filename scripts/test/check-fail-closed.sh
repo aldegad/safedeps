@@ -399,6 +399,26 @@ kev_failure_reaches_caller() {
 row "no KEV catalog to read reaches the caller of the single query" kev_failure_reaches_caller safedeps_providers_query pypi fixture-clean 1.0.0
 row "no KEV catalog to read reaches the caller of the batch query" kev_failure_reaches_caller safedeps_providers_query_batch npm "${one_package}"
 
+# The overlay reads a file the reader passed a moment ago. If that file is no
+# catalog by then, nothing is listed in it and nothing is unlisted either.
+kev_overlay_rc() {
+  rc=0
+  env SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; if safedeps_kev_overlay "$1" 2026-01-01T00:00:00Z "$2"; then exit 0; fi; exit 1' overlay "${home}/osv.json" "$1" >/dev/null 2>&1 || rc=$?
+}
+kev_overlay_refuses() {
+  fresh_home
+  printf '{}' > "${home}/osv.json"
+  plant_kev "${kev_catalog}"
+  kev_overlay_rc "$(kev_file)"
+  [[ "${rc}" == 0 ]] || no "the control exits ${rc}"
+  plant_kev "$1"
+  kev_overlay_rc "$(kev_file)"
+  [[ "${rc}" != 0 ]] || no "the overlay answered from '$1'"
+}
+for body in '' 'null' '{}' '{"vulnerabilities":null}'; do
+  row "the overlay does not read '${body}' as a catalog with nothing listed" kev_overlay_refuses "${body}"
+done
+
 kev_said_once() {
   fresh_home
   plant_kev "${kev_catalog}" stale
