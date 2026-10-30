@@ -27,7 +27,7 @@ impl Before {
         if moved||entry.is_empty(){return Self::Unknown}
         let Ok(v)=crate::json::parse_one(entry) else{return Self::Unknown};
         match jv::path(&v,&[rec::INODES,rec::TREE]) {
-            Ok(Value::Str(i)) if !i.is_empty()&&os::tree_inode(&project.join("node_modules")).as_bytes()==i.as_slice()=>{
+            Ok(Value::Str(i)) if !i.is_empty()&&os::tree_inode(&project.join(rec::TREE)).as_bytes()==i.as_slice()=>{
                 let listed=match jv::field(&v,rec::ENTRIES) {
                     Ok(Value::Arr(xs))=>xs.iter().map(|x|match x {Value::Str(s)=>Some(s.clone()),_=>None}).collect::<Option<Vec<_>>>(),
                     _=>None,

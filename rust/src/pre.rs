@@ -302,8 +302,8 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     // every name is text JSON holds as it is: a name it would alter, or one a
     // failed read left out, would read as one the command added.
     let mut listed = None;
-    if std::fs::symlink_metadata(d.join("node_modules")).is_ok_and(|m| m.is_dir()) {
-        let (entries, failed) = crate::post::tree_entries(&d.join("node_modules"));
+    if std::fs::symlink_metadata(d.join(rec::TREE)).is_ok_and(|m| m.is_dir()) {
+        let (entries, failed) = crate::post::tree_entries(&d.join(rec::TREE));
         if failed.is_none() && entries.iter().all(|e| std::str::from_utf8(e).is_ok()) {
             listed = Some(jq::J::Arr(entries.iter().map(|e| jq::arg(e)).collect()));
         }

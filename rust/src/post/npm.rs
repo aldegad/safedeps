@@ -64,7 +64,7 @@ impl Npm{
         if !ok{state::log_advisory(&store.home,&cat(&[b"post-verify: could not keep the hash of the tree record judged in ",sh::bytes(&store.project),b" (",sh::bytes(&dir),b"), so the next install there counts every integrity in it as new."]));}
     }
     fn fresh_integrities(store:&Store,tree:&Path)->Result<Vec<Value>,()>{
-        let mut files:Vec<_>=[store.project.join("package-lock.json"),tree.into()].into_iter().filter(|p|sh::is_file(p)).map(|p|(p,false)).collect();
+        let mut files:Vec<_>=[store.project.join(trace::RECORDS[0]),tree.into()].into_iter().filter(|p|sh::is_file(p)).map(|p|(p,false)).collect();
         if files.is_empty(){return Ok(Vec::new())}
         let before=store.path(&store.id,b"npm-tree-record.json");
         if sh::is_file(&before){

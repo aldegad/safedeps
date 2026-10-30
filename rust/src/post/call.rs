@@ -69,7 +69,7 @@ impl Call {
                     sh::rm_f(&base.with_extension("trace"));
                 } else {
                     // A key is `<directory hash>_<command hash>`.
-                    let taken = field(&jv::read(&entry), &["key"]).unwrap_or_default();
+                    let taken = field(&jv::read(&entry), &[callid::record::KEY]).unwrap_or_default();
                     let command_of = |k: &[u8]| k.iter().position(|b| *b == b'_').map(|i| k[i..].to_vec());
                     if taken == key.as_bytes() {
                     } else if command_of(&taken).is_some_and(|c| Some(c) == command_of(key.as_bytes())) {

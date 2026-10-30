@@ -50,7 +50,8 @@ pub fn call_base(dir: &str, id: &str) -> Option<String> {
 /// The names in the two files the pre hook leaves for the post hook of one
 /// call: the install record (`pre/pending.rs`, read by `post/call.rs`,
 /// `post/trace.rs`, `post/run.rs` and `post/npm.rs`) and the backstop's trace
-/// entry (`pre.rs`, read by `post/trace.rs` and `post/rollback.rs`). Only the
+/// entry (`pre.rs`, read by `post/call.rs`, `post/trace.rs` and
+/// `post/rollback.rs`). Only the
 /// names are shared: each reader keeps its own answer for a field that is
 /// missing or of another type. The hook input's own `tool_use_id`, read
 /// above, is the runtime's name, not one of these.
@@ -86,15 +87,20 @@ pub mod record {
 
 /// The files that write or read the two records spell none of their names
 /// again: a writer that types a key its reader looks up by the constant, or
-/// the reverse, is a second spelling no compiler sees. Names that are also a
-/// plain word or a path elsewhere in these files (`key`, `baseline`,
-/// `package-lock.json`, `node_modules`) and `tool_use_id`, which is also the
-/// runtime's name and the accepted-risk entry's, are left to the compiler.
+/// the reverse, is a second spelling no compiler sees. Two names are left
+/// out: `tool_use_id`, which is also the runtime's name and the accepted-risk
+/// entry's, and the project's `package-lock.json` and `node_modules`, which
+/// these files also join as paths to walk, restore and report. pre/snapshot.rs
+/// reads a probe's own input under some of the same names, so it is held to
+/// the tree record's name alone. This sees a declared name spelled again,
+/// not a new literal that misspells one: those are what the batteries that
+/// read the records see.
 #[cfg(test)]
 #[test]
 fn record_names_are_spelled_once() {
     let names = [record::SNAPSHOT_ID, record::PROJECT_DIR, record::DIR_HASH, record::PROJECT_DIR_FROM, record::NPM_INSTALL,
         record::RUNNER_ONLY, record::NPM_TRACE, record::NPM_UNATTRIBUTABLE, record::NPM_FETCH, record::ACCEPT_RISK,
+        record::BASELINE, record::INODES, record::KEY, record::RESOLUTION, record::CLOCKS, record::ENTRIES,
         record::SECONDS, record::SUBSECOND, record::RECORDS[1]];
     for (file, text) in [("pre/pending.rs", include_str!("pre/pending.rs")), ("pre.rs", include_str!("pre.rs")),
                          ("post/call.rs", include_str!("post/call.rs")), ("post/trace.rs", include_str!("post/trace.rs")),
@@ -106,4 +112,6 @@ fn record_names_are_spelled_once() {
             assert!(lines.is_empty(), "{file} spells {quoted} outside callid::record: {lines:?}");
         }
     }
+    let quoted = format!("\"{}\"", record::RECORDS[1]);
+    assert!(!include_str!("pre/snapshot.rs").contains(&quoted), "pre/snapshot.rs spells {quoted} outside callid::record");
 }
