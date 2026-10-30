@@ -63,6 +63,8 @@ def main():
                 sweeps.append(pid)
             codes=[os.waitpid(pid,0)[1] for pid in sweeps]
             results.append(check(codes==[0]*8 and not list(owners.MARKERS.iterdir()),'eight sweeps of the same stale leases all finish and leave none'))
+            # Those eight may never meet. This is what the one that loses finds.
+            results.append(check(owners.cleanup(owners.MARKERS/'finished')['reaped']==[],'a lease another sweep finished is nothing to clean'))
             # What getppid() answers for an orphan is init or a subreaper.
             other=sleeper();spawned.append(other)
             results.append(check(all(owners.judgment(pid,root) is None for pid in (0,1,other.pid)),
