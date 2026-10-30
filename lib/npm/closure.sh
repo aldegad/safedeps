@@ -3,6 +3,18 @@
 
 set -euo pipefail
 
+# The closure source types, the context kinds and the materialization.
+# shellcheck source=../ledger/context-kinds.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/ledger/context-kinds.sh"
+
+# A closure source that cannot vouch for an approval says why and is
+# deny-only: written by safedeps_npm_write_source, read by
+# safedeps_npm_source_is_deny_only.
+SAFEDEPS_NPM_DENY_ONLY="deny-only"
+SAFEDEPS_NPM_PROJECT_CLOSURE_UNAVAILABLE="project-closure-unavailable"
+SAFEDEPS_NPM_CANDIDATE_UNAVAILABLE="project-candidate-materialization-unavailable"
+SAFEDEPS_NPM_PROJECT_CONTEXT_INVALID="project-context-invalid"
+
 safedeps_npm_require_jq() {
   if ! command -v jq >/dev/null 2>&1; then
     printf 'safedeps npm closure: jq is required\n' >&2
@@ -444,7 +456,7 @@ safedeps_npm_yarn_materialize_candidate_closure() {
     cd "${mirror_root}" &&
       YARN_CACHE_FOLDER="${mirror_root}/.safedeps-yarn-cache" \
       YARN_ENABLE_GLOBAL_CACHE=false \
-      yarn install --mode=update-lockfile --no-immutable >/dev/null
+      "${SAFEDEPS_CONTEXT_MATERIALIZE[@]}" >/dev/null
   ); then
     printf 'safedeps npm closure: isolated Yarn candidate materialization failed for %s@%s\n' "${package_name}" "${version}" >&2
     rm -rf "${mirror_root}"
@@ -478,18 +490,18 @@ safedeps_npm_yarn_materialize_candidate_closure() {
   fi
 
   jq -c \
-    --arg type "yarn-project-materialized-lockfile" \
+    --arg type "${SAFEDEPS_CONTEXT_YARN_MATERIALIZED}" \
     --arg candidate "${package_name}@npm:${version}" \
     --arg generated_lockfile_sha256 "sha256:${generated_lockfile_sha}" \
-    '
+    "${SAFEDEPS_CONTEXT_JQ}"'
       . + {
         type: $type,
         materialization: {
           candidate: $candidate,
           input_sha256: .input_sha256,
           generated_lockfile_sha256: $generated_lockfile_sha256,
-          command: "yarn install --mode=update-lockfile --no-immutable",
-          isolation: "private-project-mirror"
+          command: context_materialize_command,
+          isolation: context_materialize_isolation
         }
       }
     ' "${project_context_file}" > "${source_file}" || {
@@ -547,7 +559,7 @@ ${resolutions_sha}
 ${lockfile_sha}
 ${input_sha}") || { rm -f "${inputs_file}"; return 2; }
         jq -cn \
-          --arg type "yarn-project-lockfile" \
+          --arg type "${SAFEDEPS_CONTEXT_YARN_LOCKFILE}" \
           --arg context_hash "sha256:${context_hex}" \
           --arg project_root "${dir}" \
           --arg manifest_path "${manifest}" \
@@ -680,16 +692,21 @@ safedeps_npm_write_source() {
   local reason="${4:-}"
 
   if [[ -n "${context_file}" && -f "${context_file}" ]]; then
-    jq -c --arg type "${type}" --arg reason "${reason}" '
+    jq -c --arg type "${type}" --arg reason "${reason}" --arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}" '
       . + {type: $type}
-      + (if $reason == "" then {} else {project_resolution_status: $reason, approval_scope: "deny-only"} end)
+      + (if $reason == "" then {} else {project_resolution_status: $reason, approval_scope: $deny_only} end)
     ' "${context_file}" > "${output_file}"
   else
-    jq -cn --arg type "${type}" --arg reason "${reason}" '
+    jq -cn --arg type "${type}" --arg reason "${reason}" --arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}" '
       {type: $type}
-      + (if $reason == "" then {} else {project_resolution_status: $reason, approval_scope: "deny-only"} end)
+      + (if $reason == "" then {} else {project_resolution_status: $reason, approval_scope: $deny_only} end)
     ' > "${output_file}"
   fi
+}
+
+# True when the closure source in this file is deny-only.
+safedeps_npm_source_is_deny_only() {
+  [[ "$(jq -r '.approval_scope // ""' "$1")" == "${SAFEDEPS_NPM_DENY_ONLY}" ]]
 }
 
 # Discover the consuming repo's npm `overrides` so the closure probe resolves
@@ -944,7 +961,7 @@ safedeps_npm_resolve_spec_closure() {
   safedeps_npm_require_jq || return 1
 
   if safedeps_npm_fixture_closure "${package_name}" "${version}"; then
-    [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "fixture"
+    [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_FIXTURE}"
     return 0
   fi
 
@@ -953,7 +970,7 @@ safedeps_npm_resolve_spec_closure() {
     project_context_status=0
     project_root=$(jq -r '.project_root' "${project_context_file}")
     if safedeps_npm_yarn_project_closure "${package_name}" "${version}" "${project_root}"; then
-      [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "yarn-project-lockfile" "${project_context_file}"
+      [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "${SAFEDEPS_CONTEXT_YARN_LOCKFILE}" "${project_context_file}"
       rm -f "${project_context_file}"
       return 0
     else
@@ -965,9 +982,9 @@ safedeps_npm_resolve_spec_closure() {
     fi
     if [[ -n "${source_file}" ]]; then
       if [[ "${project_closure_status}" -eq 2 ]]; then
-        safedeps_npm_write_source "${source_file}" "yarn-project-candidate-materialization" "${project_context_file}" "project-candidate-materialization-unavailable"
+        safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_YARN_CANDIDATE}" "${project_context_file}" "${SAFEDEPS_NPM_CANDIDATE_UNAVAILABLE}"
       else
-        safedeps_npm_write_source "${source_file}" "yarn-project-lockfile" "${project_context_file}" "project-closure-unavailable"
+        safedeps_npm_write_source "${source_file}" "${SAFEDEPS_CONTEXT_YARN_LOCKFILE}" "${project_context_file}" "${SAFEDEPS_NPM_PROJECT_CLOSURE_UNAVAILABLE}"
       fi
     fi
     printf 'safedeps npm closure: Yarn project candidate is not verifiable; published closure is not used\n' >&2
@@ -1028,16 +1045,16 @@ safedeps_npm_resolve_spec_closure() {
   local overrides_context_file=""
   if [[ -n "${source_file}" ]]; then
     if [[ "${project_context_status}" -eq 0 ]]; then
-      safedeps_npm_write_source "${source_file}" "npm-package-probe" "${project_context_file}" "project-closure-unavailable"
+      safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}" "${project_context_file}" "${SAFEDEPS_NPM_PROJECT_CLOSURE_UNAVAILABLE}"
     elif [[ "${project_context_status}" -eq 2 ]]; then
-      safedeps_npm_write_source "${source_file}" "npm-package-probe" "" "project-context-invalid"
+      safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}" "" "${SAFEDEPS_NPM_PROJECT_CONTEXT_INVALID}"
     else
       overrides_context_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-ctx.XXXXXX") || overrides_context_file=""
       if [[ -n "${overrides_context_file}" ]] && \
           safedeps_npm_overrides_context "${overrides_context_file}" "${overrides_json}" "${overrides_source}"; then
-        safedeps_npm_write_source "${source_file}" "npm-overrides-probe" "${overrides_context_file}"
+        safedeps_npm_write_source "${source_file}" "${SAFEDEPS_CONTEXT_NPM_OVERRIDES}" "${overrides_context_file}"
       else
-        safedeps_npm_write_source "${source_file}" "npm-package-probe"
+        safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}"
       fi
       rm -f "${overrides_context_file}"
     fi

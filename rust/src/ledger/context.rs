@@ -159,7 +159,7 @@ pub fn yarn(project:&Path)->Result<Option<Value>,W> {
                     let resolutions=sha256::hex(&json::captured(&resolutions));let lock_hash=file_hash(&data,&bytes(&lock));
                     let context=sha256::hex(&cat(&[&bytes(&dir),b"\n",resolutions.as_bytes(),b"\n",lock_hash.as_bytes(),b"\n",&inputs]));
                     return Ok(Some(jq::into_value(jq::obj(vec![
-                        ("type",jq::s("yarn-project-lockfile")),("context_hash",jq::s(&format!("sha256:{}",context))),
+                        ("type",jq::s(super::ContextKind::YarnLockfile.as_str())),("context_hash",jq::s(&format!("sha256:{}",context))),
                         ("project_root",jq::arg(&bytes(&dir))),("manifest_path",jq::arg(&bytes(&manifest))),("lockfile_path",jq::arg(&bytes(&lock))),
                         ("resolutions_sha256",jq::s(&format!("sha256:{}",resolutions))),("lockfile_sha256",jq::s(&format!("sha256:{}",lock_hash))),
                         ("input_sha256",jq::arg(&inputs)),("input_files",jq::from_value(&files)),

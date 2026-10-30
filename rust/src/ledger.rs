@@ -12,6 +12,26 @@ fn hash_field(v: &Value, key: &str) -> bool { string(v, key).is_some_and(|s| s.s
 fn defaulted(v: Option<&Value>) -> Option<&Value> { v.filter(|v| !matches!(v, Value::Null | Value::Bool(false))) }
 fn object(v: Option<&Value>) -> bool { matches!(v, Some(Value::Obj(_))) }
 
+/// The project_context kinds that scope an approval to a project.
+/// lib/ledger/context-kinds.sh declares the same names, and
+/// context_kinds_match_cli holds the two together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContextKind { NpmOverrides, YarnLockfile, YarnMaterialized }
+impl ContextKind {
+    const ALL: [Self; 3] = [Self::NpmOverrides, Self::YarnLockfile, Self::YarnMaterialized];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NpmOverrides => "npm-overrides-probe",
+            Self::YarnLockfile => "yarn-project-lockfile",
+            Self::YarnMaterialized => "yarn-project-materialized-lockfile",
+        }
+    }
+    fn parse(s: &str) -> Option<Self> { Self::ALL.into_iter().find(|k| k.as_str() == s) }
+}
+/// What a materialized Yarn candidate records it ran, and where.
+const MATERIALIZE_COMMAND: &str = "yarn install --mode=update-lockfile --no-immutable";
+const MATERIALIZE_ISOLATION: &str = "private-project-mirror";
+
 /// SAFEDEPS_LEDGER_JQ_PREDICATE/ledger_is_valid, used by both readers.
 pub fn valid(v: &Value) -> bool {
     if !matches!(v, Value::Obj(_)) || !hash_field(v, "hash")
@@ -21,20 +41,20 @@ pub fn valid(v: &Value) -> bool {
     if defaulted(v.get("transitive_specs")).is_some_and(|t| !matches!(t, Value::Arr(_))) { return false; }
     let Some(c) = defaulted(v.get("project_context")) else { return true; };
     if !matches!(c, Value::Obj(_)) || !hash_field(c, "context_hash") || !nonempty(c, "project_root") { return false; }
-    match string(c, "type") {
-        Some("npm-overrides-probe") => nonempty(c, "overrides_source") && hash_field(c, "overrides_sha256")
+    match string(c, "type").and_then(ContextKind::parse) {
+        Some(ContextKind::NpmOverrides) => nonempty(c, "overrides_source") && hash_field(c, "overrides_sha256")
             && matches!(c.get("overrides"), Some(Value::Obj(o)) if !o.is_empty()),
-        Some(kind @ ("yarn-project-lockfile" | "yarn-project-materialized-lockfile")) => {
+        Some(kind @ (ContextKind::YarnLockfile | ContextKind::YarnMaterialized)) => {
             if !nonempty(c, "manifest_path") || !nonempty(c, "lockfile_path") || !hash_field(c, "input_sha256")
                 || !matches!(c.get("input_files"), Some(Value::Arr(a)) if !a.is_empty()) { return false; }
-            if kind == "yarn-project-lockfile" { return true; }
+            if kind == ContextKind::YarnLockfile { return true; }
             let Some(m) = c.get("materialization") else { return false; };
             matches!(m, Value::Obj(_)) && nonempty(m, "candidate") && string(m, "input_sha256") == string(c, "input_sha256")
                 && hash_field(m, "generated_lockfile_sha256")
-                && string(m, "command") == Some("yarn install --mode=update-lockfile --no-immutable")
-                && string(m, "isolation") == Some("private-project-mirror")
+                && string(m, "command") == Some(MATERIALIZE_COMMAND)
+                && string(m, "isolation") == Some(MATERIALIZE_ISOLATION)
         }
-        _ => false,
+        None => false,
     }
 }
 
@@ -258,4 +278,114 @@ fn ledger_defaults_match_cli() {
     // Text expansion retains the extra slash; native Path::join normalizes it.
     assert_eq!(Path::new("x/").join(DIRECTORY_NAME).as_os_str(), "x/approved-specs");
     assert_ne!(Path::new("x/").join(DIRECTORY_NAME).as_os_str(), "x//approved-specs");
+}
+
+#[cfg(test)]
+#[test]
+fn context_kinds_match_cli() {
+    let kinds = include_str!("../../lib/ledger/context-kinds.sh");
+    for (kind, constant) in [(ContextKind::NpmOverrides, "NPM_OVERRIDES"), (ContextKind::YarnLockfile, "YARN_LOCKFILE"), (ContextKind::YarnMaterialized, "YARN_MATERIALIZED")] {
+        assert!(kinds.lines().any(|line| line == format!("SAFEDEPS_CONTEXT_{constant}=\"{}\"", kind.as_str())), "CLI declares context kind {}", kind.as_str());
+    }
+    assert!(kinds.lines().any(|line| line == format!("SAFEDEPS_CONTEXT_MATERIALIZE=({MATERIALIZE_COMMAND})")), "CLI materialization command");
+    assert!(kinds.lines().any(|line| line == format!("SAFEDEPS_CONTEXT_MATERIALIZE_ISOLATION=\"{MATERIALIZE_ISOLATION}\"")), "CLI materialization isolation");
+    // A kind, a source type or the materialization is spelled in its
+    // declaration and in no file of the CLI that writes or reads it: not in a
+    // string, a case pattern or a comment. A spelling counts as a word, so
+    // `fixture` inside `safedeps_npm_fixture_closure` is not one; and a
+    // spelling that is one plain word is prose too, so it counts only quoted.
+    let mut spellings: Vec<String> = kinds.lines()
+        .filter_map(|line| line.strip_prefix("SAFEDEPS_").and_then(|line| line.split_once('=')))
+        .filter_map(|(_, value)| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
+        .filter(|value| !value.contains('$')).map(|value| if value.bytes().all(|b| b.is_ascii_lowercase()) { format!("\"{value}\"") } else { value.into() }).collect();
+    spellings.push(MATERIALIZE_COMMAND.into());
+    assert_eq!(spellings.len(), 8, "the declared spellings: {spellings:?}");
+    let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    for (file, text) in [("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")),
+                         ("lib/npm/closure.sh", include_str!("../../lib/npm/closure.sh")),
+                         ("bin/safedeps", include_str!("../../bin/safedeps"))] {
+        for spelling in &spellings {
+            let lines: Vec<&str> = text.lines().filter(|line| line.match_indices(spelling.as_str()).any(|(at, _)|
+                !word(line.as_bytes().get(at.wrapping_sub(1))) && !word(line.as_bytes().get(at + spelling.len())))).collect();
+            assert!(lines.is_empty(), "{file} spells {spelling} outside its declaration: {lines:?}");
+        }
+    }
+}
+
+/// The CLI's approval predicate and `valid` give one answer: the base
+/// approval, each field of it and of each context kind set to each of a list
+/// of values or removed, and a few texts only a parser sees.
+#[cfg(test)]
+#[test]
+fn valid_matches_cli_predicate() {
+    use std::io::Write;
+    fn parse(text: &str) -> Value { json::parse_one(text.as_bytes()).unwrap() }
+    fn dump(v: &Value) -> String { jq::compact(&jq::from_value(v)) }
+    fn keys(v: &Value) -> Vec<String> { match v { Value::Obj(o) => o.iter().map(|(k, _)| String::from_utf8(k.clone()).unwrap()).collect(), _ => Vec::new() } }
+    fn put(v: &Value, path: &[&str], value: Option<&Value>) -> Value {
+        let mut v = v.clone();
+        let mut at = &mut v;
+        for key in &path[..path.len() - 1] {
+            let Value::Obj(o) = at else { unreachable!() };
+            at = &mut o.iter_mut().find(|(k, _)| k == key.as_bytes()).unwrap().1;
+        }
+        let Value::Obj(o) = at else { unreachable!() };
+        let key = path[path.len() - 1].as_bytes().to_vec();
+        match value { Some(x) => json::set(o, key, x.clone()), None => o.retain(|(k, _)| *k != key) }
+        v
+    }
+    let values: Vec<Option<Value>> = std::iter::once(None)
+        .chain(["null", "false", "true", "0", "1", "\"\"", "\"x\"", "\"sha256\"", "\"sha256:\"", "\"sha256:x\"", "[]", "[1]", "{}", "{\"a\":1}"].map(|t| Some(parse(t)))).collect();
+    let mut cases: Vec<(String, String)> = Vec::new();
+    let vary = |cases: &mut Vec<(String, String)>, label: &str, v: &Value, path: &[&str], with: &[Option<Value>]| {
+        for x in with { cases.push((format!("{label} {}={}", path.join("."), x.as_ref().map_or("missing".into(), dump)), dump(&put(v, path, x.as_ref())))); }
+    };
+    let base = parse(r#"{"hash":"sha256:aa","ecosystem":"npm","package":"p","version":"1.0.0","version_range":"^1","approved_at":"2020-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","approved_by":"cli","evidence":{},"transitive_specs":[]}"#);
+    let overrides = parse(&format!(r#"{{"type":"{}","context_hash":"sha256:c","project_root":"/r","overrides_source":"/r/package.json","overrides_sha256":"sha256:o","overrides":{{"x":"1"}}}}"#, ContextKind::NpmOverrides.as_str()));
+    let lockfile = parse(&format!(r#"{{"type":"{}","context_hash":"sha256:c","project_root":"/r","manifest_path":"/r/package.json","lockfile_path":"/r/yarn.lock","resolutions_sha256":"sha256:r","lockfile_sha256":"sha256:l","input_sha256":"sha256:i","input_files":[{{"path":"package.json","sha256":"sha256:f"}}]}}"#, ContextKind::YarnLockfile.as_str()));
+    let materialization = parse(&format!(r#"{{"candidate":"p@npm:1.0.0","input_sha256":"sha256:i","generated_lockfile_sha256":"sha256:g","command":"{MATERIALIZE_COMMAND}","isolation":"{MATERIALIZE_ISOLATION}"}}"#));
+    let materialized = put(&put(&lockfile, &["type"], Some(&Value::Str(ContextKind::YarnMaterialized.as_str().into()))), &["materialization"], Some(&materialization));
+    cases.push(("base".into(), dump(&base)));
+    for key in keys(&base) { vary(&mut cases, "base", &base, &[&key], &values); }
+    vary(&mut cases, "base", &base, &["project_context"], &values);
+    for text in ["null", "\"x\"", "1", "[]", "{}"] { cases.push((format!("top {text}"), text.into())); }
+    let types: Vec<Option<Value>> = ContextKind::ALL.iter().map(|k| k.as_str())
+        .chain(["fixture", "npm-package-probe", "yarn-project-candidate-materialization"])
+        .map(|t| Some(Value::Str(t.into()))).chain([Some(Value::Null), Some(parse("1")), None]).collect();
+    let mut complete = Vec::new();
+    for (name, context) in [("overrides", &overrides), ("lockfile", &lockfile), ("materialized", &materialized)] {
+        let approval = put(&base, &["project_context"], Some(context));
+        complete.push(dump(&approval));
+        cases.push((format!("{name} complete"), dump(&approval)));
+        for key in keys(context) { vary(&mut cases, name, &approval, &["project_context", &key], &values); }
+        vary(&mut cases, name, &approval, &["project_context", "type"], &types);
+    }
+    let materialized_approval = put(&base, &["project_context"], Some(&materialized));
+    for key in keys(&materialization) { vary(&mut cases, "materialized", &materialized_approval, &["project_context", "materialization", &key], &values); }
+    let mut union = overrides.clone();
+    for key in keys(&lockfile).into_iter().filter(|k| k != "type") { union = put(&union, &[&key], lockfile.get(&key)); }
+    cases.push(("overrides with the lockfile fields".into(), dump(&put(&base, &["project_context"], Some(&union)))));
+    let text = dump(&base);
+    cases.push(("a second hash, last".into(), format!("{},\"hash\":5}}", &text[..text.len() - 1])));
+    cases.push(("a second hash, first".into(), format!("{{\"hash\":5,{}", &text[1..])));
+    cases.push(("an escaped input hash".into(), complete[2].replacen("\"input_sha256\":\"sha256:i\",\"input_files\"", "\"input_sha256\":\"\\u0073ha256:i\",\"input_files\"", 1)));
+    cases.push(("a NUL package".into(), text.replacen("\"package\":\"p\"", "\"package\":\"\\u0000\"", 1)));
+    for text in &complete { assert!(valid(&parse(text)), "complete context is valid: {text}"); }
+
+    let source = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/ledger/ledger.sh");
+    let mut child = std::process::Command::new("/bin/bash").env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default()).env("HOME", "fixture home")
+        .args(["-c", "source \"$1\"\nexec jq -c \"${SAFEDEPS_LEDGER_JQ_PREDICATE}\"' try ledger_is_valid catch \"error\"'", "ledger-predicate", source])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(cases.iter().map(|(_, t)| format!("{t}\n")).collect::<String>().as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "CLI predicate: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let answers: Vec<&str> = stdout.lines().collect();
+    assert_eq!(answers.len(), cases.len(), "one CLI answer per case");
+    let differ: Vec<String> = cases.iter().zip(&answers).filter_map(|((label, text), answer)| {
+        let core = valid(&parse(text));
+        (*answer != if core { "true" } else { "false" }).then(|| format!("{label}: core {core}, CLI {answer}"))
+    }).collect();
+    assert!(differ.is_empty(), "{} of {} cases differ:\n{}", differ.len(), cases.len(), differ.join("\n"));
 }

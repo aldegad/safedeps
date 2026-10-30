@@ -8,6 +8,10 @@ SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR:-${SAFEDEPS_HOME}/approved-specs}"
 SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS="${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-30}"
 
+# The project_context kinds and the materialization record the predicate checks.
+# shellcheck source=./context-kinds.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/context-kinds.sh"
+
 safedeps_ledger_init() {
   umask 077
   mkdir -p "${SAFEDEPS_LEDGER_DIR}"
@@ -109,8 +113,9 @@ safedeps_ledger_path() {
 # below applies the same text to a whole directory in one pass. Two copies of
 # this would be two answers to "is this spec approved", which is exactly the
 # split the ledger exists to prevent — so it lives here as jq source that both
-# callers embed rather than as two hand-kept expressions.
-SAFEDEPS_LEDGER_JQ_PREDICATE='
+# callers embed rather than as two hand-kept expressions. The context kinds it
+# names come from SAFEDEPS_CONTEXT_JQ (context-kinds.sh), put in front of it.
+SAFEDEPS_LEDGER_JQ_PREDICATE="${SAFEDEPS_CONTEXT_JQ}"'
 def ledger_is_valid:
     type == "object"
     and (.hash | type == "string" and startswith("sha256:"))
@@ -128,7 +133,7 @@ def ledger_is_valid:
       and (.project_context.context_hash | type == "string" and startswith("sha256:"))
       and (.project_context.project_root | type == "string" and length > 0)
       and (
-        if .project_context.type == "npm-overrides-probe" then
+        if .project_context.type == context_npm_overrides then
           # The probe honored the consuming repo overrides, so the closure is
           # project-specific and the approval is keyed to that override set.
           (.project_context.overrides_source | type == "string" and length > 0)
@@ -139,24 +144,24 @@ def ledger_is_valid:
       )
     ))
     and ((.project_context // null) == null
-      or .project_context.type == "npm-overrides-probe"
+      or .project_context.type == context_npm_overrides
       or (
       (
-        .project_context.type == "yarn-project-lockfile"
-        or .project_context.type == "yarn-project-materialized-lockfile"
+        .project_context.type == context_yarn_lockfile
+        or .project_context.type == context_yarn_materialized
       )
       and (.project_context.manifest_path | type == "string" and length > 0)
       and (.project_context.lockfile_path | type == "string" and length > 0)
       and (.project_context.input_sha256 | type == "string" and startswith("sha256:"))
       and ((.project_context.input_files // []) | type == "array" and length > 0)
       and (
-        if .project_context.type == "yarn-project-materialized-lockfile" then
+        if .project_context.type == context_yarn_materialized then
           (.project_context.materialization | type) == "object"
           and (.project_context.materialization.candidate | type == "string" and length > 0)
           and (.project_context.materialization.input_sha256 == .project_context.input_sha256)
           and (.project_context.materialization.generated_lockfile_sha256 | type == "string" and startswith("sha256:"))
-          and (.project_context.materialization.command == "yarn install --mode=update-lockfile --no-immutable")
-          and (.project_context.materialization.isolation == "private-project-mirror")
+          and (.project_context.materialization.command == context_materialize_command)
+          and (.project_context.materialization.isolation == context_materialize_isolation)
         else true
         end
       )
@@ -328,14 +333,7 @@ safedeps_ledger_write_approved_spec() {
       printf 'safedeps ledger: project context file not found: %s\n' "${project_context_file}" >&2
       return 1
     }
-    context_hash=$(jq -r '
-      select(
-        .type == "yarn-project-lockfile"
-        or .type == "yarn-project-materialized-lockfile"
-        or .type == "npm-overrides-probe"
-      )
-      | .context_hash // empty
-    ' "${project_context_file}")
+    context_hash=$(jq -r "${SAFEDEPS_CONTEXT_JQ}"'select(.type | context_scopes) | .context_hash // empty' "${project_context_file}")
     [[ -n "${context_hash}" ]] || {
       printf 'safedeps ledger: invalid project context: %s\n' "${project_context_file}" >&2
       return 1
