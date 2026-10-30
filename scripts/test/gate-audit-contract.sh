@@ -180,7 +180,7 @@ assert_audit() {
 }
 assert_audit 2 "npm: a clean report from an audit that failed is no verdict" "${npm_fixture}" FAKE_NPM_MODE=failed
 assert_audit 0 "npm: an exit with a finding below the level stays clean at that level" "${npm_fixture}" FAKE_NPM_MODE=low
-assert_audit 2 "npm: the counts jq printed and failed on are no count" "${npm_fixture}" STUB_MATCH='.metadata.vulnerabilities' FAKE_NPM_MODE=clean
+assert_audit 2 "npm: the counts jq printed and failed on are no count" "${npm_fixture}" STUB_MATCH='-c .metadata.vulnerabilities' FAKE_NPM_MODE=clean
 assert_audit 2 "npm: the block count jq printed and failed on is no count" "${npm_fixture}" STUB_MATCH='$order' FAKE_NPM_MODE=clean
 assert_audit 2 "npm: a block count jq failed on before printing is not zero" "${npm_fixture}" STUB_MATCH='$order' STUB_BEFORE=1 FAKE_NPM_MODE=clean
 assert_audit 2 "npm: a finding the zero test jq failed on is no clean exit" "${npm_fixture}" STUB_MATCH='any(.[]; . != 0)' FAKE_NPM_MODE=low

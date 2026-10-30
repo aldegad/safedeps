@@ -713,9 +713,12 @@ row "the ledger listing and check read an unpadded expires_at the way the core d
 #
 # Each call whose arguments hold every line of STUB_MATCH, and start with
 # STUB_PREFIX when that is set, runs, prints what it prints, and exits 5. With
-# STUB_BEFORE set it exits 5 and prints nothing. A read a verdict rests on is
-# checked by its own return, so a row below names one read, and turning that
-# check off turns the row red.
+# STUB_BEFORE set it exits 5 and prints nothing. With STUB_SKIP_FIRST naming a
+# file, the first such call runs whole and leaves the file. A read a verdict
+# rests on is checked by its own return, so a row below names one read, and
+# turning that check off turns the row red. A row that goes through `check` ends
+# where the first failed read stops it, so a read that a later one would also
+# catch has a row that calls its function.
 after_bin="${tmp_root}/after-bin"
 mkdir -p "${after_bin}"
 for tool in jq date shasum sha256sum cat cut dirname mv find awk; do
@@ -729,6 +732,10 @@ while IFS= read -r wanted; do
 done <<< "\${STUB_MATCH:-}"
 [[ -n "\${STUB_TOOL_ONLY:-}" && "\${STUB_TOOL_ONLY}" != ${tool} ]] && hit=0
 [[ -z "\${STUB_PREFIX:-}" || "\$*" == "\${STUB_PREFIX}"* ]] || hit=0
+if [[ "\${hit}" -eq 1 && -n "\${STUB_SKIP_FIRST:-}" && ! -e "\${STUB_SKIP_FIRST}" ]]; then
+  : > "\${STUB_SKIP_FIRST}"
+  hit=0
+fi
 [[ "\${hit}" -eq 1 ]] || exec "${real}" "\$@"
 [[ -n "\${STUB_BEFORE:-}" ]] && exit 5
 "${real}" "\$@"
@@ -760,6 +767,9 @@ esac
 STUB
 chmod +x "${after_bin}"/*
 after_path="${after_bin}:${stub_bin}:${PATH}"
+# The hash tool the libraries pick: shasum, where there is one.
+hash_tool=sha256sum hash_match=''
+if command -v shasum >/dev/null 2>&1; then hash_tool=shasum hash_match='-a 256'; fi
 
 # Fails one call of `check`, and leaves `home`, `json` and `rc`.
 after_check() {
@@ -774,9 +784,12 @@ project_dir() {
   mkdir "${project}/.git"
 }
 in_project() {
+  fresh_home
+  project_check "$@"
+}
+project_check() {
   local ecosystem="$1" spec="$2" match="$3"
   shift 3
-  fresh_home
   rc=0
   json=$(cd "${project}" && env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH="${match}" "$@" \
     "${ROOT_DIR}/bin/safedeps" --json check "${ecosystem}" "${spec}" 2>"${home}/stderr") || rc=$?
@@ -865,21 +878,27 @@ curl_failure_recorded() {
   grep -q 'WARN CISA KEV unavailable and no readable local catalog status=200 exit 18' "${home}/advisory.log" || no "advisory.log does not say both: $(cat "${home}/advisory.log")"
 }
 row "the record says a failed request printed 200 and how it ended" curl_failure_recorded
+ghsa_curl_failed() {
+  after_check pypi fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/advisories
+  [[ "${rc}" == 0 ]] || no "GHSA is enrichment, and the check exits ${rc}: ${json}"
+  grep -q 'GHSA cross-check skipped .*status=200 exit 18' "${home}/advisory.log" || no "advisory.log does not say both: $(cat "${home}/advisory.log")"
+}
+row "a curl that printed 200 and failed is a skipped GHSA cross-check, and only that" ghsa_curl_failed
 cache_file="${tmp_root}/fresh-cache-file"
 : > "${cache_file}"
 row "a cache file's age is read from a clock that answered" function_fails date '+%s' safedeps_cache_is_fresh "${cache_file}"
-row "an OSV cache key that shasum printed and failed on is no cache path" function_fails shasum '-a 256' safedeps_osv_query_batch npm "${one_package}"
-row "an OSV single-query cache key that shasum printed and failed on is no cache path" function_fails shasum '-a 256' safedeps_osv_query pypi fixture-clean 1.0.0
+row "an OSV cache key that shasum printed and failed on is no cache path" function_fails "${hash_tool}" "${hash_match}" safedeps_osv_query_batch npm "${one_package}"
+row "an OSV single-query cache key that shasum printed and failed on is no cache path" function_fails "${hash_tool}" "${hash_match}" safedeps_osv_query pypi fixture-clean 1.0.0
 
 # What the ledger reads and writes.
-row "the ledger hash returns when shasum prints and fails" function_fails shasum '-a 256' safedeps_ledger_hash npm fixture-clean 1.0.0
-row "the ledger hash with a context returns when shasum prints and fails" function_fails shasum '-a 256' safedeps_ledger_hash npm fixture-clean 1.0.0 sha256:c
-row "the ledger path returns when shasum prints and fails" function_fails shasum '-a 256' safedeps_ledger_path npm fixture-clean 1.0.0
+row "the ledger hash returns when shasum prints and fails" function_fails "${hash_tool}" "${hash_match}" safedeps_ledger_hash npm fixture-clean 1.0.0
+row "the ledger hash with a context returns when shasum prints and fails" function_fails "${hash_tool}" "${hash_match}" safedeps_ledger_hash npm fixture-clean 1.0.0 sha256:c
+row "the ledger path returns when shasum prints and fails" function_fails "${hash_tool}" "${hash_match}" safedeps_ledger_path npm fixture-clean 1.0.0
 ledger_read_failed() {
   fresh_home
   SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve npm fixture-clean 1.0.0 >/dev/null
   rc=0
-  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH='-a 256' STUB_TOOL_ONLY=shasum \
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH="${hash_match}" STUB_TOOL_ONLY="${hash_tool}" \
     bash -c 'source lib/ledger/ledger.sh; if safedeps_ledger_read npm fixture-clean 1.0.0 >/dev/null; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
   [[ "${rc}" != 0 ]] || no "the entry was read"
 }
@@ -902,25 +921,35 @@ ledger_check_control() {
 }
 row "control: a ledger entry reads as approved under the stubs" ledger_check_control
 row "a ledger read returns when shasum prints and fails" ledger_read_failed
-row "a ledger check returns when shasum prints and fails" ledger_with_entry shasum '-a 256'
+row "a ledger check returns when shasum prints and fails" ledger_with_entry "${hash_tool}" "${hash_match}"
 row "a ledger check does not take a stored hash jq printed and failed on" ledger_with_entry jq '-r .hash'
-row "a ledger check does not take a stored context jq printed and failed on" ledger_with_entry jq 'ledger_context_hash'
-atomic_write_cat() {
-  fresh_home
+row "a ledger check does not take a stored context jq printed and failed on" ledger_with_entry jq 'ledger_context_hash /'
+atomic_write_run() {
   rc=0
-  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_TOOL_ONLY=cat \
-    bash -c 'source lib/ledger/ledger.sh; if safedeps_ledger_atomic_write "${SAFEDEPS_HOME}/approved-specs/x.json" <<< "{}"; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" "$@" \
+    bash -c 'source lib/ledger/ledger.sh; if safedeps_ledger_atomic_write "$1" <<< "$2"; then exit 0; fi; exit 1' write "${target}" "${entry}" >/dev/null 2>&1 || rc=$?
+}
+atomic_write_cat() {
+  local entry target
+  fresh_home
+  entry=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve npm fixture-clean 1.0.0)
+  target="${home}/approved-specs/written.json"
+  atomic_write_run STUB_MATCH='a call no row fails'
+  [[ "${rc}" == 0 && -f "${target}" ]] || no "the control exits ${rc}"
+  rm -f "${target}"
+  atomic_write_run STUB_TOOL_ONLY=cat
   [[ "${rc}" != 0 ]] || no "the write returned 0"
-  [[ -z "$(find "${home}/approved-specs" -type f 2>/dev/null)" ]] || no "the failed write left a file: $(ls -a "${home}/approved-specs")"
+  [[ -z "$(find "${home}/approved-specs" -name '*written*' 2>/dev/null)" ]] || no "the failed write left a file: $(ls -a "${home}/approved-specs")"
 }
 row "a ledger write that cat failed on leaves nothing and returns" atomic_write_cat
-row "an approval's dates come from a clock that answered" function_fails date '%Y-%m-%dT%H:%M:%SZ' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
-row "an approval's expiry comes from a clock that answered" function_fails date '+%s' safedeps_ledger_add_days_iso 30
-row "an approval's expiry is no date a failed clock left" function_fails date '-r' safedeps_ledger_add_days_iso 30
+row "an approval's date comes from a clock that answered" function_fails date '-u +%Y' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
+row "an approval's expiry comes from a clock that answered" function_fails date '+%s' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
+row "an expiry is added to a clock that answered" function_fails date '+%s' safedeps_ledger_add_days_iso 30
+row "an expiry is no date a failed clock left" function_fails date '%Y-%m-%dT%H:%M:%SZ' safedeps_ledger_add_days_iso 30
 project_context_file="${tmp_root}/project-context.json"
 printf '{"type":"npm-overrides-probe","context_hash":"sha256:c","project_root":"/r"}\n' > "${project_context_file}"
 row "an approval's context hash is read or there is no approval" function_fails jq 'context_scopes' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0 1.0.0 local '' 30 '' "${project_context_file}"
-row "an approval's hash is read or there is no approval" function_fails shasum '-a 256' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
+row "an approval's hash is read or there is no approval" function_fails "${hash_tool}" "${hash_match}" safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
 row "the entry an approval writes is one jq finished" function_fails jq 'version_range: $version_range' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
 
 # An approval is made whole and then written, or it is not written.
@@ -968,6 +997,8 @@ record_refused() {
 }
 row "npm: an approval the record could not take is taken back" record_refused npm fixture-clean@1.0.0
 row "non-npm: an approval the record could not take is taken back" record_refused pypi fixture-clean@1.0.0
+row "npm patched: an approval the record could not take is taken back" record_refused npm fixture-vuln@1.0.0
+row "non-npm patched: an approval the record could not take is taken back" record_refused pypi fixture-vuln@1.0.0
 
 # What the report is read from.
 row "npm: a vulnerable count jq printed and failed on is no count" fails_as unavailable npm fixture-clean@1.0.0 'select(.status == status_vulnerable)] | length'
@@ -981,13 +1012,14 @@ row "a range npm printed and failed on resolves to nothing" fails_as version_unr
 row "a resolved version jq printed and failed on is no version" fails_as version_unresolved npm 'fixture-clean@^1.0.0' 'if type=="array" then .[-1]'
 approved_read_failed() {
   fresh_home
-  check_in npm fixture-clean@1.0.0
+  check_in "$1" fixture-clean@1.0.0
   [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
-  check_in npm fixture-clean@1.0.0 PATH="${after_path}" STUB_MATCH='.approved == true'
+  check_in "$1" fixture-clean@1.0.0 PATH="${after_path}" STUB_MATCH='.approved == true'
   [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
   jq -e '.result == "clean"' <<< "${json}" >/dev/null || no "the ledger hit was read: ${json}"
 }
-row "an entry whose approved field jq printed and failed on is judged again" approved_read_failed
+row "npm: an entry whose approved field jq printed and failed on is judged again" approved_read_failed npm
+row "non-npm: an entry whose approved field jq printed and failed on is judged again" approved_read_failed pypi
 cached_report_failed() {
   fresh_home
   check_in npm fixture-clean@1.0.0
@@ -1105,12 +1137,38 @@ control_project() {
   jq -e '.result == "clean" and .closure_source.type == "npm-package-probe"' <<< "${json}" >/dev/null || no "the report: ${json}"
 }
 row "control: a project with overrides and one without clear the closure probe" control_project
-row "a Yarn manifest jq printed and failed on is not a project with no resolutions" yarn_refused refused '.resolutions | type'
-row "a Yarn context jq printed and failed on is no context" yarn_refused refused 'resolutions_sha256: $resolutions_sha256'
-row "a deny-only mark that does not read is no permission" fails_as refused npm fixture-clean@1.0.0 'source_approval_scope'
-row "a patch candidate whose deny-only mark does not read is no patch" fails_as candidate_withheld npm fixture-vuln@1.0.0 'source_approval_scope'
+yarn_context_rc() {
+  fresh_home
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH="$1" \
+    bash -c 'source lib/npm/closure.sh; rc=0; safedeps_npm_yarn_project_context "$1" "$2" || rc=$?; exit "${rc}"' context "${tmp_root}/yarn-context.json" "${project}" >/dev/null 2>&1 || rc=$?
+}
+# Through `check` a project with no yarn is refused whatever these reads say, so
+# each asks the function, against what it answers with no fault.
+yarn_declares_failed() {
+  project_dir
+  printf '{"name":"p"}\n' > "${project}/package.json"
+  printf '__metadata:\n  version: 8\n' > "${project}/yarn.lock"
+  yarn_context_rc 'a call no row fails'
+  [[ "${rc}" == 1 ]] || no "the control exits ${rc}"
+  yarn_context_rc '.resolutions | type'
+  [[ "${rc}" == 2 ]] || no "exit ${rc}, not 2"
+}
+yarn_context_failed() {
+  yarn_project
+  yarn_context_rc 'a call no row fails'
+  [[ "${rc}" == 0 ]] || no "the control exits ${rc}"
+  yarn_context_rc "$1"
+  [[ "${rc}" == 2 ]] || no "exit ${rc}, not 2"
+}
+row "a Yarn manifest that answered none and then failed is no project with no resolutions" yarn_declares_failed
+row "a Yarn manifest that answered some and then failed is a failed read" yarn_context_failed '.resolutions | type'
+row "a Yarn context jq printed and failed on is no context" yarn_context_failed 'resolutions_sha256: $resolutions_sha256'
+row "a deny-only mark that does not read is no permission" fails_as refused npm fixture-clean@1.0.0 'source_approval_scope // ""'
+row "a patch candidate whose deny-only mark does not read is no patch" fails_as candidate_withheld npm fixture-vuln@1.0.0 'source_approval_scope // ""'
 row "overrides jq printed and failed on are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 '.overrides | type'
 row "overrides whose filter jq printed and failed on are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 'to_entries'
+row "overrides whose filter jq failed on before printing are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 'to_entries' STUB_BEFORE=1
 row "an overrides context jq printed and failed on is not the global key" overrides_refused refused npm fixture-clean@1.0.0 'overrides_sha256: $overrides_sha256'
 row "a canonical override set jq printed and failed on is not the global key" overrides_refused refused npm fixture-clean@1.0.0 '-cS .'
 overrides_source_lost() {
@@ -1121,10 +1179,36 @@ overrides_source_lost() {
 row "an overrides source cat printed and failed on is not an unnamed source" overrides_source_lost
 overrides_shasum() {
   overrides_project
-  in_project npm fixture-clean@1.0.0 '-a 256' STUB_TOOL_ONLY=shasum
+  in_project npm fixture-clean@1.0.0 "${hash_match}" STUB_TOOL_ONLY="${hash_tool}"
   refused
 }
 row "an overrides hash shasum printed and failed on is not the global key" overrides_shasum
+# The ledger lookup asks for overrides before the closure does, and a project's
+# overrides that fail there must not read as a project with none: the entry the
+# global key finds was approved for no overrides at all.
+overrides_lookup_failed() {
+  project_dir
+  in_project npm fixture-clean@1.0.0 'a call no row fails'
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  printf '{"name":"p","version":"0.0.0","overrides":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
+  project_check npm fixture-clean@1.0.0 "$@"
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "overrides that did not read find no entry under the global key" overrides_lookup_failed 'to_entries' STUB_BEFORE=1
+row "overrides with no context find no entry under the global key" overrides_lookup_failed 'overrides_sha256: $overrides_sha256'
+overrides_context_rc() {
+  local want="$1" source="$2"
+  shift 2
+  rc=0
+  env PATH="${after_path}" STUB_MATCH='a call no row fails' "$@" \
+    bash -c 'source lib/npm/closure.sh; rc=0; safedeps_npm_overrides_context "$1" "$2" "$3" || rc=$?; exit "${rc}"' context "${tmp_root}/overrides-context.json" '{"fixture-child":"1.0.0"}' "${source}" >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" == "${want}" ]] || no "exit ${rc}, not ${want}"
+}
+row "control: overrides from a manifest have a context" overrides_context_rc 0 "${ROOT_DIR}/package.json"
+row "overrides with no source are no context, which is not no overrides" overrides_context_rc 2 ''
+row "overrides from a directory that cannot be entered are no context" overrides_context_rc 2 /no/such/directory/package.json
+row "an overrides key shasum printed and failed on is no context" overrides_context_rc 2 "${ROOT_DIR}/package.json" STUB_MATCH="${hash_match}" STUB_TOOL_ONLY="${hash_tool}" STUB_SKIP_FIRST="${tmp_root}/overrides-hash-first"
 walk_dirname() {
   project_dir
   mkdir -p "${project}/inner"
@@ -1142,6 +1226,20 @@ yarn_walk_dirname() {
   refused
 }
 row "a walk to the Yarn project that dirname failed on is not a walk that found none" yarn_walk_dirname
+walk_alone() {
+  project_dir
+  mkdir -p "${project}/inner"
+  printf '{"name":"p","overrides":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
+  export SAFEDEPS_NPM_OVERRIDES_DIR="${project}/inner"
+  function_fails dirname 'inner' safedeps_npm_repo_overrides_json
+}
+yarn_walk_alone() {
+  yarn_project
+  mkdir -p "${project}/inner"
+  function_fails dirname 'inner' safedeps_npm_yarn_project_context "${tmp_root}/yarn-walk-context.json" "${project}/inner"
+}
+row "the walk to the overrides stops where dirname failed" walk_alone
+row "the walk to the Yarn project stops where dirname failed" yarn_walk_alone
 yarn_inputs_unread() {
   local mirror inputs
   mirror=$(mktemp -d "${tmp_root}/mirror.XXXXXX")
@@ -1165,11 +1263,18 @@ row "a fixture closure jq printed and failed on is not printed before the real o
 row "a source jq wrote and failed on stops the fixture path" fails_as closure_failed npm fixture-clean@1.0.0 '{type: $type}'
 source_write_failed() {
   "$1"
-  in_project npm fixture-clean@1.0.0 '{type: $type}'
+  shift
+  in_project npm fixture-clean@1.0.0 '{type: $type}' "$@"
   closure_failed
+}
+invalid_yarn_project() {
+  project_dir
+  printf '{"name":"p","version":"0.0.0","resolutions":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
+  printf '# yarn lockfile v1\n' > "${project}/yarn.lock"
 }
 row "a closure source jq wrote and failed on stops the probe" source_write_failed project_dir
 row "an overrides source jq wrote and failed on stops the probe" source_write_failed overrides_project
+row "a deny-only source jq failed on before writing stops the probe" source_write_failed invalid_yarn_project STUB_BEFORE=1
 yarn_source_failed() {
   yarn_project
   printf '%s\n' '{"value":"fixture-clean@npm:1.0.0","children":{"Version":"1.0.0","Dependencies":[]}}' > "${tmp_root}/yarn.ndjson"
@@ -1213,6 +1318,7 @@ revoke_faulted() {
 row "a revoked entry jq printed and failed on is not reported revoked" revoke_faulted 'revoked_reason: $reason'
 row "a revoked entry jq failed on before printing is not reported revoked" revoke_faulted 'revoked_reason: $reason' STUB_BEFORE=1
 row "a revoke with no clock is not reported revoked" revoke_faulted '%Y-%m-%dT%H:%M:%SZ' STUB_TOOL_ONLY=date
+row "a revoked entry that could not be written is not reported revoked" revoke_faulted 'approved-specs' STUB_TOOL_ONLY=mv STUB_BEFORE=1
 misses_run() {
   local closure index
   closure=$(mktemp "${tmp_root}/closure.XXXXXX")
