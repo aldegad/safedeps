@@ -1481,7 +1481,12 @@ pass "clean re-check appends no alert"
 # The re-check report is declared once, in lib/ledger/recheck-report.sh: the
 # CLI builds it there and the wrapper reads it there. What the CLI prints has
 # the declared fields in the declared order, the wrapper's complete fixture
-# above has the same ones, and every reader reads back what its builder wrote.
+# above has the same ones, and every reader reads back what its builder wrote
+# and reads an absent field as the wrapper always has. Neither side spells a
+# field again: the CLI writes no report object by hand, and the wrapper reads
+# no field but through a reader. A missing declaration is a failed row, never
+# a source that ends this script with the rows after it unrun.
+[[ -f lib/ledger/recheck-report.sh ]] || fail "lib/ledger/recheck-report.sh declares the re-check report"
 # shellcheck source=../../lib/ledger/recheck-report.sh
 source lib/ledger/recheck-report.sh
 recheck_report_json=$(HOME="${tmp_root}/home-recheck-report" SAFEDEPS_HOME="${tmp_root}/safe-recheck-report" ./bin/safedeps --json re-check)
@@ -1491,6 +1496,11 @@ recheck_declared_keys=$(jq -cn "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(0;
 jq -en "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(1; 2; [3]; [4]; [5]; [6])
   | [recheck_is_report, recheck_checked, recheck_still_clean, recheck_newly_vulnerable, recheck_kev_hit, recheck_revoked, recheck_suspected_forgery]
   == [true, 1, 2, [3], [4], [5], [6]]' >/dev/null || fail "each re-check report reader reads the field its builder writes"
+jq -en "${SAFEDEPS_RECHECK_REPORT_JQ}"'{} | [recheck_is_report, recheck_checked, recheck_still_clean, recheck_newly_vulnerable, recheck_kev_hit, recheck_revoked, recheck_suspected_forgery]
+  == [false, 0, 0, [], [], [], []]' >/dev/null || fail "each re-check report reader reads an absent field as the wrapper always has"
+recheck_fields=$(jq -rn "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(0; 0; []; []; []; []) | keys_unsorted | map(select(. != "command")) | join("|")')
+! awk '/^cmd_recheck\(\)/,/^}/' bin/safedeps | grep -nE "command: ?\"re-check\"|(^|[^\$a-z_])(${recheck_fields}):" || fail "bin/safedeps writes no re-check report object by hand"
+! grep -oE "'[^']*'" scripts/safedeps-recheck-alert.sh | grep -E '\.[A-Za-z_]' || fail "the re-check wrapper reads no report field but through a reader"
 pass "the re-check report is built and read from one declaration"
 
 # Release-time lane (absorbed from security-release-gates): commands must be

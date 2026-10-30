@@ -4,8 +4,6 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/ledger/recheck-report.sh
-source "${ROOT_DIR}/lib/ledger/recheck-report.sh"
 SAFEDEPS_BIN="${SAFEDEPS_BIN:-${ROOT_DIR}/bin/safedeps}"
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_RECHECK_LOG="${SAFEDEPS_RECHECK_LOG:-${SAFEDEPS_HOME}/recheck.log}"
@@ -80,6 +78,28 @@ if [[ "${status}" -ne 0 ]]; then
   notify "safedeps re-check failed" "Daily dependency approval re-check exited ${status}. See ~/.safedeps/recheck.err.log"
   exit "${status}"
 fi
+
+# The report's fields are declared in lib/ledger/recheck-report.sh, beside the
+# real file of this script, and are read only now. A runtime without lib/ fails
+# the run above, and that is the recheck_failed alert it has always been.
+report_source="${BASH_SOURCE[0]}"
+while [[ -h "${report_source}" ]]; do
+  report_dir=$(cd -P "$(dirname "${report_source}")" && pwd)
+  report_source=$(readlink "${report_source}")
+  [[ "${report_source}" != /* ]] && report_source="${report_dir}/${report_source}"
+done
+report_declaration="$(cd -P "$(dirname "${report_source}")/.." && pwd)/lib/ledger/recheck-report.sh"
+if [[ ! -f "${report_declaration}" ]]; then
+  alert=$(jq -cn \
+    --arg at "${run_at}" \
+    --arg stderr "cannot read ${report_declaration}" \
+    '{kind:"recheck_failed", at:$at, exit_status:1, stderr:$stderr}')
+  append_alert "${alert}"
+  notify "safedeps re-check failed" "The re-check wrapper cannot read its report declaration. See ~/.safedeps/recheck-alerts.jsonl"
+  exit 1
+fi
+# shellcheck source=../lib/ledger/recheck-report.sh
+source "${report_declaration}"
 
 if ! jq -e "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_is_report' "${tmp_json}" >/dev/null 2>&1; then
   alert=$(jq -cn \
