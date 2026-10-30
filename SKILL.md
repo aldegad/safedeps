@@ -44,7 +44,7 @@ safedeps check <ecosystem> <pkg>@<range> --json
 | `cve_unpatched` | Do not install. Surface the CVEs, propose an alternative package. |
 | `closure_vulnerable` | Do not install. A dependency the install would bring in has an advisory; `closure_vulnerabilities` names it. Propose an alternative. |
 | `kev_hard_block` | Do not install. Recommend an alternative — actively exploited in the wild. |
-| `provider_unavailable` | Do not install. OSV was unreachable with no fresh cache, or its answer could not be read. Retry later or tell the human. |
+| `provider_unavailable` | Do not install. OSV was unreachable with no fresh cache, its answer could not be read, or no CISA KEV catalog could be read. Retry later or tell the human. |
 | `error` | Read `error`. Fix the spec (e.g. an unpublished version) and retry. `ledger_write_failed` means the approval could not be written, so nothing is approved: tell the human. |
 
 Install only after approval. If the approved version differs from your argument, the hook blocks again — re-narrow and retry.

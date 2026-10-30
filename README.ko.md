@@ -272,7 +272,7 @@ SAFEDEPS_ACCEPT_RISK='<who decided and why>' npm ci
 | `Audit record: <path of accepted-risk.jsonl>` | 감사 기록 파일의 경로입니다. |
 | `Details log: <path of reorg.log>` | 상세 로그 파일의 경로입니다. |
 
-CISA KEV에 등재된 패키지는 오버라이드 대상에 포함되지 않습니다. 읽을 수 없는 클로저, 실행할 수 없는 원장 검사 또는 실행할 수 없는 OSV 일괄 검사도 대상에 포함되지 않습니다. 의심스러운 설치 스크립트, 비표준 또는 안전하지 않은 확인 소스, 락파일의 비정상적인 대규모 추가, 네이티브 바이너리 발견도 대상에 포함되지 않습니다. 이러한 항목은 오버라이드 유무와 관계없이 항상 설치를 롤백합니다. 오버라이드가 설정되었으나 롤백되는 경우, 롤백 메시지의 문제 라인은 다음 문장으로 끝납니다: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. 오버라이드가 수용할 수 있었던 문제들도 여기에 함께 나열됩니다.
+CISA KEV에 등재된 패키지는 오버라이드 대상에 포함되지 않습니다. 읽을 수 없는 클로저, 읽을 수 없는 KEV 카탈로그, 실행할 수 없는 원장 검사 또는 실행할 수 없는 OSV 일괄 검사도 대상에 포함되지 않습니다. 의심스러운 설치 스크립트, 비표준 또는 안전하지 않은 확인 소스, 락파일의 비정상적인 대규모 추가, 네이티브 바이너리 발견도 대상에 포함되지 않습니다. 이러한 항목은 오버라이드 유무와 관계없이 항상 설치를 롤백합니다. 오버라이드가 설정되었으나 롤백되는 경우, 롤백 메시지의 문제 라인은 다음 문장으로 끝납니다: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. 오버라이드가 수용할 수 있었던 문제들도 여기에 함께 나열됩니다.
 
 오버라이드는 단 하나의 명령어에만 적용됩니다. 사유는 `tool_use_id`로 식별되는 해당 호출의 보류 레코드에만 존재합니다. 원장 항목이나 승인은 영구 저장되지 않습니다. 오버라이드가 없는 후속 설치는 기존과 동일하게 판단되므로 미승인 클로저는 다시 롤백됩니다. 위험을 수용하는 것은 패키지를 승인하는 것이 아니며, `safedeps check`와 원장은 변경되지 않습니다. 오버라이드는 오직 npm 효과 게이트에만 적용됩니다. pip, cargo, go, gem, maven, nuget, pnpm, yarn, bun에는 오버라이드가 없습니다. 사전 설치 훅이 설치로 읽지 못한 명령어는 레코드 없이 사후 백스톱에 도달하므로 오버라이드가 적용되지 않습니다.
 
