@@ -46,6 +46,7 @@ Claude Code + Codex CLI only — not Grok/Hermes yet. When a hook capability dif
 - **OSV is the single canonical advisory truth.** KEV is a hard-risk overlay; GHSA is enrichment. Do not add a second co-equal truth.
 - **No silent fallback.** A provider miss is fail-closed. Every bypass must be observable and logged.
 - **A read a verdict rests on answers by its exit status, not by what it printed, and each one checks its own return, because errexit does not reach it.**
+- **A file a verdict rests on is read once, and the check and the use act on that one read, because a check says nothing about the next open of the same path.**
 - **The hook path is the entry shim and the binary it runs, and breaking either blocks Bash machine-wide.**
 - **The install grammar is defined once, in the core, and it is on the PreToolUse path.**
 - **Beside a visible install the pipe question is the standalone one, asked of the same text; nothing is set aside first.**

@@ -756,6 +756,24 @@ CISA KEV — a catalog that cannot be read
     catalog is downloaded again and replaces the file, a fresh file leaves a
     line in `advisory.log`, and a failed download leaves no catalog to read
 
+A file replaced after its check
+  • A file a verdict rests on is read once. The check and the use act on that
+    one read. A check says nothing about the next open of the same path.
+  • In the CLI, an OSV answer, a ledger entry and the `package.json` that
+    declares `overrides` are held as the text the read that checked them
+    printed. Nothing opens the file again for that verdict.
+  • A CISA KEV catalog is copied once into a directory private to the run. The
+    rule checks the copy, and every package is looked up in the copy. The copy
+    keeps the file time, so a stale catalog is still reported as stale.
+  • The KEV lookup answers by the catalog rule itself, in the same read, so
+    bytes that are no catalog reach no listing, whichever file was named.
+  • The core already read OSV answers and the KEV catalog once. The tree
+    record from before an install, which a kept hash vouches for, was read
+    twice in the core: once for the hash and once for its integrities. It is
+    now hashed and read from the same bytes.
+  • A cache file or a ledger entry replaced after the read changes nothing in
+    that run. The next run reads the replacement by the same rule.
+
 A step that printed and then failed
   • a read a verdict rests on answers by its exit status, not by what it
     printed: most of these reads run where errexit is off (`if`, `!`, `||`, a
