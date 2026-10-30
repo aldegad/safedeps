@@ -47,10 +47,13 @@ pad() { head -c "$1" < /dev/zero | tr '\0' 'x'; }
 # parent, and resumes after a finite delay. This crosses the outer deadline
 # without depending on scanner cost or the ask's own eight-second limit.
 python3 "${ROOT_DIR}/scripts/test/lib/native_budget_owners.py" sweep
+python3 "${ROOT_DIR}/scripts/test/lib/native-budget-lease-control.py" "${ROOT_DIR}"
 never=60
 [[ "${1:-}" != --deadline-control-row ]] || never=4
 GUARD_IGNORE_TERM=""; GUARD_SECONDS=""
-GUARD_DELAY=0; GUARD_LOAD=""; GUARD_KILL_JUDGMENT=""
+GUARD_DELAY=0; GUARD_LOAD=""; GUARD_KILL_JUDGMENT=""; GUARD_ORPHAN=""; GUARD_LATE=0
+GUARD_HELPER_RC=0
+STALLED_ROWS=0; HELD_ROWS=0
 guard() {
   local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
   local safe rc=0
@@ -64,8 +67,12 @@ guard() {
   [[ -z "${GUARD_IGNORE_TERM}" ]] || args+=(--ignore-term)
   [[ -z "${GUARD_LOAD}" ]] || args+=(--pause-supervisor)
   [[ -z "${GUARD_KILL_JUDGMENT}" ]] || args+=(--kill-judgment)
+  [[ -z "${GUARD_ORPHAN}" ]] || args+=(--orphan-judgment)
+  [[ "${GUARD_LATE}" == 0 ]] || args+=(--late-question "${GUARD_LATE}")
+  GUARD_BOX="${safe}"
   python3 "${ROOT_DIR}/scripts/test/lib/native-budget-run.py" "${args[@]}" > "${safe}/transport.json" || rc=$?
-  (( rc == 0 )) || fail "native budget fixture ran (helper rc ${rc}; ${safe})"
+  (( rc == GUARD_HELPER_RC )) \
+    || fail "native budget fixture ran (helper rc ${rc}; $(jq -c .errors "${safe}/result.json" 2>/dev/null); ${safe})"
   GUARD_RC=$(jq -r .rc "${safe}/result.json")
   GUARD_OUT=$(jq -r .stdout "${safe}/result.json")
   GUARD_STDERR=$(jq -r .stderr "${safe}/result.json")
@@ -75,6 +82,16 @@ guard() {
   GUARD_REASON=$(jq -r .reason "${safe}/result.json")
   GUARD_GONE=$(jq -r .descendants_gone "${safe}/result.json")
   GUARD_RESUME=$(jq -r .response_after_resume "${safe}/result.json")
+  GUARD_HELD=$(jq -r .held "${safe}/result.json")
+  GUARD_PAUSED=$(jq -r .paused "${safe}/result.json")
+  if [[ "${GUARD_DELAY}" != 0 ]]; then
+    STALLED_ROWS=$((STALLED_ROWS + 1))
+    if [[ "${GUARD_HELD}" == true ]]; then
+      HELD_ROWS=$((HELD_ROWS + 1))
+    else
+      printf '# note - the fixture did not hold the judgment: %ss budget, answered in %sms\n' "${budget}" "${GUARD_ELAPSED_MS}"
+    fi
+  fi
   (( GUARD_RC == 0 )) || fail "the registered entry ran and answered (exit ${GUARD_RC})"
 }
 slow_guard() {
@@ -82,9 +99,22 @@ slow_guard() {
   # Put npm before a trailing comment in the original corpus word.
   local command="$1"; shift
   guard "npm ci; ${command}" "$@"
-  GUARD_DELAY=0; GUARD_LOAD=""
+  GUARD_DELAY=0; GUARD_LOAD=""; GUARD_LATE=0
 }
 slow_sleeper_gone() { [[ "${GUARD_GONE}" == true ]]; }
+# The pause comes from outside the hook, so on a machine busy enough the
+# deadline can still land first. That trial saw no paused supervisor and does
+# not count. Three in a row is red: the row observed nothing.
+paused_guard() {
+  local late="${GUARD_LATE}" _
+  for _ in 1 2 3; do
+    GUARD_LOAD=1; GUARD_LATE="${late}"
+    slow_guard "${never}" "$@"
+    [[ "${GUARD_PAUSED}" != true ]] || return 0
+    printf '# note - the deadline landed before the supervisor was paused (%sms)\n' "${GUARD_ELAPSED_MS}"
+  done
+  fail "the supervisor was never paused before its deadline, in three tries"
+}
 
 # The size only has to engage the deadline, including under the 4KB engage
 # ceiling; the delay above is what makes it outlast the budget.
@@ -98,6 +128,7 @@ tiny_budget=1
 # --- past the budget: the gate answers instead of being killed --------------
 
 slow_guard "${never}" "echo ${big}" "${tiny_budget}"
+printf '# note - PATH check: npm is the fixture, first on the hook PATH (%s); the judgment asks no other manager\n' "$(jq -r .npm "${GUARD_BOX}/result.json")"
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "over-budget command is denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "over-budget deny is marked UNDECIDED"
 (( GUARD_ELAPSED_MS >= tiny_budget * 1000 )) \
@@ -223,6 +254,50 @@ if grep -Eiq 'budget|deadline|within' "${GUARD_STATE_DIR}/advisory.log"; then fa
 slow_sleeper_gone || fail "an early killed judgment leaves no npm descendant behind"
 pass "judgment killed before its deadline yields UNDECIDED with exit status, without a budget-expiry claim"
 
+# --- the fixture's own start is not the contract -----------------------------
+# The fixture is a Python program three npm questions have to start, and on a
+# busy machine that outlasts a small budget. These rows make it late on purpose,
+# so what load does to it is checked on every run, on a quiet machine too.
+GUARD_LATE=3
+slow_guard "${never}" "echo ${big}" "${tiny_budget}"
+[[ "${GUARD_DECISION}" == deny ]] || fail "a deadline ahead of the fixture is still denied (got: ${GUARD_DECISION})"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "a deadline ahead of the fixture is undecided"
+(( GUARD_ELAPSED_MS >= tiny_budget * 1000 )) \
+  || fail "a deadline ahead of the fixture did not fire early (${GUARD_ELAPSED_MS}ms against ${tiny_budget}s)"
+slow_sleeper_gone || fail "a deadline ahead of the fixture leaves no process of the fixture behind"
+pass "a deadline that lands before the fixture is ready is the answer the row asks for, recorded as unheld"
+
+# The other questions wait for the late one for as long as the machine takes.
+# The killed judgment ends the row at about the delay, not at its 20 seconds.
+GUARD_LATE=3; GUARD_KILL_JUDGMENT=1
+slow_guard "${never}" "echo ${big}" 20
+GUARD_KILL_JUDGMENT=""
+[[ "${GUARD_HELD}" == true ]] || fail "a question that starts late still reaches the judgment that has the time"
+grep -Fq 'the judgment process ended without a usable answer (signal 9)' <<< "${GUARD_REASON}" \
+  || fail "the fixture reached the judgment after the late question (got: ${GUARD_REASON})"
+pass "a question that starts late does not end the fixture's wait for it"
+
+GUARD_LATE=6
+paused_guard "pip install requests==2.31.0 # ${big}" 4
+[[ "${GUARD_DECISION}" == deny ]] || fail "a supervisor paused ahead of the fixture is denied (got: ${GUARD_DECISION})"
+pass "the supervisor is paused from outside, so the load rows do not wait for the fixture to start"
+
+# --- a lease names what the run owns ------------------------------------------
+# The deadline's TERM can end the judgment while a fixture that ignores TERM
+# still runs, and the kernel then answers getppid() with init. The fixture
+# used to register that, and cleanup died on it with PermissionError.
+GUARD_ORPHAN=1; GUARD_HELPER_RC=1
+slow_guard "${never}" "echo ${big}" 20
+GUARD_ORPHAN=""; GUARD_HELPER_RC=0
+jq -e '.errors | any(startswith("no judgment process"))' "${GUARD_BOX}/result.json" >/dev/null \
+  || fail "a judgment gone before its registration fails as no judgment process ($(jq -c .errors "${GUARD_BOX}/result.json"))"
+[[ -f "${GUARD_BOX}/cleanup.json" ]] || fail "cleanup finished and left its receipt"
+jq -e '(.reaped | all(. > 1)) and .refused == [] and .survivors == []' "${GUARD_BOX}/cleanup.json" >/dev/null \
+  || fail "cleanup signalled only what the run registered ($(jq -c . "${GUARD_BOX}/cleanup.json"))"
+[[ ! -e "$(cat "${GUARD_BOX}/lease")" ]] || fail "the lease of a run with no judgment is gone"
+slow_sleeper_gone || fail "a run with no judgment leaves no process of the fixture behind"
+pass "a judgment that ended before its registration fails the run as no judgment process, and pid 1 is never registered"
+
 # Retired old rows 397 and 427: native pre sources no Bash hook libraries
 # and does not call PATH sleep with the Bash 50ms poll schedule. The whole
 # entry startup/engaged overhead and descheduled-supervisor rows below retain
@@ -262,8 +337,7 @@ pass "an engaged fast judgment is answered without waiting out a whole second"
 # The helper records monotonic resume/response times and checks the difference.
 loaded_budget=4
 loaded_margin=4
-GUARD_LOAD=1
-slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
+paused_guard "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "on a loaded machine the stuck judgment is denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "on a loaded machine the deny is the undecided one"
 printf '# note - supervisor descheduled past its deadline: UNDECIDED after %sms against a %ss budget\n' "${GUARD_ELAPSED_MS}" "${loaded_budget}"
@@ -279,9 +353,8 @@ pass "on a loaded machine the deadline leaves no sleeper behind"
 # itself, rather than its distance from the guard's start, would never arrive
 # under an exported SECONDS=-1000000, and only the requested-sleep bound would
 # end the wait: the late answer above, through a different door.
-GUARD_LOAD=1
 GUARD_SECONDS=-1000000
-slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
+paused_guard "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
 GUARD_SECONDS=""
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "an exported SECONDS does not turn the deadline into a pass (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "an exported SECONDS still ends in the undecided deny"
@@ -320,6 +393,8 @@ PYTIME
 # defect: it is the window in which the runtime kills the hook and the install
 # proceeds unjudged.
 slow_guard "${never}" "pip install requests==2.31.0 # ${big}" 600
+[[ "${GUARD_HELD}" == true ]] \
+  || fail "the ceiling's 25 seconds let the fixture hold the judgment, or no row saw a stopped judgment outlast its deadline"
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "an over-ceiling budget still denies (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
@@ -632,4 +707,5 @@ if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "32KB of one-line statem
 printf '# note - 32KB of one-line statements with no install judged in %ss\n' "${GUARD_ELAPSED}"
 pass "32KB of one-line statements with no install is judged inside the default budget, not answered UNDECIDED"
 
+printf '# note - the fixture held the judgment in %s of %s stalled rows; in the rest the deadline answered first\n' "${HELD_ROWS}" "${STALLED_ROWS}"
 printf 'self-budget battery: all checks passed\n'

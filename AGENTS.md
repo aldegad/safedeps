@@ -133,6 +133,15 @@ The bypass-harness and regression rule above still holds for every security chan
   your own children carry. The marker carries the run's pid, and the sweep
   reaps only markers whose run is gone. Its name must not contain an older
   marker either, or a checkout still sweeping by that substring matches it.
+- **A lease names what the run started.** `getppid()` of an orphan answers init
+  or a subreaper, so a fixture names a process by what it runs (`judgment` in
+  `scripts/test/lib/native_budget_owners.py`), never by the pid the kernel
+  handed back. A failed `ps` read does not say an owner is gone.
+- **A fixture's start is not the contract.** A wall-clock budget and a fixture's
+  own start race on a busy machine. A deadline that lands first is the answer a
+  stalled row asks for, so the row records that the fixture held nothing
+  (`held` in `scripts/test/lib/native-budget-run.py`). One row with the time to
+  spare must still hold it: the ceiling row of `scripts/test/self-budget.sh`.
 
 ### Citing a zero
 
