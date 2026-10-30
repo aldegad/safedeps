@@ -63,8 +63,14 @@ def main():
                 sweeps.append(pid)
             codes=[os.waitpid(pid,0)[1] for pid in sweeps]
             results.append(check(codes==[0]*8 and not list(owners.MARKERS.iterdir()),'eight sweeps of the same stale leases all finish and leave none'))
-            # Those eight may never meet. This is what the one that loses finds.
-            results.append(check(owners.cleanup(owners.MARKERS/'finished')['reaped']==[],'a lease another sweep finished is nothing to clean'))
+            # Those eight may never meet, so the loser's error is raised here. A
+            # directory already gone lists as empty: only one that goes during the
+            # listing raises, and no order of calls reaches that.
+            def lost(path,pattern):raise FileNotFoundError(str(path))
+            listing=Path.glob;Path.glob=lost
+            try:receipt=owners.cleanup(owners.MARKERS/'finished')
+            finally:Path.glob=listing
+            results.append(check(receipt['reaped']==[],'a lease another sweep finished during the listing is nothing to clean'))
             # What getppid() answers for an orphan is init or a subreaper.
             other=sleeper();spawned.append(other)
             results.append(check(all(owners.judgment(pid,root) is None for pid in (0,1,other.pid)),
