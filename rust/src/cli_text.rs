@@ -8,13 +8,24 @@
 //! that is one message call and runs nothing else. Where such text expands,
 //! every expansion only reads a variable (`reads_only`). A declared name
 //! stands only in its declaration and as a whole read, wherever it is
-//! written, quotes included. These readings hold a second truth written
-//! plainly; a form built to hide one is out of reach of a reading of the
-//! text: a name or word built at run time (`eval`, `${!x}`, `declare -n`, a
+//! written, quotes included.
+//!
+//! Prose is the text the CLI leaves as written: comments, log lines and
+//! what it prints for a person. A line is taken as prose from its shape,
+//! which does not prove that no code reads it back: an `advisory.log` line
+//! is evidence `sf_ledger_has_approval_provenance` reads, any output can be
+//! captured, and so can a function that runs the help. A word that code
+//! reads back from such text is out of reach of these readings.
+//!
+//! These readings catch a second truth written plainly in code. A form
+//! built to hide one is out of reach of a reading of the text, line by
+//! line: a name or word built at run time (`eval`, `${!x}`, `declare -n`, a
 //! word split across quotes or pieced together), a pattern that matches a
 //! word without spelling it, a line joined to the next by a backslash, a
-//! line inside a multi-line quoted text read as a line of its own, and a
-//! command prefix this reading does not know in front of `source`.
+//! line of a heredoc body or of a multi-line quoted text read as a line of
+//! its own, and a command prefix this reading does not know in front of
+//! `source`. Reading the files with the core's lexer would close the
+//! quoting part of that list; these readings do not.
 
 /// The CLI and every file it sources: the files these tests read.
 /// `cli_files_are_what_the_cli_sources` closes the set.
@@ -30,13 +41,17 @@ pub const CLI_FILES: [(&str, &str); 9] = [
     ("lib/npm/ask.sh", include_str!("../../lib/npm/ask.sh")),
 ];
 
-/// The functions and commands whose quoted arguments are text for a person.
-/// `printf` and `echo` count only when the line sends them to stderr: on
-/// stdout they are how a shell function returns a value.
+/// The functions and commands whose quoted arguments these readings take as
+/// prose: log lines and text printed for a person. `echo`, and `printf` with
+/// a quoted format, count only when the line sends them to stderr, since on
+/// stdout they are how a shell function returns a value. That code may read
+/// such text back is out of reach (see the module doc).
 const MESSAGES: [&str; 8] = ["sf_advisory_log", "sf_eprintf", "sf_err", "sf_info", "sf_ok", "sf_spinner_start", "sf_warn", "safedeps_provider_log"];
 
-/// The functions whose `cat` heredocs are the help text, printed to the
-/// terminal and read by no code. A heredoc anywhere else may be captured.
+/// The functions whose `cat` heredocs are the help text.
+/// `help_runs_only_in_its_known_forms` holds how they are run; a caller
+/// that captures a function which runs one is out of reach. A heredoc
+/// anywhere else may be captured.
 const HELP: [&str; 1] = ["cmd_help"];
 
 /// The bytes of a word in a name or a status.
@@ -173,7 +188,7 @@ fn reads_only(text: &str) -> bool {
 fn message(code: &str) -> Option<Vec<u8>> {
     let first = code.split_whitespace().next()?;
     let call = if MESSAGES.contains(&first) { code.trim_end() }
-        else if first == "echo" || (first == "printf" && code.split_whitespace().nth(1) != Some("-v")) { code.trim_end().strip_suffix(">&2")? }
+        else if first == "echo" || (first == "printf" && code.split_whitespace().nth(1).is_some_and(|f| f.starts_with(['\'', '"']))) { code.trim_end().strip_suffix(">&2")? }
         else { return None };
     let blanked = unquoted(call)?;
     (!blanked.iter().any(|b| matches!(b, b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' | b'`' | b'$'))).then_some(blanked)
@@ -187,7 +202,11 @@ fn unquoted(code: &str) -> Option<Vec<u8>> {
     let mut i = 0;
     while i < out.len() {
         let quote = out[i];
-        if quote == b'\'' || quote == b'"' {
+        if quote == b'\\' {
+            // Outside quotes a backslash makes the next byte literal, so it
+            // opens no quote.
+            i += 2;
+        } else if quote == b'\'' || quote == b'"' {
             let mut j = i + 1;
             while j < out.len() && out[j] != quote {
                 if quote == b'"' && out[j] == b'\\' { j += 1 }
@@ -204,50 +223,194 @@ fn unquoted(code: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// How many commands of this line source a file: `source`, or `.` followed by
-/// a word that can be a path, where a command begins. A command begins at the
-/// line's start, after a control operator, `(`, `{`, `!` or a backquote, after
-/// a reserved word a command follows, after `builtin` or `command`, and after
-/// an assignment or a redirection that begins one. A `.` before an operator
-/// or a word jq reserves is jq's, the way a line inside a multi-line jq
-/// program reads.
-fn source_commands(code: &str) -> usize {
-    // What a quoted string holds is no command word; the quotes stay, so a
-    // quoted path still follows its `.`.
-    let mut masked = code.as_bytes().to_vec();
+/// The shell's operators, longest first: the control and redirection
+/// operators of bash(1) and the three that open a command inside a word.
+const OPERATORS: [&str; 26] = [";;&", "<<<", "<<-", "&>>", ";;", ";&", "||", "&&", "|&", "<<", ">>", "<&", ">&", "<>", ">|", "&>",
+    "<(", ">(", "$(", "|", "&", ";", "(", ")", "<", ">"];
+
+/// The words and operators of a line whose quoted text is masked, split as
+/// the shell splits them: at blanks and at its operators, longest first. A
+/// backslash keeps the next byte in the word, `${...}` and `$((...))` stay in
+/// theirs, and digits right before a redirection are part of it.
+fn shell_tokens(masked: &[u8]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
     let mut i = 0;
+    let closing = |from: usize, open: u8, close: u8| {
+        let mut depth = 0;
+        (from..masked.len()).find(|&j| { if masked[j] == open { depth += 1 } else if masked[j] == close { depth -= 1 } depth == 0 }).map_or(masked.len(), |j| j + 1)
+    };
     while i < masked.len() {
-        let quote = masked[i];
-        if quote == b'\'' || quote == b'"' {
-            let mut j = i + 1;
-            while j < masked.len() && masked[j] != quote {
-                if quote == b'"' && masked[j] == b'\\' { masked[j] = b'x'; j += 1; if j == masked.len() { break } }
-                masked[j] = b'x';
-                j += 1;
+        let c = masked[i];
+        let rest = &masked[i..];
+        if c == b'\\' {
+            cur.extend(rest.iter().take(2).map(|&b| b as char));
+            i += 2;
+        } else if c == b' ' || c == b'\t' {
+            if !cur.is_empty() { out.push(std::mem::take(&mut cur)) }
+            i += 1;
+        } else if rest.starts_with(b"${") || rest.starts_with(b"$((") {
+            let end = if rest[1] == b'{' { closing(i + 1, b'{', b'}') } else { closing(i + 1, b'(', b')') };
+            cur.extend(masked[i..end].iter().map(|&b| b as char));
+            i = end;
+        } else if c == b'`' {
+            if !cur.is_empty() { out.push(std::mem::take(&mut cur)) }
+            out.push("`".into());
+            i += 1;
+        } else if let Some(op) = OPERATORS.iter().find(|op| rest.starts_with(op.as_bytes())) {
+            let io = op.starts_with(['<', '>']) && !op.ends_with('(') && !cur.is_empty() && cur.bytes().all(|d| d.is_ascii_digit());
+            if io { let n = std::mem::take(&mut cur); out.push(n + op) } else {
+                if !cur.is_empty() { out.push(std::mem::take(&mut cur)) }
+                out.push(op.to_string());
             }
-            i = j + 1;
+            i += op.len();
         } else {
+            cur.push(c as char);
             i += 1;
         }
     }
-    let spaced: String = String::from_utf8_lossy(&masked).chars().flat_map(|c| if ";&|(){}`!".contains(c) { vec![' ', c, ' '] } else { vec![c] }).collect();
-    let words: Vec<&str> = spaced.split_whitespace().collect();
+    if !cur.is_empty() { out.push(cur) }
+    out
+}
+
+/// The line with what its quoted strings hold masked, read the way the shell
+/// quotes: a backslash outside single quotes keeps the next byte, `$'...'`
+/// reads backslashes, and a command substitution or a backquoted text inside
+/// double quotes is code again, so it is masked only where it quotes. The
+/// quote marks stay. A quote the line leaves open is not masked, so what
+/// follows it is read as code.
+fn mask_quotes(code: &[u8]) -> Vec<u8> {
+    let mut out = code.to_vec();
+    let mut i = 0;
+    while i < code.len() {
+        match code[i] {
+            b'\\' => i += 2,
+            b'\'' => match single_end(code, i) {
+                Some(j) => { out[i + 1..j].fill(b'x'); i = j + 1 }
+                None => i += 1,
+            },
+            b'"' => match double_end(code, i + 1) {
+                Some((j, spans)) => {
+                    out[i + 1..j].fill(b'x');
+                    for (s, e) in spans { out[s..e].copy_from_slice(&mask_quotes(&code[s..e])) }
+                    i = j + 1;
+                }
+                None => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Where the single-quoted text opened at `at` closes; `$'...'` reads a
+/// backslash as keeping the next byte.
+fn single_end(code: &[u8], at: usize) -> Option<usize> {
+    let ansi = at > 0 && code[at - 1] == b'$';
+    let mut j = at + 1;
+    while j < code.len() && code[j] != b'\'' { j += if ansi && code[j] == b'\\' { 2 } else { 1 } }
+    (j < code.len()).then_some(j)
+}
+
+/// Where the double-quoted text that starts at `from` closes, and the spans
+/// in it that are code: each `$(...)` and each backquoted text.
+fn double_end(code: &[u8], from: usize) -> Option<(usize, Vec<(usize, usize)>)> {
+    let mut spans = Vec::new();
+    let mut j = from;
+    while j < code.len() {
+        match code[j] {
+            b'\\' => j += 2,
+            b'"' => return Some((j, spans)),
+            b'$' if code[j + 1..].starts_with(b"(") && !code[j + 1..].starts_with(b"((") => {
+                let e = substitution_end(code, j + 2)?;
+                spans.push((j, e + 1));
+                j = e + 1;
+            }
+            b'`' => {
+                let e = (j + 1..code.len()).find(|&k| code[k] == b'`' && code[k - 1] != b'\\')?;
+                spans.push((j, e + 1));
+                j = e + 1;
+            }
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+/// Where the command substitution whose text starts at `from` closes.
+fn substitution_end(code: &[u8], from: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut j = from;
+    while j < code.len() {
+        match code[j] {
+            b'\\' => j += 2,
+            b'\'' => j = single_end(code, j)? + 1,
+            b'"' => j = double_end(code, j + 1)?.0 + 1,
+            b'(' => { depth += 1; j += 1 }
+            b')' if depth == 0 => return Some(j),
+            b')' => { depth -= 1; j += 1 }
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+/// How many commands of this line source a file: `source`, or `.` followed by
+/// a word that can be a path, where a command begins. A command begins at the
+/// line's start, after a control operator, `(`, `$(`, `<(`, `>(` or a
+/// backquote, after a reserved word a command follows, after `builtin` or
+/// `command` and the options they take, and after an assignment
+/// (`NAME=`, `NAME+=`, `NAME[...]=`) or a redirection with its word that
+/// begins one. A command substitution counts wherever it stands. A `.`
+/// before an operator or a word jq reserves is jq's, the way a line inside a
+/// multi-line jq program reads.
+fn source_commands(code: &str) -> usize {
+    // What a quoted string holds is no command word; the quotes stay, so a
+    // quoted path still follows its `.`.
+    let masked = mask_quotes(code.as_bytes());
+    // The commands a `$(...)` or a backquoted text runs, wherever it stands,
+    // quotes included: the mask hides them in a double-quoted string.
+    let b = code.as_bytes();
+    let mut inner = 0;
+    let mut at = 0;
+    while at < b.len() {
+        if b[at..].starts_with(b"$(") && !b[at..].starts_with(b"$((") {
+            let mut depth = 0;
+            let end = (at + 1..b.len()).find(|&j| { if b[j] == b'(' { depth += 1 } else if b[j] == b')' { depth -= 1 } depth == 0 }).unwrap_or(b.len());
+            inner += source_commands(&code[at + 2..end.min(b.len())]);
+            at = end + 1;
+        } else if b[at] == b'`' {
+            let end = (at + 1..b.len()).find(|&j| b[j] == b'`').unwrap_or(b.len());
+            inner += source_commands(&code[at + 1..end]);
+            at = end + 1;
+        } else {
+            at += 1;
+        }
+    }
+    let tokens = shell_tokens(&masked);
     const JQ: [&str; 16] = ["as", "and", "or", "if", "then", "elif", "else", "end", "reduce", "foreach", "def", "try", "catch", "label", "import", "include"];
-    let path = |w: &str| w == "--" || (w.starts_with(|c: char| c.is_ascii_alphanumeric() || "\"'$/~._".contains(c)) && !JQ.contains(&w));
-    let redirection = |w: &str| w.trim_start_matches(|c: char| c.is_ascii_digit()).starts_with(['<', '>']);
-    let assignment = |w: &str| w.split_once('=').is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(word) && !n.as_bytes()[0].is_ascii_digit());
+    let path = |w: &str| w == "--" || w == "<(" || (w.starts_with(|c: char| c.is_ascii_alphanumeric() || "\"'$/~._".contains(c)) && !JQ.contains(&w));
+    let redirection = |w: &str| ["<<<", "<<-", "&>>", "<<", ">>", "<&", ">&", "<>", ">|", "&>", "<", ">"].contains(&w.trim_start_matches(|c: char| c.is_ascii_digit()));
+    let control = |w: &str| [";;&", ";;", ";&", "||", "&&", "|&", "|", "&", ";", "(", ")", "$(", "<(", ">(", "`"].contains(&w);
+    let assignment = |w: &str| w.split_once('=').is_some_and(|(n, _)| {
+        let n = n.strip_suffix('+').unwrap_or(n);
+        let n = n.strip_suffix(']').and_then(|n| n.split_once('[')).map_or(n, |(n, _)| n);
+        !n.is_empty() && n.bytes().all(word) && !n.as_bytes()[0].is_ascii_digit()
+    });
     let mut command = true;
     let mut target = false;
+    let mut options = false;
     let mut found = 0;
-    for (i, w) in words.iter().enumerate() {
-        if command && !target && (*w == "source" || (*w == "." && words.get(i + 1).is_some_and(|next| path(next)))) { found += 1 }
-        let prefix = command && (assignment(w) || redirection(w) || target);
-        target = command && redirection(w) && w.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start_matches(['<', '>']).is_empty();
-        command = (w.len() == 1 && ";&|(){}`!".contains(*w))
-            || ["then", "do", "else", "elif", "if", "while", "until", "time", "builtin", "command"].contains(w)
-            || prefix;
+    for (i, w) in tokens.iter().map(String::as_str).enumerate() {
+        if target { target = false; continue }
+        if redirection(w) { target = true; continue }
+        if options && w.starts_with('-') { continue }
+        if command && (w == "source" || (w == "." && tokens.get(i + 1).is_some_and(|next| path(next)))) { found += 1 }
+        options = command && ["builtin", "command", "time"].contains(&w);
+        command = control(w) || ["then", "do", "else", "elif", "if", "while", "until", "time", "builtin", "command", "{", "!"].contains(&w)
+            || (command && assignment(w));
     }
-    found
+    found + inner
 }
 
 /// The repo path a line of `file` sources, None when it sources nothing, and
@@ -283,10 +446,17 @@ fn cli_files_are_what_the_cli_sources() {
             let target = target.unwrap_or_else(|| panic!("{file} sources a path this test cannot place: {line}"));
             assert!(CLI_FILES.iter().any(|(other, _)| *other == target), "{file} sources {target}, which these tests read too");
             // A file that names its own directory safedeps_lib_dir sets it
-            // to that directory and to nothing else.
+            // to that directory and to nothing else, on the lines right
+            // before this one, and nothing before them can skip them: only
+            // blank lines, `set -euo pipefail` and plain assignments come
+            // first.
             if line.contains("${safedeps_lib_dir}/") {
-                assert_eq!(bare_uses(text, "safedeps_lib_dir"), ["safedeps_lib_dir=\"${BASH_SOURCE[0]%/*}\"",
-                    "[[ \"${safedeps_lib_dir}\" != \"${BASH_SOURCE[0]}\" ]] || safedeps_lib_dir=.", "unset safedeps_lib_dir"], "{file} sets safedeps_lib_dir to its own directory");
+                let set = ["safedeps_lib_dir=\"${BASH_SOURCE[0]%/*}\"", "[[ \"${safedeps_lib_dir}\" != \"${BASH_SOURCE[0]}\" ]] || safedeps_lib_dir=."];
+                assert_eq!(bare_uses(text, "safedeps_lib_dir"), [set[0], set[1], "unset safedeps_lib_dir"], "{file} sets safedeps_lib_dir to its own directory");
+                let lines: Vec<&str> = code(text).map(|(l, _)| l).collect();
+                let at = lines.iter().position(|l| *l == set[0]).unwrap();
+                assert_eq!(lines[at..at + 4], [set[0], set[1], line, "unset safedeps_lib_dir"], "{file} sources right after it sets safedeps_lib_dir");
+                assert!(lines[..at].iter().all(|l| runs_first(l)), "{file} runs only plain lines before it sets safedeps_lib_dir");
             }
         }
     }
@@ -295,7 +465,11 @@ fn cli_files_are_what_the_cli_sources() {
     for unplaced in ["source \"${HOME}/b.sh\"", "source b.sh", ". ./b.sh", "[[ -r x ]] && source \"${SAFEDEPS_REPO_DIR}/b.sh\"",
                      "builtin source \"${SAFEDEPS_REPO_DIR}/b.sh\"", "source\t\"${SAFEDEPS_REPO_DIR}/b.sh\"", "if source \"x\"; then :; fi",
                      "x=1 . \"${SAFEDEPS_REPO_DIR}/b.sh\"", "a; source \"${SAFEDEPS_REPO_DIR}/b.sh\"", "2>/dev/null source \"x\"",
-                     "> /dev/null . \"x\"", ". -- \"${SAFEDEPS_REPO_DIR}/b.sh\"", "{ source \"x\"; }", "$(source x)"] {
+                     "> /dev/null . \"x\"", ". -- \"${SAFEDEPS_REPO_DIR}/b.sh\"", "{ source \"x\"; }", "$(source x)",
+                     ">&2 source \"x\"", "2>&1 . \"x\"", ". <(cat x)", "x=\"$(source x; echo 1)\"", "y=`. ./b.sh`", "if ! source x; then :; fi",
+                     "<&0 source \"x\"", ">&- source \"x\"", ">|/dev/null source \"x\"", "echo \\\" >/dev/null; source \"x\"",
+                     "printf $'it\\'s\\n' >/dev/null; source \"x\"", "x=\"$(printf '%s\"' a)\"; source \"x\"", "x=\\' source \"x\"",
+                     "x+=1 source \"x\"", "a[0]=1 source \"x\"", "builtin -- source \"x\"", "command -p source \"x\""] {
         assert_eq!(sourced("lib/x/a.sh", unplaced), Some(None), "{unplaced}");
     }
     for none in ["      . + {type: $type}", "jq -r . \"$f\"", "--slurpfile source \"$f\"", "x=. y", "safedeps_lib_dir=.",
@@ -305,11 +479,12 @@ fn cli_files_are_what_the_cli_sources() {
     }
 }
 
-/// The help text is prose because no code reads it: the help function is
-/// defined once, and every other mention runs it as a whole command whose
-/// output goes to the terminal.
+/// No line captures the help function: it is defined once, and every other
+/// mention runs it in one of the forms the main dispatch and the
+/// subcommands use. What a caller of such a line does with the output is
+/// out of reach of this reading.
 #[test]
-fn help_is_read_by_no_code() {
+fn help_runs_only_in_its_known_forms() {
     for name in HELP {
         let mut defined = 0;
         for (file, text) in CLI_FILES {
@@ -328,9 +503,18 @@ fn help_is_read_by_no_code() {
 }
 
 /// The check results are declared in bin/safedeps, and their names stand in
-/// the CLI files only there and as whole reads.
+/// the CLI files only there and as whole reads. A report is assembled in
+/// bin/safedeps alone: no other CLI file names a check result, calls an
+/// assembler or writes the word `result` in code.
 #[test]
 fn check_results_stand_only_in_their_declarations() {
+    for (file, text) in &CLI_FILES[1..] {
+        for (line, scanned) in code(text) {
+            let scanned = String::from_utf8_lossy(&scanned);
+            assert!(!line.contains("SAFEDEPS_CHECK_") && ["sf_check_json", "sf_npm_emit_closure_block_json", "result"].iter()
+                .all(|w| stands(scanned.as_bytes(), w, word).is_empty()), "{file} names a check result or assembles a report outside bin/safedeps: {line}");
+        }
+    }
     let bin = CLI_FILES[0].1;
     let declared: Vec<&str> = bin.lines().filter(|line| line.starts_with("SAFEDEPS_CHECK_")).collect();
     assert_eq!(declared.len(), 9, "the check results: {declared:?}");
@@ -338,7 +522,46 @@ fn check_results_stand_only_in_their_declarations() {
         let name = line.split_once('=').unwrap().0;
         let uses: Vec<&str> = CLI_FILES.iter().flat_map(|(_, text)| bare_uses(text, name)).collect();
         assert_eq!(uses, [*line], "{name} stands only in its declaration and as a whole read");
+        // A value is a word of its own too, so it stands in code only in its
+        // declaration. `clean` is a status word, held where the statuses are,
+        // and `error` also names a report field, so neither is read here.
+        let value = line.split_once('=').unwrap().1.trim_matches('"');
+        if ["clean", "error"].contains(&value) { continue }
+        let spelled: Vec<&str> = CLI_FILES.iter().flat_map(|(_, text)| code_lines(text, value, word)).collect();
+        assert_eq!(spelled, [*line], "the check result {value} is spelled in code only in its declaration");
     }
+}
+
+/// Whether a line can stand before a file's bootstrap without deciding
+/// whether the bootstrap runs: a blank line, `set -euo pipefail` or an
+/// assignment of a plain double-quoted value to an upper-case name.
+fn runs_first(line: &str) -> bool {
+    line.is_empty() || line == "set -euo pipefail" || line.split_once("=\"").is_some_and(|(n, v)| n.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && v.ends_with('"') && !v.bytes().any(|b| b";&|()`<>".contains(&b)))
+}
+
+/// The CLI finds its own files from the path it runs from, and from nothing
+/// a caller sets: the names that hold that path are assigned only on these
+/// lines, which derive it from `${BASH_SOURCE[0]}`, and read whole anywhere
+/// else. The lines are one block at the top of `bin/safedeps`, and only
+/// lines that cannot skip it come before it. So every target written under
+/// `${SAFEDEPS_REPO_DIR}/` is a path in the repository.
+#[test]
+fn the_repo_dir_comes_from_the_script() {
+    let bootstrap = ["SAFEDEPS_SOURCE=\"${BASH_SOURCE[0]}\"", "while [[ -h \"${SAFEDEPS_SOURCE}\" ]]; do",
+        "  SAFEDEPS_BIN_DIR=$(cd -P \"$(dirname \"${SAFEDEPS_SOURCE}\")\" && pwd)", "  SAFEDEPS_SOURCE=$(readlink \"${SAFEDEPS_SOURCE}\")",
+        "  [[ \"${SAFEDEPS_SOURCE}\" != /* ]] && SAFEDEPS_SOURCE=\"${SAFEDEPS_BIN_DIR}/${SAFEDEPS_SOURCE}\"", "done",
+        "SAFEDEPS_BIN_DIR=$(cd -P \"$(dirname \"${SAFEDEPS_SOURCE}\")\" && pwd)", "SAFEDEPS_REPO_DIR=$(cd -P \"${SAFEDEPS_BIN_DIR}/..\" && pwd)"];
+    let lines: Vec<&str> = code(CLI_FILES[0].1).map(|(l, _)| l).collect();
+    let at = lines.iter().position(|l| *l == bootstrap[0]).expect("bin/safedeps derives its path");
+    assert_eq!(lines[at..at + bootstrap.len()], bootstrap, "bin/safedeps derives its path in one block");
+    assert!(lines[..at].iter().all(|l| runs_first(l)), "bin/safedeps runs only plain lines before it derives its path");
+    let lines = |name| CLI_FILES.iter().flat_map(|(_, text)| bare_uses(text, name)).collect::<Vec<_>>();
+    assert_eq!(lines("SAFEDEPS_SOURCE"), ["SAFEDEPS_SOURCE=\"${BASH_SOURCE[0]}\"", "  SAFEDEPS_SOURCE=$(readlink \"${SAFEDEPS_SOURCE}\")",
+        "  [[ \"${SAFEDEPS_SOURCE}\" != /* ]] && SAFEDEPS_SOURCE=\"${SAFEDEPS_BIN_DIR}/${SAFEDEPS_SOURCE}\""]);
+    assert_eq!(lines("SAFEDEPS_BIN_DIR"), ["  SAFEDEPS_BIN_DIR=$(cd -P \"$(dirname \"${SAFEDEPS_SOURCE}\")\" && pwd)",
+        "SAFEDEPS_BIN_DIR=$(cd -P \"$(dirname \"${SAFEDEPS_SOURCE}\")\" && pwd)"]);
+    assert_eq!(lines("SAFEDEPS_REPO_DIR"), ["SAFEDEPS_REPO_DIR=$(cd -P \"${SAFEDEPS_BIN_DIR}/..\" && pwd)"]);
 }
 
 #[test]
@@ -376,6 +599,10 @@ fn code_lines_reads_prose_and_code_apart() {
                 sf_err \"read $(jq -r '.clean' f)\"\n\
                 sf_warn \"${s:=clean}\"\n\
                 printf -v w %s \"clean\" >&2\n\
+                printf -vw '%s' \"clean\" >&2\n\
+                printf '%s' \"clean\" >&2\n\
+                sf_info status \\'$(x clean)\\'\n\
+                sf_info \"status '$x' clean\"\n\
                 sf_warn \"$[n=1] clean\"\n\
                 sf_warn \"${a[i++]} clean\"\n\
                 sf_warn \"${x:-${y}} clean\"\n\
@@ -391,7 +618,7 @@ fn code_lines_reads_prose_and_code_apart() {
         "printf 'clean\\n'", "echo \"clean\"", "[[ \"$s\" = clean ]]", "case \"$s\" in clean) : ;; esac",
         "x=\"${SAFEDEPS_STATUS_CLEAN}\" # clean", "jq -r '.clean' <<EOF", "clean", "\"clean\"", "captured clean", "after clean",
         "sf_info \"ok\"; [[ \"$s\" == \"clean\" ]]", "sf_err \"read $(jq -r '.clean' f)\"", "sf_warn \"${s:=clean}\"",
-        "printf -v w %s \"clean\" >&2", "sf_warn \"$[n=1] clean\"", "sf_warn \"${a[i++]} clean\"", "sf_warn \"${x:-${y}} clean\"",
+        "printf -v w %s \"clean\" >&2", "printf -vw '%s' \"clean\" >&2", "sf_info status \\'$(x clean)\\'", "sf_warn \"$[n=1] clean\"", "sf_warn \"${a[i++]} clean\"", "sf_warn \"${x:-${y}} clean\"",
         "$(date) clean", "sf_warn \"open clean"]);
     let names = "SAFEDEPS_X=\"x\"\na=\"${SAFEDEPS_X}\" b=(\"${SAFEDEPS_X[@]}\")\nprintf -v SAFEDEPS_X %s y\nSAFEDEPS_X+=_y\n\
                  read -r SAFEDEPS_X <<< y\nlocal SAFEDEPS_X\n: \"${SAFEDEPS_X:=y}\"\n# SAFEDEPS_X=y\nSAFEDEPS_XY=1\n\

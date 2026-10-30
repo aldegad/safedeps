@@ -211,9 +211,10 @@ pass "no doc restates the hook budget figure outside the canonical sentence"
 # (SAFEDEPS_CHECK_*), and SKILL.md's table is what an agent acts on, so the two
 # name one set. Every result the CLI names is a declared one, and no report
 # takes its result from anywhere but a declaration. The names stand in the
-# CLI files only in their declarations and as whole reads: the core's
-# cli_text::check_results_stand_only_in_their_declarations holds that over
-# every file the CLI sources.
+# CLI files only in their declarations and as whole reads, and no file the
+# CLI sources names a result, calls an assembler or writes `result` in code:
+# the core's cli_text::check_results_stand_only_in_their_declarations holds
+# both, so the rows below read bin/safedeps alone.
 check_declared=$(sed -nE 's/^SAFEDEPS_CHECK_[A-Z_]+="([a-z_]+)"$/\1/p' bin/safedeps | sort)
 check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {print; next} t {exit}' SKILL.md \
   | awk -F'|' '{print $2}' | grep -oE '`[a-z_]+`' | tr -d '`' | sort)
@@ -254,8 +255,12 @@ check_block=$(sed -E 's/(local[[:space:]]+)?block_result="\$\{SAFEDEPS_CHECK_[A-
 [[ -z "${check_block}" ]] || fail "a closure block's result is a declaration: ${check_block}"
 # Which value the assembler writes is a fact of running it, so it runs once
 # per declaration, with the declarations it reads and nothing else, and its
-# report carries that result. A filter a caller puts after the assembler to
-# rewrite the text it prints is not read here.
+# report carries that result. It runs with one set of the other arguments,
+# so an edit that rewrites the result whatever they are is red here, and
+# one that depends on them is not read. A result spelled in such an edit is
+# a value outside its declaration, which the core test holds. A filter a
+# caller puts after the assembler to rewrite the text it prints is not read
+# here either.
 check_assembled=$(
   eval "$(grep -E '^SAFEDEPS_STATUS_[A-Z_]+=' lib/providers/providers.sh)"
   eval "$(grep -E '^SAFEDEPS_NPM_SOURCE_JQ=' lib/npm/closure.sh)"
@@ -266,7 +271,7 @@ check_assembled=$(
   done
 ) || true
 [[ "${check_assembled}" == "$(sed -nE 's/^SAFEDEPS_CHECK_[A-Z_]+="([a-z_]+)"$/\1/p' bin/safedeps)" ]] \
-  || fail "sf_check_json reports the result it is given, for each declaration (got: ${check_assembled//$'\n'/ })"
+  || fail "sf_check_json reports the result it is given, for each declaration, with one set of the other arguments (got: ${check_assembled//$'\n'/ })"
 pass "the check results are declared once, and SKILL.md's table names them"
 
 # Regression: a global install must resolve its package dir through the symlink.
