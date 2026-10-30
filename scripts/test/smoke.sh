@@ -1516,8 +1516,9 @@ pass "clean re-check appends no alert"
 # and reads an absent field as the wrapper always has. A field spelled again
 # on either side is red the day the declaration moves: the CLI's keys are the
 # declared ones, the wrapper's notice counts each field of a report the
-# declaration built, every count a different number, and each list field
-# alone raises the alert. A missing declaration is
+# declaration built, every count a different number, the alert it writes
+# carries that report, and each of the four list fields alone raises the
+# alert. A missing declaration is
 # a failed row, never a source that ends this script with the rows after it
 # unrun.
 [[ -f lib/ledger/recheck-report.sh ]] || fail "lib/ledger/recheck-report.sh declares the re-check report"
@@ -1545,9 +1546,13 @@ PATH="${recheck_notify_bin}:${PATH}" SAFEDEPS_NOTIFY=1 \
   scripts/safedeps-recheck-alert.sh
 [[ "$(cat "${tmp_root}/recheck-notices")" == "3 revoked, 1 new CVE, 2 KEV, 11 provider skipped, 4 suspected ledger forgery. See ~/.safedeps/recheck-alerts.jsonl" ]] \
   || fail "the re-check wrapper counts each field of a declared report (notice: $(cat "${tmp_root}/recheck-notices"))"
+tail -n 1 "${tmp_root}/safe-recheck-counts/recheck-alerts.jsonl" \
+  | jq -e --slurpfile report "${recheck_counts_fixture}" 'del(.kind, .at, .provider_skipped) == $report[0] and .provider_skipped == 11' >/dev/null \
+  || fail "the re-check alert carries the declared report it was raised for"
 # Each list field alone raises the alert, so the condition reads them as the
 # notice does.
-for recheck_alone in 'recheck_report(1; 1; ["n"]; []; []; [])' 'recheck_report(1; 1; []; ["k"]; []; [])' 'recheck_report(1; 0; []; []; ["r"]; [])'; do
+for recheck_alone in 'recheck_report(1; 1; ["n"]; []; []; [])' 'recheck_report(1; 1; []; ["k"]; []; [])' 'recheck_report(1; 0; []; []; ["r"]; [])' \
+    'recheck_report(1; 1; []; []; []; ["f"])'; do
   jq -n "${SAFEDEPS_RECHECK_REPORT_JQ}${recheck_alone}" > "${recheck_counts_fixture}"
   rm -rf "${tmp_root}/safe-recheck-alone"
   SAFEDEPS_NOTIFY=0 \
