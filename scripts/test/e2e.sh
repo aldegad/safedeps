@@ -701,7 +701,9 @@ pass "post hook passes approved full closure"
 # advisories here. Each row has a state root of its own, so what it plants
 # reaches no other row. A curl in front of the real one answers the batch with
 # OSV_STUB_BODY and a KEV download with KEV_STUB_BODY where a row sets those, for
-# an answer no provider fixture gives.
+# an answer no provider fixture gives, and prints 200 either way. With
+# CURL_STUB_EXIT set it then exits with that status: a body cut short is 18, and
+# curl has already printed the code.
 osv_stub_bin="${tmp_root}/osv-stub-bin"
 mkdir -p "${osv_stub_bin}"
 cat > "${osv_stub_bin}/curl" <<STUB
@@ -719,6 +721,7 @@ else
   exec "$(command -v curl)" "\$@"
 fi
 printf '200'
+exit "\${CURL_STUB_EXIT:-0}"
 STUB
 chmod +x "${osv_stub_bin}/curl"
 osv_cache_install() {
@@ -803,6 +806,15 @@ for live in '{"results":[null]}' '{"results":[false]}' '{"results":[[]]}' '{"res
   osv_cache_rolled_back "${osv_row}"
   grep -q 'ERROR OSV batch result is not an answer ecosystem=npm index=0' "${SAFEDEPS_HOME}/advisory.log" || fail "${osv_row}: the record says the batch gave no answer"
 done
+osv_cache_install live-whole '' '{"vulnerable":[]}' "${osv_batch_url}" '{"results":[{}]}'
+hook_response_parse "${osv_cache_post}" quiet || fail "a whole batch answer from the stub stays: $(cat "${osv_cache_post}")"
+export CURL_STUB_EXIT=18
+osv_cache_install live-cut-short '' '{"vulnerable":[]}' "${osv_batch_url}" '{"results":[{}]}'
+unset CURL_STUB_EXIT
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "a batch answer whose curl printed 200 and failed is a failed batch: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back live-cut-short
+grep -q 'ERROR OSV batch query failed status=200 exit 18' "${SAFEDEPS_HOME}/advisory.log" || fail "live-cut-short: the record says both"
 export SAFEDEPS_HOME="${osv_cache_homes[0]}"
 if [[ -n "${osv_cache_homes[1]}" ]]; then
   export SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${osv_cache_homes[1]}"
@@ -912,6 +924,17 @@ for kev_catalog_live in 'null' '{}' '{"vulnerabilities":[]}' '{"vulnerabilities"
     || fail "a KEV download of '${kev_catalog_live}' leaves the stale catalog in place: $(cat "${kev_catalog_post}")"
   kev_catalog_rolled_back "live-stale-${kev_body_number}"
 done
+kev_catalog_live="${kev_catalog_body}"
+kev_catalog_install live-whole absent "${kev_catalog_url}"
+hook_response_parse "${kev_catalog_post}" quiet || fail "a whole catalog from the stub stays: $(cat "${kev_catalog_post}")"
+export CURL_STUB_EXIT=18
+kev_catalog_install live-cut-short absent "${kev_catalog_url}"
+unset CURL_STUB_EXIT
+grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${kev_catalog_post}" \
+  || fail "a KEV download whose curl printed 200 and failed is a failed download: $(cat "${kev_catalog_post}")"
+kev_catalog_rolled_back live-cut-short
+[[ ! -e "${kev_catalog_path}" ]] || fail "live-cut-short: the download is not stored"
+grep -q 'WARN CISA KEV unavailable and no readable local catalog status=200 exit 18' "${SAFEDEPS_HOME}/advisory.log" || fail "live-cut-short: the record says both"
 kev_catalog_live=""
 kev_catalog_install absent absent 'http://127.0.0.1:9/'
 grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${kev_catalog_post}" \
