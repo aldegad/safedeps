@@ -290,7 +290,12 @@ pub fn system_message(message: &[u8]) -> String {
 /// out-of-range sequence is one, and a lead byte with fewer bytes left than
 /// its length takes all of them. A byte that cannot lead (a continuation,
 /// 0xc0, 0xc1, 0xf5 and up) is one each. The inputs below hold each of these
-/// rules and each bound of the lead table and of the overlong floor. No line of a source file outside this one and the
+/// rules, and each bound of the lead table, of the overlong floor and of the
+/// surrogate and out-of-range checks from both sides: the first invalid
+/// sequence past it and the last valid one before it, which jq passes
+/// through as it is. Dropping the surrogate check or raising the
+/// out-of-range bound writes the same bytes, since `char::from_u32` refuses
+/// those code points. No line of a source file outside this one and the
 /// `*_tests.rs` files, `//` comment lines aside, spells an answer's keys, in
 /// any quoting.
 #[cfg(test)]
@@ -307,7 +312,10 @@ fn hook_answers_are_pinned() {
     assert_eq!(deny(b"a\xe0\x80".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}\"}}");
     assert_eq!(system_message(b"x\xf0A"), "{\"systemMessage\":\"x\u{fffd}\"}");
     for (bytes, out) in [(b"a\xc0\x80b".as_slice(), "a\u{fffd}\u{fffd}b"), (b"a\xf5\x80\x80\x80b", "a\u{fffd}\u{fffd}\u{fffd}\u{fffd}b"),
-                         (b"a\xe0\x9f\xbfb", "a\u{fffd}b"), (b"a\xf0\x8f\xbf\xbfb", "a\u{fffd}b"), (b"a\xf4\x90\x80\x80b", "a\u{fffd}b")] {
+                         (b"a\xe0\x9f\xbfb", "a\u{fffd}b"), (b"a\xf0\x8f\xbf\xbfb", "a\u{fffd}b"), (b"a\xf4\x90\x80\x80b", "a\u{fffd}b"),
+                         (b"a\xc2\x80b", "a\u{80}b"), (b"a\xdf\xbfb", "a\u{7ff}b"), (b"a\xe0\xa0\x80b", "a\u{800}b"), (b"a\xef\x80\x80b", "a\u{f000}b"),
+                         (b"a\xed\x9f\xbfb", "a\u{d7ff}b"), (b"a\xee\x80\x80b", "a\u{e000}b"), (b"a\xf0\x90\x80\x80b", "a\u{10000}b"),
+                         (b"a\xf4\x8f\xbf\xbfb", "a\u{10ffff}b"), (b"a\xed\xa0\x80b", "a\u{fffd}b"), (b"a\xed\xbf\xbfb", "a\u{fffd}b")] {
         assert_eq!(system_message(bytes), format!("{{\"systemMessage\":\"{out}\"}}"));
     }
     assert_eq!(allow_rewrite(b"a\xff\xffb"), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"a\u{fffd}\u{fffd}b\"}}}");
