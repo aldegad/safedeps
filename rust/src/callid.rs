@@ -87,7 +87,7 @@ pub mod record {
 
 /// The files that write or read the two records spell none of their names
 /// again: a writer that types a key its reader looks up by the constant, or
-/// the reverse, is a second spelling no compiler sees. Two names are left
+/// the reverse, is a second spelling no compiler sees. Three names are left
 /// out: `tool_use_id`, which is also the runtime's name and the accepted-risk
 /// entry's, and the project's `package-lock.json` and `node_modules`, which
 /// these files also join as paths to walk, restore and report. pre/snapshot.rs

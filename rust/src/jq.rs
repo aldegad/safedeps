@@ -284,9 +284,12 @@ pub fn system_message(message: &[u8]) -> String {
 
 /// The runtimes read these bytes, so the event name and the key order are
 /// part of the answer, and a reason that is not UTF-8 is written as `--arg`
-/// writes it: jq reads a cut sequence as one U+FFFD where Rust's lossy
-/// decoder writes one per byte. No source file but this one and the tests
-/// spells an answer's keys, in any quoting.
+/// writes it (jq 1.7.1, measured): jq reads a cut sequence as one U+FFFD
+/// where Rust's lossy decoder writes one per byte, reads an overlong one as
+/// one, takes the byte after a sequence cut at the end into it, and writes
+/// one per stray byte. No line of a source file outside this one and the
+/// `*_tests.rs` files, `//` comment lines aside, spells an answer's keys, in
+/// any quoting.
 #[cfg(test)]
 #[test]
 fn hook_answers_are_pinned() {
@@ -297,6 +300,10 @@ fn hook_answers_are_pinned() {
     assert_eq!(allow_rewrite(b"npm i a\xf0\x80\x80b"), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"npm i a\u{fffd}b\"}}}");
     assert_eq!(system_message(b"rolled back\n\tx\xc3"), "{\"systemMessage\":\"rolled back\\n\\tx\u{fffd}\"}");
     assert_eq!(system_message(b"a\xed\xa0\x80b"), "{\"systemMessage\":\"a\u{fffd}b\"}");
+    assert_eq!(deny(b"a\xe0\x80\x80b".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}b\"}}");
+    assert_eq!(deny(b"a\xe0\x80".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}\"}}");
+    assert_eq!(system_message(b"x\xf0A"), "{\"systemMessage\":\"x\u{fffd}\"}");
+    assert_eq!(allow_rewrite(b"a\xff\xffb"), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"a\u{fffd}\u{fffd}b\"}}}");
     fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
