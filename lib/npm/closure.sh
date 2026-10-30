@@ -358,7 +358,9 @@ safedeps_npm_yarn_copy_materialization_inputs() {
   local relative_path
   local source_file
   local destination_file
+  local relative_paths
 
+  relative_paths=$(jq -r '.input_files[]?.path' "${inputs_file}") || return 1
   while IFS= read -r relative_path; do
     [[ -n "${relative_path}" ]] || continue
     source_file="${project_root}/${relative_path}"
@@ -369,7 +371,7 @@ safedeps_npm_yarn_copy_materialization_inputs() {
     }
     mkdir -p "$(dirname "${destination_file}")" || return 1
     cp -p "${source_file}" "${destination_file}" || return 1
-  done < <(jq -r '.input_files[]?.path' "${inputs_file}")
+  done <<< "${relative_paths}"
 }
 
 # Construct an isolated candidate lockfile. This calls Yarn exactly once for
@@ -533,7 +535,7 @@ safedeps_npm_yarn_project_context() {
   local output_file="$1"
   local start_dir="${2:-${SAFEDEPS_NPM_PROJECT_DIR:-${PWD}}}"
   local dir parent manifest lockfile resolutions_json resolutions_sha lockfile_sha context_hex
-  local inputs_file input_sha input_files
+  local inputs_file input_sha input_files declares declares_status
 
   safedeps_npm_require_jq || return 2
   [[ -d "${start_dir}" ]] || {
@@ -546,7 +548,12 @@ safedeps_npm_yarn_project_context() {
     manifest="${dir}/package.json"
     lockfile="${dir}/yarn.lock"
     if [[ -f "${manifest}" && -f "${lockfile}" ]]; then
-      if jq -e '(.resolutions | type) == "object" and (.resolutions | length) > 0' "${manifest}" >/dev/null 2>&1; then
+      declares_status=0
+      declares=$(jq '(.resolutions | type) == "object" and (.resolutions | length) > 0' "${manifest}" 2>/dev/null) || declares_status=$?
+      # A manifest that does not read declares nothing, in the core too. One that
+      # answered and then failed is a read that failed, whatever it answered.
+      [[ "${declares_status}" -eq 0 || -z "${declares}" ]] || return 2
+      if [[ "${declares##*$'\n'}" == "true" ]]; then
         if ! grep -q '^__metadata:' "${lockfile}"; then
           printf 'safedeps npm closure: Yarn resolutions found, but yarn.lock is not a supported Berry lockfile: %s\n' "${lockfile}" >&2
           return 2
@@ -585,7 +592,7 @@ ${input_sha}") || { rm -f "${inputs_file}"; return 2; }
             lockfile_sha256: $lockfile_sha256,
             input_sha256: $input_sha256,
             input_files: $input_files
-          }' > "${output_file}"
+          }' > "${output_file}" || { rm -f "${inputs_file}"; return 2; }
         rm -f "${inputs_file}"
         return 0
       fi
@@ -596,7 +603,7 @@ ${input_sha}") || { rm -f "${inputs_file}"; return 2; }
     [[ -e "${dir}/.git" ]] && break
 
     [[ "${dir}" == "/" ]] && break
-    parent=$(dirname "${dir}")
+    parent=$(dirname "${dir}") || return 2
     [[ "${parent}" == "${dir}" ]] && break
     dir="${parent}"
   done
@@ -711,9 +718,10 @@ safedeps_npm_write_source() {
   fi
 }
 
-# True when the closure source in this file is deny-only.
+# True when the closure source in this file is deny-only, and when it does not
+# read: a mark that cannot be read is not a mark that is absent.
 safedeps_npm_source_is_deny_only() {
-  [[ "$(jq -r "${SAFEDEPS_NPM_SOURCE_JQ}"'source_approval_scope // ""' "$1")" == "${SAFEDEPS_NPM_DENY_ONLY}" ]]
+  ! jq -e --arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}" "${SAFEDEPS_NPM_SOURCE_JQ}"'(source_approval_scope // "") != $deny_only' "$1" >/dev/null 2>&1
 }
 
 # Discover the consuming repo's npm `overrides` so the closure probe resolves
@@ -768,10 +776,18 @@ safedeps_npm_repo_overrides_json() {
     local pkg="${dir}/package.json"
     if [[ -f "${pkg}" ]]; then
       local raw
-      raw=$(jq -c 'if (.overrides | type) == "object" and (.overrides | length) > 0 then 1 else empty end' "${pkg}" 2>/dev/null) || raw=""
+      local raw_status=0
+      raw=$(jq -c 'if (.overrides | type) == "object" and (.overrides | length) > 0 then 1 else empty end' "${pkg}" 2>/dev/null) || raw_status=$?
+      # A manifest that does not read declares nothing, in the core too, and npm
+      # passes one above a project. One that said it declares overrides and then
+      # failed did declare them, and they are what the real install resolves.
+      if [[ "${raw_status}" -ne 0 && -n "${raw}" ]]; then
+        printf 'safedeps npm closure: could not read the overrides of %s\n' "${pkg}" >&2
+        return 1
+      fi
       if [[ -n "${raw}" ]]; then
         [[ -z "${source_out}" ]] || printf '%s' "${pkg}" > "${source_out}"
-        jq -c "${filter}" "${pkg}" 2>/dev/null || printf '{}'
+        jq -c "${filter}" "${pkg}" 2>/dev/null || return 1
         return 0
       fi
     fi
@@ -786,7 +802,7 @@ safedeps_npm_repo_overrides_json() {
     # answers, and the runtime kills it and lets the install run (GitHub #21).
     # Same fixed-point test as the Yarn walk-up above.
     local parent
-    parent=$(dirname "${dir}")
+    parent=$(dirname "${dir}") || return 1
     [[ "${parent}" == "${dir}" ]] && break
     dir="${parent}"
   done
@@ -802,7 +818,9 @@ safedeps_npm_repo_overrides_json() {
 #
 # Writes the approval context and returns 0 when overrides apply. Returns 1 when
 # there are none — then the closure is project-independent and the ordinary
-# global approval is correct.
+# global approval is correct. Returns 2 when there are and no context could be
+# made: that is not the case above, and a closure resolved under them must not
+# reach the global key.
 safedeps_npm_overrides_context() {
   local output_file="$1"
   local overrides_json="$2"
@@ -812,12 +830,12 @@ safedeps_npm_overrides_context() {
   local context_hex
 
   [[ -n "${overrides_json}" && "${overrides_json}" != '{}' ]] || return 1
-  [[ -n "${overrides_source}" ]] || return 1
+  [[ -n "${overrides_source}" ]] || return 2
 
   if [[ "${overrides_source}" == "env" ]]; then
     project_root="env"
   else
-    project_root=$(cd "$(dirname "${overrides_source}")" 2>/dev/null && pwd -P) || return 1
+    project_root=$(cd "$(dirname "${overrides_source}")" 2>/dev/null && pwd -P) || return 2
   fi
 
   # The key folds in the project root as well as the override set, even though
@@ -831,11 +849,11 @@ safedeps_npm_overrides_context() {
   # Hash the canonical (sorted) override set, so key equality means the probe
   # resolves the same way, not merely that the manifest bytes matched.
   local canonical_overrides
-  canonical_overrides=$(jq -cS '.' <<< "${overrides_json}" 2>/dev/null) || return 1
-  [[ -n "${canonical_overrides}" ]] || return 1
-  overrides_sha=$(safedeps_npm_sha256_text "${canonical_overrides}") || return 1
+  canonical_overrides=$(jq -cS '.' <<< "${overrides_json}" 2>/dev/null) || return 2
+  [[ -n "${canonical_overrides}" ]] || return 2
+  overrides_sha=$(safedeps_npm_sha256_text "${canonical_overrides}") || return 2
   context_hex=$(safedeps_npm_sha256_text "${project_root}
-${overrides_sha}") || return 1
+${overrides_sha}") || return 2
 
   jq -cn \
     --arg context_hash "sha256:${context_hex}" \
@@ -849,7 +867,7 @@ ${overrides_sha}") || return 1
       overrides_source: $overrides_source,
       overrides_sha256: $overrides_sha256,
       overrides: $overrides
-    }' > "${output_file}"
+    }' > "${output_file}" || return 2
 }
 
 # One npm run of the closure probe in its directory: the lockfile only, no
@@ -944,8 +962,8 @@ safedeps_npm_probe_self_pinned() {
       "${package_name}" "${version}" >&2
     return 1
   fi
-  if [[ "$(jq -n --slurpfile pinned "${dir}/pinned-package-lock.json" --slurpfile kept "${dir}/package-lock.json" \
-    '$pinned == $kept' 2>/dev/null)" != "true" ]]; then
+  if ! jq -en --slurpfile pinned "${dir}/pinned-package-lock.json" --slurpfile kept "${dir}/package-lock.json" \
+    '$pinned == $kept' >/dev/null 2>&1; then
     printf 'safedeps npm closure: npm changed the pinned lockfile of %s@%s once the pin was removed; the pinned closure is not used\n' \
       "${package_name}" "${version}" >&2
     return 1
@@ -964,20 +982,28 @@ safedeps_npm_resolve_spec_closure() {
   local project_context_status=1
   local project_closure_status=1
   local project_root=""
+  local fixture_closure
 
   safedeps_npm_require_jq || return 1
 
-  if safedeps_npm_fixture_closure "${package_name}" "${version}"; then
-    [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_FIXTURE}"
+  if fixture_closure=$(safedeps_npm_fixture_closure "${package_name}" "${version}"); then
+    [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_FIXTURE}" || return 1
+    printf '%s\n' "${fixture_closure}"
     return 0
   fi
 
   project_context_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-context.XXXXXX") || return 1
   if safedeps_npm_yarn_project_context "${project_context_file}"; then
     project_context_status=0
-    project_root=$(jq -r '.project_root' "${project_context_file}")
+    project_root=$(jq -r '.project_root' "${project_context_file}") || {
+      rm -f "${project_context_file}"
+      return 1
+    }
     if safedeps_npm_yarn_project_closure "${package_name}" "${version}" "${project_root}"; then
-      [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "${SAFEDEPS_CONTEXT_YARN_LOCKFILE}" "${project_context_file}"
+      [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "${SAFEDEPS_CONTEXT_YARN_LOCKFILE}" "${project_context_file}" || {
+        rm -f "${project_context_file}"
+        return 1
+      }
       rm -f "${project_context_file}"
       return 0
     else
@@ -1020,9 +1046,13 @@ safedeps_npm_resolve_spec_closure() {
     rm -f "${project_context_file}"
     return 1
   }
-  overrides_json=$(safedeps_npm_repo_overrides_json "${overrides_source_file}")
+  if ! overrides_json=$(safedeps_npm_repo_overrides_json "${overrides_source_file}") \
+    || ! overrides_source=$(cat "${overrides_source_file}" 2>/dev/null); then
+    rm -rf "${tmp_dir}"
+    rm -f "${project_context_file}" "${overrides_source_file}"
+    return 1
+  fi
   [[ -n "${overrides_json}" ]] || overrides_json='{}'
-  overrides_source=$(cat "${overrides_source_file}" 2>/dev/null)
   rm -f "${overrides_source_file}"
   if ! jq -n --argjson overrides "${overrides_json}" \
     '{name:"safedeps-closure-probe",version:"0.0.0",private:true}
@@ -1049,18 +1079,24 @@ safedeps_npm_resolve_spec_closure() {
   lockfile="${tmp_dir}/package-lock.json"
   safedeps_npm_lock_closure "${lockfile}" "${package_name}"
   local status=$?
-  local overrides_context_file=""
+  local overrides_context_file
+  local overrides_status=2
   if [[ -n "${source_file}" ]]; then
     if [[ "${project_context_status}" -eq 2 ]]; then
-      safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}" "" "${SAFEDEPS_NPM_PROJECT_CONTEXT_INVALID}"
+      safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}" "" "${SAFEDEPS_NPM_PROJECT_CONTEXT_INVALID}" || status=1
     else
-      overrides_context_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-ctx.XXXXXX") || overrides_context_file=""
-      if [[ -n "${overrides_context_file}" ]] && \
-          safedeps_npm_overrides_context "${overrides_context_file}" "${overrides_json}" "${overrides_source}"; then
-        safedeps_npm_write_source "${source_file}" "${SAFEDEPS_CONTEXT_NPM_OVERRIDES}" "${overrides_context_file}"
-      else
-        safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}"
+      if overrides_context_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-ctx.XXXXXX"); then
+        overrides_status=0
+        safedeps_npm_overrides_context "${overrides_context_file}" "${overrides_json}" "${overrides_source}" || overrides_status=$?
       fi
+      case "${overrides_status}" in
+        0) safedeps_npm_write_source "${source_file}" "${SAFEDEPS_CONTEXT_NPM_OVERRIDES}" "${overrides_context_file}" || status=1 ;;
+        1) safedeps_npm_write_source "${source_file}" "${SAFEDEPS_SOURCE_NPM_PACKAGE}" || status=1 ;;
+        *)
+          printf 'safedeps npm closure: no approval context for the repo overrides, so the closure resolved under them is not used\n' >&2
+          status=1
+          ;;
+      esac
       rm -f "${overrides_context_file}"
     fi
   fi

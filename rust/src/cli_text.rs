@@ -401,13 +401,14 @@ fn check_results_stand_only_in_their_declarations() {
         // are. `error` is also a word of the CLI's English and the name of a
         // report field, so for it the reading is narrower: it may not stand
         // as a value, a whole quoted string (`"error"`, `'error'`) or a word
-        // outside quotes, other than the name an `--arg` gives jq and jq's
-        // `error(...)` on a line of a multi-line jq program. A line whose
+        // outside quotes, other than the name an `--arg` gives jq, jq's
+        // `error(...)` on a line of a multi-line jq program, and the field's
+        // name in the one report jq does not make (`"error":`). A line whose
         // quotes this reading cannot blank is read whole.
         let value = line.split_once('=').unwrap().1.trim_matches('"');
         if value == "clean" { continue }
         let as_value = |scanned: &[u8]| if value != "error" { !stands(scanned, value, word).is_empty() } else {
-            let text = String::from_utf8_lossy(scanned);
+            let text = String::from_utf8_lossy(scanned).replace("\"error\":", "");
             let outside = unquoted(&text).unwrap_or_else(|| scanned.to_vec());
             [format!("\"{value}\""), format!("'{value}'")].iter().any(|q| text.contains(q.as_str()))
                 || stands(&outside, value, word).into_iter().any(|at| !outside[..at].ends_with(b"--arg ") && outside.get(at + value.len()) != Some(&b'('))

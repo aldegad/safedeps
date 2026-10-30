@@ -34,13 +34,15 @@ safedeps_ledger_now_iso() {
 
 safedeps_ledger_add_days_iso() {
   local days="$1"
+  local now
   local seconds
 
-  seconds=$(( days * 86400 ))
-  if date -u -r $(( $(date +%s) + seconds )) +"%Y-%m-%dT%H:%M:%SZ" >/dev/null 2>&1; then
-    date -u -r $(( $(date +%s) + seconds )) +"%Y-%m-%dT%H:%M:%SZ"
+  now=$(date +%s) || return 1
+  seconds=$(( now + days * 86400 ))
+  if date -u -r "${seconds}" +"%Y-%m-%dT%H:%M:%SZ" >/dev/null 2>&1; then
+    date -u -r "${seconds}" +"%Y-%m-%dT%H:%M:%SZ"
   else
-    date -u -d "@$(( $(date +%s) + seconds ))" +"%Y-%m-%dT%H:%M:%SZ"
+    date -u -d "@${seconds}" +"%Y-%m-%dT%H:%M:%SZ"
   fi
 }
 
@@ -68,11 +70,11 @@ safedeps_ledger_hash() {
     hex=$(safedeps_ledger_sha256_hex "${ecosystem}
 ${package_name}
 ${version}
-${context_hash}")
+${context_hash}") || return 1
   else
     hex=$(safedeps_ledger_sha256_hex "${ecosystem}
 ${package_name}
-${version}")
+${version}") || return 1
   fi
   printf 'sha256:%s' "${hex}"
 }
@@ -97,7 +99,7 @@ safedeps_ledger_path() {
   local context_hash="${4:-}"
   local hash
 
-  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
+  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
   safedeps_ledger_path_for_hash "${hash}"
 }
 
@@ -250,7 +252,7 @@ safedeps_ledger_read() {
   local context_hash="${4:-}"
   local ledger_file
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
   [[ -f "${ledger_file}" ]] || return 1
   safedeps_ledger_validate_json "${ledger_file}" || return 1
   cat "${ledger_file}"
@@ -265,8 +267,8 @@ safedeps_ledger_check() {
   local expected_hash
   local stored_hash
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
-  expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
+  expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
 
   if [[ ! -f "${ledger_file}" ]]; then
     jq -cn --arg hash "${expected_hash}" '{approved: false, reason: "miss", hash: $hash}'
@@ -278,7 +280,7 @@ safedeps_ledger_check() {
     return 1
   fi
 
-  stored_hash=$(jq -r '.hash' "${ledger_file}")
+  stored_hash=$(jq -r '.hash' "${ledger_file}") || return 1
   if [[ "${stored_hash}" != "${expected_hash}" ]]; then
     jq -cn --arg hash "${expected_hash}" --arg stored_hash "${stored_hash}" \
       '{approved: false, reason: "hash_mismatch", hash: $hash, stored_hash: $stored_hash}'
@@ -286,7 +288,7 @@ safedeps_ledger_check() {
   fi
 
   local stored_context_hash
-  stored_context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${ledger_file}")
+  stored_context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${ledger_file}") || return 1
   if [[ "${stored_context_hash}" != "${context_hash}" ]]; then
     jq -cn --arg hash "${expected_hash}" --arg context_hash "${context_hash}" --arg stored_context_hash "${stored_context_hash}" \
       '{approved: false, reason: "context_mismatch", hash: $hash, context_hash: $context_hash, stored_context_hash: $stored_context_hash}'
@@ -315,7 +317,10 @@ safedeps_ledger_atomic_write() {
   mkdir -p "${target_dir}" || return 1
   temp_path=$(mktemp "${target_dir}/.${target_base}.XXXXXX") || return 1
 
-  cat > "${temp_path}"
+  cat > "${temp_path}" || {
+    rm -f "${temp_path}"
+    return 1
+  }
   chmod 600 "${temp_path}" 2>/dev/null || true
   safedeps_ledger_validate_json "${temp_path}" || {
     rm -f "${temp_path}"
@@ -324,7 +329,11 @@ safedeps_ledger_atomic_write() {
   mv -f "${temp_path}" "${target_path}"
 }
 
-safedeps_ledger_write_approved_spec() {
+# The entry an approval would write. Nothing is written here. An approval is
+# three things that must agree, this entry, the line re-check reads and the
+# report, and `check` makes them all before it writes the first
+# (sf_check_commit in bin/safedeps).
+safedeps_ledger_render_approved_spec() {
   local ecosystem="$1"
   local package_name="$2"
   local version="$3"
@@ -337,23 +346,21 @@ safedeps_ledger_write_approved_spec() {
   local approved_at
   local expires_at
   local hash
-  local target_path
   local evidence_arg=()
   local transitive_arg=()
   local project_context_arg=()
   local context_hash=""
 
   safedeps_ledger_require_jq || return 1
-  safedeps_ledger_init
 
-  approved_at=$(safedeps_ledger_now_iso)
-  expires_at=$(safedeps_ledger_add_days_iso "${ttl_days}")
+  approved_at=$(safedeps_ledger_now_iso) || return 1
+  expires_at=$(safedeps_ledger_add_days_iso "${ttl_days}") || return 1
   if [[ -n "${project_context_file}" ]]; then
     [[ -f "${project_context_file}" ]] || {
       printf 'safedeps ledger: project context file not found: %s\n' "${project_context_file}" >&2
       return 1
     }
-    context_hash=$(jq -r "${SAFEDEPS_CONTEXT_JQ}"'select(.type | context_scopes) | .context_hash // empty' "${project_context_file}")
+    context_hash=$(jq -r "${SAFEDEPS_CONTEXT_JQ}"'select(.type | context_scopes) | .context_hash // empty' "${project_context_file}") || return 1
     [[ -n "${context_hash}" ]] || {
       printf 'safedeps ledger: invalid project context: %s\n' "${project_context_file}" >&2
       return 1
@@ -363,8 +370,7 @@ safedeps_ledger_write_approved_spec() {
     project_context_arg=(--argjson project_context 'null')
   fi
 
-  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
-  target_path=$(safedeps_ledger_path_for_hash "${hash}")
+  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
 
   if [[ -n "${evidence_file}" ]]; then
     [[ -f "${evidence_file}" ]] || {
@@ -419,7 +425,7 @@ safedeps_ledger_write_approved_spec() {
           package: .package,
           version: (.version | tostring)
         }) | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version))
-      }' | safedeps_ledger_atomic_write "${target_path}" || return 1
+      }'
   else
     jq -cn \
       --arg hash "${hash}" \
@@ -449,10 +455,20 @@ safedeps_ledger_write_approved_spec() {
           package: .package,
           version: (.version | tostring)
         }) | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version))
-      }' | safedeps_ledger_atomic_write "${target_path}" || return 1
+      }'
   fi
+}
 
-  cat "${target_path}"
+safedeps_ledger_write_approved_spec() {
+  local entry
+  local hash
+  local target_path
+
+  entry=$(safedeps_ledger_render_approved_spec "$@") || return 1
+  hash=$(jq -r '.hash' <<< "${entry}") || return 1
+  target_path=$(safedeps_ledger_path_for_hash "${hash}") || return 1
+  safedeps_ledger_atomic_write "${target_path}" <<< "${entry}" || return 1
+  printf '%s\n' "${entry}"
 }
 
 # Read the whole ledger once and write every spec it approves as TSV:
@@ -545,6 +561,7 @@ safedeps_ledger_effect_misses() {
   local closure_file="$3"
   local miss_file
   local status
+  local pipe_status
 
   miss_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-ledger-miss.XXXXXX") || return 2
   jq -r --arg ecosystem "${ecosystem}" \
@@ -559,12 +576,13 @@ safedeps_ledger_effect_misses() {
       }
       !(($1 SUBSEP $2 SUBSEP $3) in approved) { print $2 "\t" $3 }
     ' > "${miss_file}"
+  pipe_status="${PIPESTATUS[*]}"
 
-  # A jq that could not read the closure produces no rows, and no rows is
-  # indistinguishable from "every package is approved" once the output is all a
-  # caller sees. That is the fail-open direction, so the failure gets its own
-  # status rather than an empty success.
-  if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+  # A jq that could not read the closure, or an awk that could not compare it,
+  # produces no rows, and no rows is indistinguishable from "every package is
+  # approved" once the output is all a caller sees. That is the fail-open
+  # direction, so the failure gets its own status rather than an empty success.
+  if [[ "${pipe_status}" != "0 0" ]]; then
     rm -f "${miss_file}"
     return 2
   fi
@@ -654,18 +672,20 @@ safedeps_ledger_revoke() {
   local context_hash="${5:-}"
   local ledger_file
   local revoked_at
+  local entry
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
   [[ -f "${ledger_file}" ]] || return 1
   safedeps_ledger_validate_json "${ledger_file}" || return 1
 
-  revoked_at=$(safedeps_ledger_now_iso)
-  jq \
+  revoked_at=$(safedeps_ledger_now_iso) || return 1
+  entry=$(jq \
     --arg revoked_at "${revoked_at}" \
     --arg reason "${reason}" \
     '. + {revoked_at: $revoked_at, revoked_reason: $reason, expires_at: $revoked_at}' \
-    "${ledger_file}" | safedeps_ledger_atomic_write "${ledger_file}"
-  cat "${ledger_file}"
+    "${ledger_file}") || return 1
+  safedeps_ledger_atomic_write "${ledger_file}" <<< "${entry}" || return 1
+  printf '%s\n' "${entry}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
