@@ -18,6 +18,12 @@ fn env(name:&str,default:&str)->String{std::env::var(name).ok().filter(|s|!s.is_
 fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wall(os::WallRole::ProviderCacheExpiry).seconds()-m.mtime()<=ttl)}
 fn obj0(path:&Path)->Result<Value,()>{let s=jv::read_file(path).ok_or(())?;if s.failed{return Err(())}Ok(first(s))}
 fn first(s:jv::Stream)->Value{s.values.into_iter().next().filter(jv::truthy).unwrap_or_else(||jv::obj(vec![("vulns",Value::Arr(Vec::new()))]))}
+/// An OSV answer is one JSON object whose `vulns`, when it has one, is a list.
+/// OSV answers `{}` for a package it has nothing on, and nothing else says so:
+/// an empty file, a file this user cannot read and a `null` hold no answer, and
+/// none of them reads as no advisories. The CLI reads an answer by the same rule
+/// (safedeps_osv_is_answer), and `osv_answers_match_cli` holds the two together.
+fn osv_answer(v:Value)->Option<Value>{(matches!(v,Value::Obj(_))&&matches!(jv::field(&v,"vulns"),Ok(Value::Arr(_)|Value::Null))).then_some(v)}
 fn tsv(s:&[u8])->W{let mut out=Vec::new();for b in s{match b{b'\\'=>out.extend(b"\\\\"),b'\t'=>out.extend(b"\\t"),b'\r'=>out.extend(b"\\r"),b'\n'=>out.extend(b"\\n"),_=>out.push(*b)}}out}
 /// The advisory status one provider answer gives one package. The CLI
 /// declares the same names and the same rule in lib/providers/providers.sh,
@@ -97,8 +103,13 @@ impl Providers{
             let package=match &spec.package{Value::Str(s)=>tsv(s),Value::Null=>Vec::new(),_=>return Err(())};let version=tsv(&spec.version);
             if package.is_empty()||version.is_empty(){continue}
             let path=osv_cache_path(&self.cache,&package,&version);
+            // A fresh file that holds no answer is a miss with a line in the
+            // record: the query is asked again and its answer replaces the file.
             let value=if fresh(&path,self.ttl){
-                self.log(b"INFO",&cat(&[b"OSV batch cache hit ecosystem=npm package=",&package,b" version=",&version]));Some(obj0(&path)?)
+                let cached=jv::read_one_object(&path).and_then(osv_answer);
+                if cached.is_some(){self.log(b"INFO",&cat(&[b"OSV batch cache hit ecosystem=npm package=",&package,b" version=",&version]));}
+                else{self.log(b"WARN",&cat(&[b"OSV cache unreadable; asking again ecosystem=npm package=",&package,b" version=",&version]));}
+                cached
             }else{None};items.push((package,version,path,value));
         }
         let missing:Vec<_>=items.iter().enumerate().filter(|(_,i)|i.3.is_none()).map(|(n,_)|n).collect();
@@ -117,8 +128,8 @@ impl Providers{
             let st=st.unwrap();if st.values.len()!=1{return Err(())}
             let Value::Arr(results)=jv::field(&st.values[0],"results")?else{return Err(())};
             if results.len()!=missing.len(){self.log(b"ERROR",&cat(&[b"OSV batch result count mismatch misses=",missing.len().to_string().as_bytes(),b" results=",results.len().to_string().as_bytes()]));return Err(())}
-            for (i,r) in missing.iter().zip(results){
-                let v=if jv::truthy(r){r.clone()}else{jv::obj(vec![("vulns",Value::Arr(Vec::new()))])};if !matches!(v,Value::Obj(_)){return Err(())}
+            for (n,(i,r)) in missing.iter().zip(results).enumerate(){
+                let Some(v)=osv_answer(r.clone())else{self.log(b"ERROR",&cat(&[b"OSV batch result is not an answer ecosystem=npm index=",n.to_string().as_bytes()]));return Err(())};
                 let (package,version,path,stored)=&mut items[*i];state::write_state_file(path,&jv::dump(&v)).map_err(|_|())?;
                 self.log(b"INFO",&cat(&[b"OSV batch live query ok ecosystem=npm package=",package,b" version=",version]));*stored=Some(v);
             }
@@ -128,17 +139,15 @@ impl Providers{
         // the rest: a refresh, its log line and the parse happen once.
         let mut catalog:Option<Option<Value>>=None;
         for (package,version,_,value) in items{
-            let osv=value.ok_or(())?;let vulns=jv::field(&osv,"vulns")?;
+            let osv=value.ok_or(())?;let vulns=match jv::field(&osv,"vulns")?{Value::Arr(a)=>a.as_slice(),_=>&[]};
             let mut cves=Vec::new();let mut ids=Vec::new();
-            let values:Vec<&Value>=match vulns{Value::Arr(a)=>a.iter().collect(),Value::Obj(o)=>o.iter().map(|(_,v)|v).collect(),_=>Vec::new()};
-            for v in &values{
+            for v in vulns{
                 if let Ok(Value::Str(s))=jv::field(v,"id"){ids.push(s.clone());if cve.is_match(s){cves.push(s.clone());}}
                 if let Ok(Value::Arr(a))=jv::field(v,"aliases"){for x in a{if let Value::Str(s)=x{if cve.is_match(s){cves.push(s.clone());}}}}
             }
             let catalog=catalog.get_or_insert_with(||self.kev());let mut exploited=false;
             if let Some(c)=catalog{if let Ok(Value::Arr(a))=jv::field(c,"vulnerabilities"){exploited=a.iter().any(|v|matches!(jv::field(v,"cveID"),Ok(Value::Str(s)) if cves.contains(s)));}}
-            let count=match vulns{Value::Arr(a)=>a.len(),Value::Obj(o)=>o.len(),Value::Str(s)=>String::from_utf8_lossy(s).chars().count(),Value::Null|Value::Bool(false)=>0,_=>return Err(())};
-            output.push((package,version,Status::of(exploited,count),ids));
+            output.push((package,version,Status::of(exploited,vulns.len()),ids));
         }Ok(output)
     }
 }
@@ -212,6 +221,33 @@ fn provider_statuses_match_cli() {
         .args(["-c", &script, "status-contract"]).output().unwrap();
     assert!(out.status.success(), "CLI status list: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "[true,true,true,false,false,false,false,false,false]\n", "status_known is the core's statuses");
+}
+
+#[cfg(test)]
+#[test]
+fn osv_answers_match_cli() {
+    let cli = include_str!("../../../lib/providers/providers.sh");
+    let head = "safedeps_osv_is_answer() {";
+    let body = cli.split_once(head).unwrap().1.split_once("\n}").unwrap().0;
+    let script = format!("{head}{body}\n}}\nsafedeps_osv_is_answer \"$1\"");
+    let dir = std::env::temp_dir().join(format!("safedeps-osv-answer-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("answer.json");
+    let answers = ["{}", "  {}\n", r#"{"vulns":[]}"#, r#"{"vulns":null}"#, r#"{"vulns":[{"id":"X"}]}"#,
+        r#"{"vulns":[1],"next_page_token":"t"}"#, r#"{"vulns":false,"vulns":[]}"#];
+    let none = ["", " ", "\n", "null", "false", "true", "[]", "[{}]", "1", r#""x""#, "not json", "{", "{}{}", "{} {}",
+        "null {}", "{} null", "{} not json", r#"{"vulns":false}"#, r#"{"vulns":true}"#, r#"{"vulns":""}"#, r#"{"vulns":"x"}"#,
+        r#"{"vulns":{}}"#, r#"{"vulns":{"a":1}}"#, r#"{"vulns":1}"#, r#"{"vulns":[],"vulns":false}"#];
+    for (bodies, answer) in [(answers.as_slice(), true), (none.as_slice(), false)] {
+        for body in bodies {
+            fs::write(&file, body).unwrap();
+            assert_eq!(jv::read_one_object(&file).and_then(osv_answer).is_some(), answer, "the core on {body:?}");
+            let cli = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .args(["-c", &script, "answer-contract"]).arg(&file).status().unwrap();
+            assert_eq!(cli.success(), answer, "the CLI on {body:?}");
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[cfg(test)]

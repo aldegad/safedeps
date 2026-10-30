@@ -695,6 +695,116 @@ EOF
 hook_response_parse "${effect_clean_post_file}" quiet || fail "post hook passes approved full closure"
 pass "post hook passes approved full closure"
 
+# The effect gate reads a cached OSV answer by the rule the CLI reads it by: a
+# fresh file that holds no answer is a miss, the batch asks again, and a batch
+# that cannot be asked rolls the install back. An empty file once read as no
+# advisories here. Each row has a state root of its own, so what it plants
+# reaches no other row. A curl in front of the real one answers the batch with
+# OSV_STUB_BODY where a row sets that, for an answer no provider fixture gives.
+osv_stub_bin="${tmp_root}/osv-stub-bin"
+mkdir -p "${osv_stub_bin}"
+cat > "${osv_stub_bin}/curl" <<STUB
+#!/usr/bin/env bash
+out=""
+args=("\$@")
+for ((i = 0; i < \${#args[@]}; i++)); do
+  [[ "\${args[i]}" != -o ]] || out="\${args[i + 1]}"
+done
+[[ -n "\${OSV_STUB_BODY:-}" && "\$*" == *"/osv/v1/"* ]] || exec "$(command -v curl)" "\$@"
+printf '%s' "\${OSV_STUB_BODY}" > "\${out}"
+printf '200'
+STUB
+chmod +x "${osv_stub_bin}/curl"
+osv_cache_install() {
+  local name="$1" body="$2" state="$3" url="$4" live="${5:-}" key
+  local dir="${tmp_root}/osv-cache-${name}"
+  mkdir -p "${dir}/project"
+  printf '{"dependencies":{}}\n' > "${dir}/project/package.json"
+  export SAFEDEPS_HOME="${dir}/home" SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=86400
+  ./bin/safedeps --json check npm fixture-parent@1.0.0 >/dev/null
+  osv_cache_project="${dir}/project"
+  key=$(bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv npm fixture-parent 1.0.0')
+  osv_cache_path="${SAFEDEPS_HOME}/cache/osv/${key}.json"
+  [[ -s "${osv_cache_path}" ]] || fail "the check left the answer the row replaces"
+  osv_cache_pre=$(
+    pre_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}","turn_id":"turn-e2e","model":"codex-test"}
+EOF
+  )
+  hook_response_parse "${osv_cache_pre}" quiet || fail "${name}: the pre hook allows the approved spec"
+  cat > "${osv_cache_project}/package-lock.json" <<'EOF'
+{
+  "name": "osv-cache-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"}
+  }
+}
+EOF
+  if [[ "${body}" == unreadable ]]; then
+    chmod 000 "${osv_cache_path}"
+  else
+    printf '%s' "${body}" > "${osv_cache_path}"
+  fi
+  printf '%s\n' "${state}" > "${state_file}"
+  osv_cache_post=$(
+    PATH="${osv_stub_bin}:${PATH}" OSV_STUB_BODY="${live}" SAFEDEPS_OSV_BATCH_API_URL="${url}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}"}
+EOF
+  )
+  printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+}
+osv_cache_rolled_back() {
+  ! grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" 2>/dev/null \
+    || fail "$1: the install is rolled back"
+}
+osv_cache_homes=("${SAFEDEPS_HOME}" "${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-}")
+osv_batch_url="${SAFEDEPS_OSV_BATCH_API_URL}"
+osv_body_number=0
+for body in '' 'null' '{"vulns":false}' unreadable; do
+  osv_body_number=$((osv_body_number + 1))
+  osv_row="vulnerable-${osv_body_number}"
+  osv_cache_install "${osv_row}" "${body}" '{"vulnerable":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
+  grep -q 'npm closure contains vulnerable package(s): fixture-parent@1.0.0' < "${osv_cache_post}" \
+    || fail "a cached file of '${body}' is asked again and the advisory counts: $(cat "${osv_cache_post}")"
+  osv_cache_rolled_back "${osv_row}"
+  jq -e '.vulns | length > 0' "${osv_cache_path}" >/dev/null || fail "${osv_row}: the answer replaces the file"
+  grep -q 'WARN OSV cache unreadable; asking again ecosystem=npm package=fixture-parent version=1.0.0' "${SAFEDEPS_HOME}/advisory.log" \
+    || fail "${osv_row}: the record says the file was not read"
+  osv_row="down-${osv_body_number}"
+  osv_cache_install "${osv_row}" "${body}" '{"vulnerable":[]}' 'http://127.0.0.1:9/'
+  grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+    || fail "a cached file of '${body}' with OSV down fails closed: $(cat "${osv_cache_post}")"
+  osv_cache_rolled_back "${osv_row}"
+  grep -q 'ERROR OSV batch query failed' "${SAFEDEPS_HOME}/advisory.log" || fail "${osv_row}: the record says the batch failed"
+  osv_row="clean-${osv_body_number}"
+  osv_cache_install "${osv_row}" "${body}" '{"vulnerable":[]}' "${osv_batch_url}"
+  hook_response_parse "${osv_cache_post}" quiet || fail "a cached file of '${body}' is replaced and a clean install stays: $(cat "${osv_cache_post}")"
+  grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" || fail "${osv_row}: a clean install stays"
+  jq -es 'length == 1 and (.[0] | type == "object")' "${osv_cache_path}" >/dev/null || fail "${osv_row}: the answer replaces the file"
+done
+osv_cache_install hit '{}' '{"vulnerable":[]}' 'http://127.0.0.1:9/'
+hook_response_parse "${osv_cache_post}" quiet || fail "a cached answer stays a hit with OSV down: $(cat "${osv_cache_post}")"
+osv_body_number=0
+for live in '{"results":[null]}' '{"results":[false]}' '{"results":[[]]}' '{"results":[{"vulns":false}]}'; do
+  osv_body_number=$((osv_body_number + 1))
+  osv_row="live-${osv_body_number}"
+  osv_cache_install "${osv_row}" '' '{"vulnerable":[]}' "${osv_batch_url}" "${live}"
+  grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+    || fail "a batch answer of '${live}' is a failed batch: $(cat "${osv_cache_post}")"
+  osv_cache_rolled_back "${osv_row}"
+  grep -q 'ERROR OSV batch result is not an answer ecosystem=npm index=0' "${SAFEDEPS_HOME}/advisory.log" || fail "${osv_row}: the record says the batch gave no answer"
+done
+export SAFEDEPS_HOME="${osv_cache_homes[0]}"
+if [[ -n "${osv_cache_homes[1]}" ]]; then
+  export SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${osv_cache_homes[1]}"
+else
+  unset SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS
+fi
+pass "the effect gate reads a cached file with no OSV answer as a miss"
+
 inert_project="${tmp_root}/inert-project"
 mkdir -p "${inert_project}"
 printf '{"dependencies":{}}\n' > "${inert_project}/package.json"

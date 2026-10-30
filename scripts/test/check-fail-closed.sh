@@ -4,8 +4,10 @@
 # A provider answer that a writer could not finish, or that names no status of
 # the list in lib/providers/providers.sh, approves nothing: the result is
 # provider_unavailable, the exit is 4, advisory.log has a line, and --json has a
-# report. Nothing here may depend on what a status is called: every row asserts
-# the whole answer, because a jq compile error also exits 3 and 5.
+# report. A cached OSV file that holds no answer is no cache: the query is asked
+# again, and a failed query is the same provider_unavailable. Nothing here may
+# depend on what a status is called: every row asserts the whole answer, because
+# a jq compile error also exits 3 and 5.
 #
 # A row's fault is real where it can be (a damaged cache file, a closed port) and
 # otherwise comes from a jq in front of the real one: the call whose arguments
@@ -49,7 +51,7 @@ trap cleanup EXIT
 
 port_file="${tmp_root}/port"
 state_file="${tmp_root}/state.json"
-printf '%s\n' '{"vulnerable":["fixture-dep@1.0.0"],"kev":["fixture-kev-dep@1.0.0"]}' > "${state_file}"
+printf '%s\n' '{"vulnerable":["fixture-dep@1.0.0","example.com/mod@v1.0.0"],"kev":["fixture-kev-dep@1.0.0"]}' > "${state_file}"
 ( cd "${tmp_root}" && exec node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${port_file}" "${state_file}" ) &
 server_pid=$!
 for _ in {1..50}; do
@@ -70,7 +72,8 @@ cat > "${closures}" <<'JSON'
   "fixture-clean@1.0.0": [{"package":"fixture-clean","version":"1.0.0","direct":true}],
   "fixture-parent@1.0.0": [{"package":"fixture-parent","version":"1.0.0","direct":true},{"package":"fixture-child","version":"1.0.0","direct":false}],
   "fixture-vuln@1.0.0": [{"package":"fixture-vuln","version":"1.0.0","direct":true},{"package":"fixture-child","version":"1.0.0","direct":false}],
-  "fixture-vuln@1.0.1": [{"package":"fixture-vuln","version":"1.0.1","direct":true}]
+  "fixture-vuln@1.0.1": [{"package":"fixture-vuln","version":"1.0.1","direct":true}],
+  "fixture-unpatched@1.0.0": [{"package":"fixture-unpatched","version":"1.0.0","direct":true}]
 }
 JSON
 closure_with() {
@@ -102,6 +105,20 @@ done
 exec "${real_jq}" "\${args[@]}"
 STUB
 chmod +x "${stub_bin}/jq"
+# curl, answering an OSV query with STUB_OSV_BODY where that is set.
+real_curl=$(command -v curl)
+cat > "${stub_bin}/curl" <<STUB
+#!/usr/bin/env bash
+out=""
+args=("\$@")
+for ((i = 0; i < \${#args[@]}; i++)); do
+  [[ "\${args[i]}" != -o ]] || out="\${args[i + 1]}"
+done
+[[ -n "\${STUB_OSV_BODY+set}" && "\$*" == *"/osv/v1/"* ]] || exec "${real_curl}" "\$@"
+printf '%s' "\${STUB_OSV_BODY}" > "\${out}"
+printf '200'
+STUB
+chmod +x "${stub_bin}/curl"
 
 # The two status writers, the overlay and the line one package's answer is.
 writer_batch='status_of($kev.exploited; .osv.vulns'
@@ -204,23 +221,132 @@ row "non-npm: a jq error in the KEV overlay is not read as no KEV listing" write
 row "npm: a package of the closure with no answer is not read as clean" \
   writer_failed npm fixture-parent@1.0.0 "${writer_item}"$'\n''"package":"fixture-child"'
 
-damaged_cache() {
-  local ecosystem="$1" spec="$2" what="$3" key
+damaged_kev() {
+  local ecosystem="$1" spec="$2"
   fresh_home
-  mkdir -p "${home}/cache/kev" "${home}/cache/osv"
-  if [[ "${what}" == kev ]]; then
-    printf 'not json' > "${home}/cache/kev/known_exploited_vulnerabilities.json"
-  else
-    key=$(SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv "$(safedeps_osv_ecosystem "$1")" "${2%@*}" "${2##*@}"' cache-key "${ecosystem}" "${spec}")
-    printf 'not json' > "${home}/cache/osv/${key}.json"
-  fi
+  mkdir -p "${home}/cache/kev"
+  printf 'not json' > "${home}/cache/kev/known_exploited_vulnerabilities.json"
   check_in "${ecosystem}" "${spec}"
   unavailable
 }
-row "npm: a KEV catalog that does not parse approves nothing" damaged_cache npm fixture-clean@1.0.0 kev
-row "non-npm: a KEV catalog that does not parse approves nothing" damaged_cache pypi fixture-clean@1.0.0 kev
-row "npm: an OSV cache file that does not parse approves nothing" damaged_cache npm fixture-clean@1.0.0 osv
-row "non-npm: an OSV cache file that does not parse approves nothing" damaged_cache pypi fixture-clean@1.0.0 osv
+row "npm: a KEV catalog that does not parse approves nothing" damaged_kev npm fixture-clean@1.0.0
+row "non-npm: a KEV catalog that does not parse approves nothing" damaged_kev pypi fixture-clean@1.0.0
+
+# The cache rows. A fresh cache file with no OSV answer in it is no cache,
+# whatever it holds: the query is asked again, its answer replaces the file, and
+# if it cannot be asked the check fails closed. An empty file once read as no
+# advisories, the same as OSV's own `{}`. Go asks every module prefix, so the
+# file planted there is the module's, and the other prefixes hold answers: with
+# no answer to read a failed query would fail the row before the file mattered.
+osv_cache_file() {
+  local ecosystem="$1" spec="$2" key
+  key=$(SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv "$(safedeps_osv_ecosystem "$1")" "${2%@*}" "${2##*@}"' cache-key "${ecosystem}" "${spec}")
+  printf '%s/cache/osv/%s.json' "${home}" "${key}"
+}
+plant_osv() {
+  local ecosystem="$1" spec="$2" body="$3" name="${2%@*}" version="${2##*@}"
+  mkdir -p "${home}/cache/osv"
+  if [[ "${ecosystem}" == go ]]; then
+    printf '{}' > "$(osv_cache_file go "${spec}")"
+    printf '{}' > "$(osv_cache_file go "${name%/*}@${version}")"
+    planted=$(osv_cache_file go "${name%/*/*}@${version}")
+  else
+    planted=$(osv_cache_file "${ecosystem}" "${spec}")
+  fi
+  if [[ "${body}" == unreadable ]]; then
+    printf '{}' > "${planted}"
+    chmod 000 "${planted}"
+  else
+    printf '%s' "${body}" > "${planted}"
+  fi
+}
+osv_down=(SAFEDEPS_OSV_API_URL="${closed_port}" SAFEDEPS_OSV_BATCH_API_URL="${closed_port}")
+
+cache_asked_again() {
+  local ecosystem="$1" spec="$2" body="$3"
+  fresh_home
+  plant_osv "${ecosystem}" "${spec}" "${body}"
+  check_in "${ecosystem}" "${spec}"
+  [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "cve_unpatched" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+  jq -e 'length > 0' <<< "$(jq '.vulns' "${planted}")" >/dev/null || no "the file does not hold the answer"
+}
+cache_replaced() {
+  local ecosystem="$1" spec="$2" body="$3"
+  fresh_home
+  plant_osv "${ecosystem}" "${spec}" "${body}"
+  check_in "${ecosystem}" "${spec}"
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "clean" and .approved == true' <<< "${json}" >/dev/null || no "the report: ${json}"
+  jq -es 'length == 1 and (.[0] | type == "object")' "${planted}" >/dev/null || no "the file was not replaced"
+}
+cache_and_query_failed() {
+  local ecosystem="$1" spec="$2" body="$3"
+  fresh_home
+  plant_osv "${ecosystem}" "${spec}" "${body}"
+  check_in "${ecosystem}" "${spec}" "${osv_down[@]}"
+  unavailable
+}
+for body in '' ' ' 'null' 'false' '[]' '1' '"x"' 'not json' '{}{}' 'null {}' '{"vulns":false}' '{"vulns":""}' '{"vulns":{}}' '{"vulns":1}' unreadable; do
+  for case in 'npm fixture-unpatched@1.0.0 fixture-clean@1.0.0' \
+    'pypi fixture-unpatched@1.0.0 fixture-clean@1.0.0' \
+    'go example.com/mod/cmd/tool@v1.0.0 example.com/other/cmd/tool@v1.0.0'; do
+    read -r ecosystem vulnerable clean <<< "${case}"
+    row "${ecosystem}: a cache file of '${body}' is asked again and the provider's advisory counts" cache_asked_again "${ecosystem}" "${vulnerable}" "${body}"
+    row "${ecosystem}: a cache file of '${body}' is replaced and a clean package still passes" cache_replaced "${ecosystem}" "${clean}" "${body}"
+    row "${ecosystem}: a cache file of '${body}' with OSV down approves nothing" cache_and_query_failed "${ecosystem}" "${clean}" "${body}"
+  done
+done
+
+# What OSV writes stays a cache hit, and the provider is not asked.
+cache_answers() {
+  local ecosystem="$1" spec="$2" body="$3"
+  fresh_home
+  plant_osv "${ecosystem}" "${spec}" "${body}"
+  check_in "${ecosystem}" "${spec}" "${osv_down[@]}"
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "clean" and .approved == true' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+cached_advisory() {
+  local ecosystem="$1" spec="$2"
+  fresh_home
+  plant_osv "${ecosystem}" "${spec}" '{"vulns":[{"id":"CVE-2026-1002"}]}'
+  check_in "${ecosystem}" "${spec}" "${osv_down[@]}"
+  [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "cve_unpatched" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+for ecosystem in npm pypi; do
+  for body in '{}' '{"vulns":[]}' '{"vulns":null}'; do
+    row "${ecosystem}: a cached answer of '${body}' is a hit with OSV down" cache_answers "${ecosystem}" fixture-clean@1.0.0 "${body}"
+  done
+  row "${ecosystem}: a cached advisory is a hit with OSV down" cached_advisory "${ecosystem}" fixture-clean@1.0.0
+done
+
+cache_is_a_directory() {
+  local ecosystem="$1" spec="$2"
+  fresh_home
+  mkdir -p "$(osv_cache_file "${ecosystem}" "${spec}")"
+  check_in "${ecosystem}" "${spec}"
+  unavailable
+}
+row "npm: a directory where the cache file goes approves nothing" cache_is_a_directory npm fixture-clean@1.0.0
+row "non-npm: a directory where the cache file goes approves nothing" cache_is_a_directory pypi fixture-clean@1.0.0
+
+# A query that returned something other than an answer is a failed query, by the
+# rule that reads the cache: what is stored and what is read are one thing.
+live_no_answer() {
+  local ecosystem="$1" body="$2"
+  fresh_home
+  check_in "${ecosystem}" fixture-clean@1.0.0 PATH="${stub_bin}:${PATH}" STUB_OSV_BODY="${body}"
+  unavailable
+}
+for body in 'null {}' '[] {}' '{} {}' '{"vulns":false}' '{"vulns":""}'; do
+  row "non-npm: a live answer of '${body}' approves nothing" live_no_answer pypi "${body}"
+done
+for body in '{"results":[null]}' '{"results":[false]}' '{"results":[[]]}' '{"results":[{"vulns":false}]}'; do
+  row "npm: a live batch answer of '${body}' approves nothing" live_no_answer npm "${body}"
+done
 
 candidate_status() {
   faulted "$1" fixture-vuln@1.0.0 "$2"$'\n'"$3" STUB_STATUS=weird

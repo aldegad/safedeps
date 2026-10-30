@@ -190,6 +190,31 @@ safedeps_cache_is_fresh() {
   [[ $(( now - mtime )) -le "${ttl}" ]]
 }
 
+# An OSV answer is one JSON object whose `vulns`, when it has one, is a list.
+# OSV answers `{}` for a package it has nothing on, and nothing else says so: an
+# empty file, a file this user cannot read and a `null` hold no answer, and none
+# of them reads as no advisories. The core reads an answer by the same rule
+# (osv_answer in rust/src/post/providers.rs), and `osv_answers_match_cli` holds
+# the two together.
+safedeps_osv_is_answer() {
+  jq -es 'length == 1 and (.[0] | type == "object" and (.vulns | type == "array" or . == null))' "$1" >/dev/null 2>&1
+}
+
+# A cache hit is a fresh file that holds an answer. A fresh file that holds none
+# is a miss with a line in the record: the query is asked again, its answer
+# replaces the file, and a failed query fails closed as any other miss does.
+safedeps_osv_cache_hit() {
+  local path="$1"
+  local osv_ecosystem="$2"
+  local package_name="$3"
+  local version="$4"
+
+  safedeps_cache_is_fresh "${path}" || return 1
+  safedeps_osv_is_answer "${path}" && return 0
+  safedeps_provider_log "WARN" "OSV cache unreadable; asking again ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
+  return 1
+}
+
 safedeps_cache_key() {
   local namespace="$1"
   local ecosystem="$2"
@@ -250,10 +275,10 @@ safedeps_osv_query() {
   cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}")
   cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
 
-  if safedeps_cache_is_fresh "${cache_path}"; then
+  if safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"; then
     safedeps_provider_log "INFO" "OSV cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
     cat "${cache_path}"
-    return 0
+    return
   fi
 
   safedeps_require_http_client || {
@@ -280,11 +305,10 @@ safedeps_osv_query() {
     -d "${payload}" \
     "${SAFEDEPS_OSV_API_URL}" 2>/dev/null || true)
 
-  if [[ "${http_status}" == "200" ]] && jq -e 'type == "object"' "${response_file}" >/dev/null 2>&1; then
-    mv -f "${response_file}" "${cache_path}"
+  if [[ "${http_status}" == "200" ]] && safedeps_osv_is_answer "${response_file}" && mv -f "${response_file}" "${cache_path}"; then
     safedeps_provider_log "INFO" "OSV live query ok ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
     cat "${cache_path}"
-    return 0
+    return
   fi
 
   rm -f "${response_file}"
@@ -313,7 +337,7 @@ safedeps_osv_query_go_prefixes() {
 
   while :; do
     answer=$(safedeps_osv_query "go" "${prefix}" "${version}") || return 1
-    merged=$(jq -c --argjson add "${answer:-{\}}" \
+    merged=$(jq -c --argjson add "${answer}" \
       '.vulns = ((.vulns + ($add.vulns // [])) | unique_by(.id))' <<< "${merged}") || return 1
     [[ "${prefix}" == */*/* ]] || break
     prefix="${prefix%/*}"
@@ -376,7 +400,7 @@ safedeps_osv_query_batch() {
     cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}")
     cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
 
-    if safedeps_cache_is_fresh "${cache_path}"; then
+    if safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"; then
       safedeps_provider_log "INFO" "OSV batch cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
       if ! jq -cn \
         --argjson index "${index}" \
@@ -385,7 +409,7 @@ safedeps_osv_query_batch() {
         --arg version "${version}" \
         --argjson direct "${direct}" \
         --slurpfile osv "${cache_path}" \
-        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:($osv[0] // {vulns:[]})}' >> "${all_items_file}"; then
+        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:$osv[0]}' >> "${all_items_file}"; then
         safedeps_provider_log "ERROR" "OSV cache unreadable ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
         rm -rf "${temp_dir}"
         return 1
@@ -453,14 +477,15 @@ safedeps_osv_query_batch() {
         rm -rf "${temp_dir}"
         return 1
       }
-      jq -c --argjson i "${miss_i}" '.results[$i] // {vulns: []}' "${response_file}" > "${response_item_file}"
-      if ! jq -e 'type == "object"' "${response_item_file}" >/dev/null 2>&1; then
+      jq -c --argjson i "${miss_i}" '.results[$i]' "${response_file}" > "${response_item_file}"
+      if ! safedeps_osv_is_answer "${response_item_file}"; then
+        safedeps_provider_log "ERROR" "OSV batch result is not an answer ecosystem=${osv_ecosystem} index=${miss_i}"
         rm -f "${response_item_file}"
         rm -rf "${temp_dir}"
         return 1
       fi
       if ! mv -f "${response_item_file}" "${cache_path}" || ! jq -cn --argjson miss "${miss_item}" --slurpfile osv "${cache_path}" \
-        '$miss | del(.cache_path) | . + {osv: ($osv[0] // {vulns: []})}' >> "${all_items_file}"; then
+        '$miss | del(.cache_path) | . + {osv: $osv[0]}' >> "${all_items_file}"; then
         rm -rf "${temp_dir}"
         return 1
       fi

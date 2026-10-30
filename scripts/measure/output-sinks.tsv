@@ -181,7 +181,7 @@ rust/src/post/providers.rs	batch	data	raw-or-serialized	fs::write	-	1
 rust/src/post/providers.rs	batch	data	raw-or-serialized	state::write_state_file	-	1
 rust/src/post/providers.rs	batch	human	diagnostic	eprintln!	fixed-literal	1
 rust/src/post/providers.rs	batch	human	log-or-report	log	fixed-literal	1
-rust/src/post/providers.rs	batch	human	log-or-report	log	fixed-literal+other	4
+rust/src/post/providers.rs	batch	human	log-or-report	log	fixed-literal+other	6
 rust/src/post/providers.rs	curl	boundary	capability	Command::new	-	1
 rust/src/post/providers.rs	curl	boundary	capability	Stdio::null	-	2
 rust/src/post/providers.rs	curl	boundary	capability	output	-	1
