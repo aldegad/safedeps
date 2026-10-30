@@ -50,10 +50,13 @@ impl Npm{
             }else{self.nodes.push(row[3].clone());}
         }
     }
-    fn observed(store:&Store,copy:&Path)->bool{
-        let Some(hash)=digest(copy)else{return false};
-        let Some(st)=jv::read_file(&store.home.join("npm-observed").join(format!("{}.json",store.hash)))else{return false};
-        !st.failed&&st.values.last().is_some_and(|v|jv::path(v,&["project"]).is_ok_and(|p|jv::eq(p,&jv::s(sh::bytes(&store.project))))&&jv::path(v,&["tree"]).is_ok_and(|t|jv::eq(t,&jv::s(hash.as_bytes()))))
+    /// The tree record from before this command, when it is one safedeps judged:
+    /// the bytes the hash was taken of, and the only copy read after it. The file
+    /// may hold something else by the time anything opens it again.
+    fn judged_before(store:&Store,copy:&Path)->Option<W>{
+        let bytes=fs::read(copy).ok()?;let hash=sha256::hex(&bytes);
+        let st=jv::read_file(&store.home.join("npm-observed").join(format!("{}.json",store.hash)))?;
+        (!st.failed&&st.values.last().is_some_and(|v|jv::path(v,&["project"]).is_ok_and(|p|jv::eq(p,&jv::s(sh::bytes(&store.project))))&&jv::path(v,&["tree"]).is_ok_and(|t|jv::eq(t,&jv::s(hash.as_bytes()))))).then_some(bytes)
     }
     fn observe(store:&Store,copy:&Path){
         let dir=store.home.join("npm-observed");
@@ -64,16 +67,20 @@ impl Npm{
         if !ok{state::log_advisory(&store.home,&cat(&[b"post-verify: could not keep the hash of the tree record judged in ",sh::bytes(&store.project),b" (",sh::bytes(&dir),b"), so the next install there counts every integrity in it as new."]));}
     }
     fn fresh_integrities(store:&Store,tree:&Path)->Result<Vec<Value>,()>{
-        let mut files:Vec<_>=[store.project.join(trace::RECORDS[0]),tree.into()].into_iter().filter(|p|sh::is_file(p)).map(|p|(p,false)).collect();
-        if files.is_empty(){return Ok(Vec::new())}
+        let paths:Vec<_>=[store.project.join(trace::RECORDS[0]),tree.into()].into_iter().filter(|p|sh::is_file(p)).collect();
+        if paths.is_empty(){return Ok(Vec::new())}
         let before=store.path(&store.id,b"npm-tree-record.json");
+        let mut judged=None;
         if sh::is_file(&before){
-            if Self::observed(store,&before){files.push((before,true));}
-            else{state::log_advisory(&store.home,&cat(&[b"post-verify: the tree record in ",sh::bytes(&store.project),b" before this command is not one safedeps judged at the end of an install here, so every integrity in it counts as brought in by this install."]));}
+            judged=Self::judged_before(store,&before);
+            if judged.is_none(){state::log_advisory(&store.home,&cat(&[b"post-verify: the tree record in ",sh::bytes(&store.project),b" before this command is not one safedeps judged at the end of an install here, so every integrity in it counts as brought in by this install."]));}
         }
+        let mut files=Vec::new();
+        for path in paths{files.push((jv::read_file(&path).ok_or(())?,false));}
+        if let Some(bytes)=judged{files.push((jv::read(&bytes),true));}
         let mut all=Vec::new();let mut seen=std::collections::HashSet::new();
-        for (file,before) in files{
-            let st=jv::read_file(&file).ok_or(())?;if st.failed{return Err(())}
+        for (st,before) in files{
+            if st.failed{return Err(())}
             for v in st.values{
                 let Value::Obj(entries)=field(&v,"packages")? else{continue};
                 for(key,value) in entries{
@@ -312,5 +319,56 @@ impl Npm{
             Ok(mut child)=>match child.wait() {Ok(status)=>Outcome::status(status),Err(error)=>Outcome::StatusFailure(error)},
         };
         if !outcome.success(){report.rebuild(home,&meta,input,&outcome.describe(Action::NpmRebuild,Form::Action));}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn record(names:&[&str])->String{
+        let rows:Vec<_>=names.iter().map(|n|format!("\"node_modules/{n}\":{{\"version\":\"1.0.0\",\"integrity\":\"sha512-{n}\"}}")).collect();
+        format!("{{\"packages\":{{{}}}}}\n",rows.join(","))
+    }
+    fn fresh_names(store:&Store,lock:&Path)->Vec<W>{
+        Npm::fresh_integrities(store,lock).unwrap().iter().map(|v|strval(field(v,"name").unwrap())).collect()
+    }
+
+    // The file that keeps the hash is a fifo, so the read of it waits while the
+    // record is replaced: what the read after the hash sees is the replacement,
+    // which says the package this install brought was there before.
+    #[test]
+    fn a_tree_record_replaced_after_its_hash_vouches_for_nothing_new() {
+        let root=sh::mktemp_dir(&cat(&[sh::bytes(&std::env::temp_dir()),b"/safedeps-tree-record."])).unwrap();
+        let (home,project)=(root.join("home"),root.join("project"));
+        for dir in [home.join("snapshots"),home.join("npm-observed"),project.clone()] {fs::create_dir_all(dir).unwrap();}
+        let store=Store::new(home.clone(),project.clone(),b"call".to_vec());
+        let before=store.path(&store.id,b"npm-tree-record.json");
+        let lock=project.join(trace::RECORDS[0]);
+        fs::write(&lock,record(&["kept","brought"])).unwrap();
+        fs::write(&before,record(&["kept"])).unwrap();
+        Npm::observe(&store,&before);
+        let observed=home.join("npm-observed").join(format!("{}.json",store.hash));
+        let kept=fs::read(&observed).unwrap();
+        fs::remove_file(&observed).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(&observed).status().unwrap().success());
+
+        let replacement=record(&["kept","brought"]);
+        let (fifo,file,body,entry)=(observed.clone(),before.clone(),replacement.clone(),kept.clone());
+        std::thread::spawn(move||{
+            let mut fifo=fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+            fs::write(&file,body).unwrap();
+            fifo.write_all(&entry).unwrap();
+        });
+        assert_eq!(fresh_names(&store,&lock),vec![b"brought".to_vec()],"the bytes the hash was taken of are the ones read");
+        assert_eq!(fs::read_to_string(&before).unwrap(),replacement,"the record was replaced after its hash");
+
+        // The same replacement in place from the start: the hash does not match,
+        // and the record vouches for nothing.
+        fs::remove_file(&observed).unwrap();
+        fs::write(&observed,&kept).unwrap();
+        assert_eq!(fresh_names(&store,&lock),vec![b"brought".to_vec(),b"kept".to_vec()],"a record with no hash of its own counts for nothing");
+        let _=fs::remove_dir_all(&root);
     }
 }
