@@ -700,7 +700,8 @@ pass "post hook passes approved full closure"
 # that cannot be asked rolls the install back. An empty file once read as no
 # advisories here. Each row has a state root of its own, so what it plants
 # reaches no other row. A curl in front of the real one answers the batch with
-# OSV_STUB_BODY where a row sets that, for an answer no provider fixture gives.
+# OSV_STUB_BODY and a KEV download with KEV_STUB_BODY where a row sets those, for
+# an answer no provider fixture gives.
 osv_stub_bin="${tmp_root}/osv-stub-bin"
 mkdir -p "${osv_stub_bin}"
 cat > "${osv_stub_bin}/curl" <<STUB
@@ -710,8 +711,13 @@ args=("\$@")
 for ((i = 0; i < \${#args[@]}; i++)); do
   [[ "\${args[i]}" != -o ]] || out="\${args[i + 1]}"
 done
-[[ -n "\${OSV_STUB_BODY:-}" && "\$*" == *"/osv/v1/"* ]] || exec "$(command -v curl)" "\$@"
-printf '%s' "\${OSV_STUB_BODY}" > "\${out}"
+if [[ -n "\${OSV_STUB_BODY:-}" && "\$*" == *"/osv/v1/"* ]]; then
+  printf '%s' "\${OSV_STUB_BODY}" > "\${out}"
+elif [[ -n "\${KEV_STUB_BODY:-}" && "\$*" == *"/kev.json"* ]]; then
+  printf '%s' "\${KEV_STUB_BODY}" > "\${out}"
+else
+  exec "$(command -v curl)" "\$@"
+fi
 printf '200'
 STUB
 chmod +x "${osv_stub_bin}/curl"
@@ -849,7 +855,7 @@ EOF
     rm -f "${SAFEDEPS_HOME}"/cache/osv/*.json
   fi
   kev_catalog_post=$(
-    SAFEDEPS_KEV_CATALOG_URL="${url}" post_hook <<EOF
+    PATH="${osv_stub_bin}:${PATH}" KEV_STUB_BODY="${kev_catalog_live:-}" SAFEDEPS_KEV_CATALOG_URL="${url}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${kev_catalog_project}"}
 EOF
   )
@@ -893,6 +899,20 @@ for body in '' 'null' '{}' '{"vulnerabilities":false}' '{"vulnerabilities":[]}' 
   grep -q 'fixture-parent' "${kev_catalog_project}/package-lock.json" || fail "${kev_row}: a clean install stays"
   jq -e '.vulnerabilities | length > 0' "${kev_catalog_path}" >/dev/null || fail "${kev_row}: the download replaces the file"
 done
+kev_body_number=0
+for kev_catalog_live in 'null' '{}' '{"vulnerabilities":[]}' '{"vulnerabilities":[{}]}' "${kev_catalog_body} {}"; do
+  kev_body_number=$((kev_body_number + 1))
+  kev_catalog_install "live-${kev_body_number}" absent "${kev_catalog_url}"
+  grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${kev_catalog_post}" \
+    || fail "a KEV download of '${kev_catalog_live}' is a failed download: $(cat "${kev_catalog_post}")"
+  kev_catalog_rolled_back "live-${kev_body_number}"
+  [[ ! -e "${kev_catalog_path}" ]] || fail "live-${kev_body_number}: the download is not stored"
+  kev_catalog_install "live-stale-${kev_body_number}" "${kev_catalog_body}" "${kev_catalog_url}" listed stale
+  grep -q 'npm closure contains KEV-blocked package(s): fixture-parent@1.0.0' < "${kev_catalog_post}" \
+    || fail "a KEV download of '${kev_catalog_live}' leaves the stale catalog in place: $(cat "${kev_catalog_post}")"
+  kev_catalog_rolled_back "live-stale-${kev_body_number}"
+done
+kev_catalog_live=""
 kev_catalog_install absent absent 'http://127.0.0.1:9/'
 grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${kev_catalog_post}" \
   || fail "no KEV catalog with CISA down fails closed: $(cat "${kev_catalog_post}")"
