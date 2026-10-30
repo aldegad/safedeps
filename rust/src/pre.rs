@@ -587,11 +587,7 @@ pub fn main(input: &[u8], budget_child: bool) -> i32 {
                 clamp = cat(&[b" Your SAFEDEPS_SELF_BUDGET_SECONDS='", &budget.invalid_from, format!("' is not a whole number of seconds, so the {}s default is in force.", budget.value).as_bytes()]);
             }
             let reason = cat(&[reason.as_bytes(), &clamp]);
-            let answer = jq::compact(&jq::obj(vec![(
-                "hookSpecificOutput",
-                jq::obj(vec![("hookEventName", jq::s("PreToolUse")), ("permissionDecision", jq::s("deny")), ("permissionDecisionReason", jq::arg(&reason))]),
-            )]));
-            println!("{}", answer);
+            println!("{}", jq::deny(&reason));
             0
         }
     }

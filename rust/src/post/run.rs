@@ -213,7 +213,7 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
         (false, None) => Some(unfinished),
     };
     if let Some(message) = message {
-        let out = cat(&[&jv::dump(&jv::obj(vec![("systemMessage", jv::s(&message))])), b"\n"]);
+        let out = cat(&[crate::jq::system_message(&message).as_bytes(), b"\n"]);
         if std::io::stdout().write_all(&out).is_err() { return 1 }
     }
     rc

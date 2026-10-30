@@ -12,11 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 
 mod notices;
 
-fn deny(out:&mut Out,reason:&[u8]) {
-    out.say(&jq::compact(&jq::obj(vec![("hookSpecificOutput",jq::obj(vec![
-        ("hookEventName",jq::s("PreToolUse")),("permissionDecision",jq::s("deny")),
-        ("permissionDecisionReason",jq::arg(reason))]))])));
-}
+fn deny(out:&mut Out,reason:&[u8]) {out.say(&jq::deny(reason))}
 fn log(call:&Call,text:&[u8]) {state::log_advisory(&call.guard_dir,text)}
 fn log_command(call:&Call,text:&[u8]) {log(call,&cat(&[text,b" Command: ",&call.command]))}
 fn undecided(call:&Call,run:&Run,out:&mut Out)->bool {
@@ -124,9 +120,7 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
     if flags.starts_with(b"rewrite")&&!command.is_empty() {
         let unread=flags.split(|b|*b==b' ').any(|s|matches!(s,b"unverified"|b"unread"|b"release"));
         if snap.mark_rewrite(command,unread).is_ok() {
-            out.say(&jq::compact(&jq::obj(vec![("hookSpecificOutput",jq::obj(vec![
-                ("hookEventName",jq::s("PreToolUse")),("permissionDecision",jq::s("allow")),
-                ("updatedInput",jq::obj(vec![("command",jq::arg(command))]))]))])));
+            out.say(&jq::allow_rewrite(command));
         }else{log_command(call,&cat(&[b"pre-guard: could not record the command safedeps would write in ",snap.path(b"meta.json").as_os_str().as_bytes(),b", so it was not rewritten: the install runs as given, without --ignore-scripts, and the effect gate falls back to detect-and-rollback."]))}
     }
     out

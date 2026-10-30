@@ -256,10 +256,46 @@ pub fn pretty(v: &J) -> String {
     out
 }
 
+/// The answers the hooks give the runtime are built here and nowhere else:
+/// the PreToolUse deny with its reason, the PreToolUse allow that rewrites
+/// the command (`updatedInput`, which only Claude Code reads), and the
+/// PostToolUse message the user sees. A reason, a command or a message is
+/// bytes, written as jq's `--arg` writes them.
+fn pre_tool_use(fields: Vec<(&str, J)>) -> String {
+    let mut answer = vec![("hookEventName", s("PreToolUse"))];
+    answer.extend(fields);
+    compact(&obj(vec![("hookSpecificOutput", obj(answer))]))
+}
+
 /// The PreToolUse answer every deny has: `jq -nc '{hookSpecificOutput:{...}}'`.
-pub fn deny(reason: &str) -> String {
-    compact(&obj(vec![(
-        "hookSpecificOutput",
-        obj(vec![("hookEventName", s("PreToolUse")), ("permissionDecision", s("deny")), ("permissionDecisionReason", s(reason))]),
-    )]))
+pub fn deny(reason: impl AsRef<[u8]>) -> String {
+    pre_tool_use(vec![("permissionDecision", s("deny")), ("permissionDecisionReason", arg(reason.as_ref()))])
+}
+
+/// The PreToolUse answer that runs `command` in place of the one given.
+pub fn allow_rewrite(command: &[u8]) -> String {
+    pre_tool_use(vec![("permissionDecision", s("allow")), ("updatedInput", obj(vec![("command", arg(command))]))])
+}
+
+/// The PostToolUse answer that shows the user `message`.
+pub fn system_message(message: &[u8]) -> String {
+    compact(&obj(vec![("systemMessage", arg(message))]))
+}
+
+/// The runtimes read these bytes, so the event name and the key order are
+/// part of the answer, and a reason that is not UTF-8 is written as `--arg`
+/// writes it. No other file of the hooks spells an answer's keys.
+#[cfg(test)]
+#[test]
+fn hook_answers_are_pinned() {
+    assert_eq!(deny("no \"x\"\n"), r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"no \"x\"\n"}}"#);
+    assert_eq!(deny(b"a\xffb".as_slice()), "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"a\u{fffd}b\"}}");
+    assert_eq!(allow_rewrite(b"npm i --ignore-scripts"), r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"command":"npm i --ignore-scripts"}}}"#);
+    assert_eq!(system_message(b"rolled back\n\tx\xc3"), "{\"systemMessage\":\"rolled back\\n\\tx\u{fffd}\"}");
+    for (file, text) in [("pre.rs", include_str!("pre.rs")), ("pre/install.rs", include_str!("pre/install.rs")),
+                         ("post/run.rs", include_str!("post/run.rs")), ("main.rs", include_str!("main.rs"))] {
+        for key in ["hookSpecificOutput", "hookEventName", "permissionDecision", "permissionDecisionReason", "updatedInput", "systemMessage"] {
+            assert!(!text.contains(&format!("\"{key}\"")), "{file} spells {key}: the answer is built in jq.rs");
+        }
+    }
 }
