@@ -44,8 +44,8 @@ safedeps check <ecosystem> <pkg>@<range> --json
 | `cve_unpatched` | Do not install. Surface the CVEs, propose an alternative package. |
 | `closure_vulnerable` | Do not install. A dependency the install would bring in has an advisory; `closure_vulnerabilities` names it. Propose an alternative. |
 | `kev_hard_block` | Do not install. Recommend an alternative — actively exploited in the wild. |
-| `provider_unavailable` | Do not install. OSV unreachable, no fresh cache. Retry later or tell the human. |
-| `error` | Fix the spec (e.g. an unpublished version) and retry. |
+| `provider_unavailable` | Do not install. OSV was unreachable with no fresh cache, or its answer could not be read. Retry later or tell the human. |
+| `error` | Read `error`. Fix the spec (e.g. an unpublished version) and retry. `ledger_write_failed` means the approval could not be written, so nothing is approved: tell the human. |
 
 Install only after approval. If the approved version differs from your argument, the hook blocks again — re-narrow and retry.
 
@@ -126,17 +126,18 @@ safedeps version
   "approved": true,
   "spec_hash": "sha256:...",
   "expires_at": "2026-06-17T05:39:03Z",
-  "closure_source": { "type": "npm-package-probe | npm-overrides-probe | yarn-project-lockfile | yarn-project-materialized-lockfile | fixture" },
+  "closure_source": { "type": "npm-package-probe | npm-overrides-probe | yarn-project-lockfile | yarn-project-materialized-lockfile | yarn-project-candidate-materialization | fixture" },
   "resolved_closure": [ { "ecosystem": "npm", "package": "...", "version": "...", "direct": true } ],
   "install_hint": "install with @scope/pkg@1.2.4"
 }
 ```
 
 - `result` is one of the results in the table under "Then act on `result`".
-- `patched_available` adds `suggested_spec`. `kev_hard_block` keeps `vulnerabilities` + `kev.matches`. `cve_unpatched` keeps `vulnerabilities`.
-- `closure_source.type` is `yarn-project-lockfile` when the closure came from the current directory's Yarn project (root `resolutions` + `yarn.lock`) instead of a fresh published-package probe; it then also carries `context_hash`, `project_root`, `manifest_path`, `lockfile_path`, `input_sha256`, and `input_files`. A `project_resolution_status` field (e.g. `project-closure-unavailable`, `project-context-invalid`) plus `approval_scope: "deny-only"` means a Yarn project context was detected but the requested package could not be verified in it — the check stays fail-closed even on a clean published closure.
+- `patched_available` adds `suggested_spec`. For npm, `kev_hard_block`, `closure_vulnerable` and `cve_unpatched` carry `closure_vulnerabilities`, one item per risky package of the requested version's closure, each with `package`, `version`, `direct`, `result`, `vulnerabilities` and `kev`. For the other ecosystems, `kev_hard_block` and `cve_unpatched` keep `vulnerabilities` and `kev.matches` at the top level.
+- `already_approved` reads `closure_source` from the ledger entry's `project_context`, so it is `null` for an ordinary published-package approval.
+- `closure_source.type` is `yarn-project-lockfile` when the closure came from the current directory's Yarn project (root `resolutions` + `yarn.lock`) instead of a fresh published-package probe; it then also carries `context_hash`, `project_root`, `manifest_path`, `lockfile_path`, `resolutions_sha256`, `lockfile_sha256`, `input_sha256`, and `input_files`. A `project_resolution_status` field (e.g. `project-closure-unavailable`, `project-context-invalid`) plus `approval_scope: "deny-only"` means a Yarn project context was detected but the requested package could not be verified in it — the check stays fail-closed even on a clean published closure. With `project-context-invalid` the type is `npm-package-probe` and the source has none of the context fields, because the project could not be read.
 - `closure_source.type` is `npm-overrides-probe` when the published-package probe applied the consuming repo's npm `overrides`. It then also carries `context_hash`, `project_root`, `overrides_source` (the manifest path, or `env`), `overrides_sha256`, and the `overrides` themselves. Applying overrides makes the closure project-specific, so the approval is keyed to that override set: a repo with different overrides, or none, does not inherit it. Only concrete pins are honored; `$`-references are dropped. Overrides cannot mask a vulnerability — the probe resolves each one to a concrete version and OSV is queried for that version.
-- `closure_source.type` is `yarn-project-materialized-lockfile` when the package was not yet in the project lockfile and safedeps resolved the candidate in a private mirror of the project's canonical inputs. It then also carries `materialization` with the `candidate` locator, the `input_sha256` it was bound to, the `generated_lockfile_sha256`, the exact Yarn `command`, and `isolation: "private-project-mirror"`. Your project tree is never modified. If the mirror, the Yarn run, or the candidate resolution fails, `project_resolution_status` is `project-candidate-materialization-unavailable` and the check denies — the published closure is never used as a fallback.
+- `closure_source.type` is `yarn-project-materialized-lockfile` when the package was not yet in the project lockfile and safedeps resolved the candidate in a private mirror of the project's canonical inputs. It then also carries `materialization` with the `candidate` locator, the `input_sha256` it was bound to, the `generated_lockfile_sha256`, the exact Yarn `command`, and `isolation: "private-project-mirror"`. Your project tree is never modified. If the mirror, the Yarn run, or the candidate resolution fails, `project_resolution_status` is `project-candidate-materialization-unavailable` and the check denies — the published closure is never used as a fallback. That source has the type `yarn-project-candidate-materialization`.
 
 `doctor`:
 
@@ -155,7 +156,13 @@ safedeps version
 
 - `gaps` / `ok` reflect the per-repo secret-leak lane only; missing global (`deps`) or remote PR (`remote`) posture checks do not change `ok`.
 
-`ledger`, `revoke`, `re-check`, `migrate` each return a `{ "command": "...", ... }` envelope; run `safedeps help <command>` for the fields.
+`ledger`, `revoke` and `re-check` return these envelopes:
+
+- `ledger`: `command`, `count`, and `specs`, each with `hash`, `ecosystem`, `package`, `version`, `version_range`, `approved_at`, `expires_at`, `approved_by`, `expired` and `revoked`.
+- `revoke`: `command`, `revoked`, `reason`, and `spec`, the ledger entry after revocation.
+- `re-check`: `command`, `checked`, `still_clean`, and the lists `newly_vulnerable`, `kev_hit`, `revoked` and `suspected_forgery`.
+
+`migrate` ignores `--json` and always prints its own JSON report, without a `command` field.
 
 ---
 

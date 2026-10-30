@@ -349,7 +349,7 @@ Key fields:
 - `approved_at` / `expires_at` — lifecycle TTL, 30 days by default. After expiry a new CVE may exist, so the spec is auto-revoked and re-check is forced.
 - `evidence` — which source saw what, at approval time. An audit trail.
 - `transitive_specs` — the full transitive closure the direct entry approved. The npm effect gate reorgs any `pkg@version` that appears in the lockfile but is in neither the direct entry nor this array.
-- `project_context` — `null` for an ordinary published-package approval, or `{ type, context_hash, project_root, manifest_path, lockfile_path, input_sha256, input_files }` when the approval came from a Yarn project's resolved closure (see "Yarn project-scoped closure" in section 4). `context_hash` is a hash of the project directory, its root `resolutions`, its `yarn.lock` content, and its canonical input set. `type` is `yarn-project-lockfile` when the package was already in the project lockfile, or `yarn-project-materialized-lockfile` when the candidate was resolved in an isolated mirror; the materialized form additionally carries `materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }`. `safedeps_ledger_validate_json` requires those fields and rejects an entry whose `materialization.input_sha256` disagrees with the context `input_sha256`. The CLI writes and validates the ledger in Bash (`lib/ledger/ledger.sh`), and a hook reads it with the core's reader (`valid` and `check` in `rust/src/ledger.rs`), which reads the same format and approves nothing.
+- `project_context` — `null` for an ordinary published-package approval, or `{ type, context_hash, project_root, manifest_path, lockfile_path, resolutions_sha256, lockfile_sha256, input_sha256, input_files }` when the approval came from a Yarn project's resolved closure (see "Yarn project-scoped closure" in section 4). `context_hash` is a hash of the project directory, its root `resolutions`, its `yarn.lock` content, and its canonical input set. `type` is `yarn-project-lockfile` when the package was already in the project lockfile, or `yarn-project-materialized-lockfile` when the candidate was resolved in an isolated mirror; the materialized form additionally carries `materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }`. `safedeps_ledger_validate_json` requires those fields and rejects an entry whose `materialization.input_sha256` disagrees with the context `input_sha256`. The CLI writes and validates the ledger in Bash (`lib/ledger/ledger.sh`), and a hook reads it with the core's reader (`valid` and `check` in `rust/src/ledger.rs`), which reads the same format and approves nothing.
 
 `project_context.type` is also `npm-overrides-probe` when the published-package probe applied the consuming repo's npm `overrides`. That context carries `project_root`, `overrides_source` (the manifest path, or `env`), `overrides_sha256`, and the `overrides` themselves; `context_hash` is a hash of the project root and the canonical (key-sorted) override set, so two equivalent sets share one key. `safedeps_ledger_validate_json` requires those fields and rejects an entry with an empty override set. The rule behind it: a published-package approval may be global only because it is project-independent. Applying `overrides` makes the resolved closure a function of the consuming project, so that approval must be keyed like the Yarn project closure is — otherwise an approval earned in a repo that patched a transitive would satisfy the check in a repo that did not, whose real install resolves the vulnerable version. Repos with no `overrides` get no context and keep the ordinary global approval.
 
@@ -410,7 +410,7 @@ resolve project context (walk up from cwd, stop at .git boundary):
         │        └─► valid Berry lockfile
         │                 │
         │                 ▼
-        │        context_hash = sha256(project_root, sha256(resolutions), sha256(yarn.lock))
+        │        context_hash = sha256(project_root, sha256(resolutions), sha256(yarn.lock), input_sha256)
         │                 │
         │                 ▼
         │        `yarn info -A -R --json` → full project locator graph
@@ -724,6 +724,13 @@ OSV.dev — no response / timeout
   • first: use the local provider cache (24h TTL)
   • cache miss → fail-closed (block; "no OSV response, retry")
   • no install-time CLI bypass flag exists; retry when OSV or the cache can answer
+
+OSV.dev — an answer that cannot be read
+  • a status outside the provider's list, no status, or a failed step of the
+    provider's own code is a miss, not a clean answer
+  • the check reports `provider_unavailable` (exit 4), approves nothing, and
+    writes the record to `advisory.log`
+  • the same holds for the npm query of the direct package
 
 CISA KEV — no response
   • KEV is a static catalog downloaded once a day; only the local cache is used

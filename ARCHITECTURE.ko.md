@@ -349,7 +349,7 @@ TIER 3 — ENRICHMENT / CROSS-CHECK
 - `approved_at` / `expires_at` — lifecycle TTL, 기본 30일. 만료 후엔 새 CVE 가능성이 있어 자동 revoke + re-check 강제.
 - `evidence` — 승인 시점에 어느 source 가 무엇을 봤는지. audit trail.
 - `transitive_specs` — direct entry 가 승인한 전체 transitive closure. npm effect gate 는 lockfile 에 있으면서 direct entry 에도 이 배열에도 없는 `pkg@version` 을 reorg 한다.
-- `project_context` — 일반 published-package 승인은 `null`, Yarn 프로젝트의 resolved closure 에서 온 승인이면 `{ type, context_hash, project_root, manifest_path, lockfile_path, input_sha256, input_files }` (4장 "Yarn project-scoped closure" 참고). `context_hash` 는 project directory, 루트 `resolutions`, `yarn.lock` content, canonical input set 의 hash 다. `type` 은 package 가 이미 project lockfile 에 있었으면 `yarn-project-lockfile`, candidate 를 isolated mirror 에서 해석했으면 `yarn-project-materialized-lockfile` 이다. materialized 쪽은 `materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }` 을 추가로 가진다. `safedeps_ledger_validate_json` 은 이 필드들을 필수로 요구하고, `materialization.input_sha256` 이 context 의 `input_sha256` 과 다르면 entry 를 거부한다. CLI 는 Bash 로 ledger 를 쓰고 검증하며(`lib/ledger/ledger.sh`), 훅은 core 의 리더(`rust/src/ledger.rs` 의 `valid` 와 `check`)로 ledger 를 읽는다. 이 리더는 같은 형식을 읽고, 아무것도 승인하지 않는다.
+- `project_context` — 일반 published-package 승인은 `null`, Yarn 프로젝트의 resolved closure 에서 온 승인이면 `{ type, context_hash, project_root, manifest_path, lockfile_path, resolutions_sha256, lockfile_sha256, input_sha256, input_files }` (4장 "Yarn project-scoped closure" 참고). `context_hash` 는 project directory, 루트 `resolutions`, `yarn.lock` content, canonical input set 의 hash 다. `type` 은 package 가 이미 project lockfile 에 있었으면 `yarn-project-lockfile`, candidate 를 isolated mirror 에서 해석했으면 `yarn-project-materialized-lockfile` 이다. materialized 쪽은 `materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }` 을 추가로 가진다. `safedeps_ledger_validate_json` 은 이 필드들을 필수로 요구하고, `materialization.input_sha256` 이 context 의 `input_sha256` 과 다르면 entry 를 거부한다. CLI 는 Bash 로 ledger 를 쓰고 검증하며(`lib/ledger/ledger.sh`), 훅은 core 의 리더(`rust/src/ledger.rs` 의 `valid` 와 `check`)로 ledger 를 읽는다. 이 리더는 같은 형식을 읽고, 아무것도 승인하지 않는다.
 
 `project_context.type` 은 published-package probe 가 소비 레포의 npm `overrides` 를 반영했을 때 `npm-overrides-probe` 도 된다. 이 컨텍스트는 `project_root`, `overrides_source`(manifest 경로 또는 `env`), `overrides_sha256`, 그리고 `overrides` 자체를 싣는다. `context_hash` 는 project root 와 canonical(키 정렬) override 집합의 hash 라, 동등한 두 집합은 같은 키를 공유한다. `safedeps_ledger_validate_json` 은 이 필드들을 필수로 요구하고 override 집합이 빈 entry 는 거부한다. 근거는 이렇다 — published-package 승인이 전역일 수 있는 건 오직 그것이 프로젝트 무관이기 때문이다. `overrides` 를 반영하면 resolved closure 가 소비 프로젝트의 함수가 되므로, 그 승인은 Yarn project closure 와 같은 방식으로 키가 잡혀야 한다. 그러지 않으면 transitive 를 patch 한 레포에서 얻은 승인이 patch 하지 않은 레포의 검사를 만족시키고, 그 레포의 실제 설치는 취약한 버전을 해석한다. `overrides` 가 없는 레포는 컨텍스트가 붙지 않고 기존 전역 승인 그대로다.
 
@@ -410,7 +410,7 @@ project context 해석 (cwd 에서 위로 탐색, .git 경계에서 중단):
         │        └─► 유효한 Berry lockfile
         │                 │
         │                 ▼
-        │        context_hash = sha256(project_root, sha256(resolutions), sha256(yarn.lock))
+        │        context_hash = sha256(project_root, sha256(resolutions), sha256(yarn.lock), input_sha256)
         │                 │
         │                 ▼
         │        `yarn info -A -R --json` → 전체 project locator graph
@@ -724,6 +724,13 @@ OSV.dev — 응답 무 / timeout
   • 1차: 로컬 provider cache (24h TTL) 사용
   • cache miss → fail-closed (block; "OSV 응답 없음, 재시도")
   • install-time CLI bypass flag 는 없다; OSV 또는 cache 가 응답할 때 재시도한다
+
+OSV.dev — 읽을 수 없는 응답
+  • provider 목록에 없는 status, 빈 status, provider 자체 코드의 단계 실패는
+    깨끗한 응답이 아니라 miss 다
+  • check 는 `provider_unavailable`(exit 4)로 답하고, 아무것도 승인하지 않으며,
+    `advisory.log` 에 기록을 남긴다
+  • 직접 패키지의 npm 질의도 같다
 
 CISA KEV — 응답 무
   • KEV 는 하루 1회 download 하는 정적 catalog; 로컬 cache 만 사용
