@@ -210,7 +210,10 @@ pass "no doc restates the hook budget figure outside the canonical sentence"
 # The results `check` reports are declared once, in bin/safedeps
 # (SAFEDEPS_CHECK_*), and SKILL.md's table is what an agent acts on, so the two
 # name one set. Every result the CLI names is a declared one, and no report
-# spells a result outside the declarations.
+# takes its result from anywhere but a declaration. The names stand in the
+# CLI files only in their declarations and as whole reads: the core's
+# cli_text::check_results_stand_only_in_their_declarations holds that over
+# every file the CLI sources.
 check_declared=$(sed -nE 's/^SAFEDEPS_CHECK_[A-Z_]+="([a-z_]+)"$/\1/p' bin/safedeps | sort)
 check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {print; next} t {exit}' SKILL.md \
   | awk -F'|' '{print $2}' | grep -oE '`[a-z_]+`' | tr -d '`' | sort)
@@ -224,8 +227,7 @@ check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {p
 # every allowed form is counted. Each assembler is defined once. The word
 # `result` stands only in the assemblers' own forms: each takes it as $1,
 # sf_check_json binds it to jq and writes it after HEAD, the closure block
-# passes it on, and its entries carry a status under the same key. Each
-# declared name is assigned once, by its declaration, and read only whole.
+# passes it on, and its entries carry a status under the same key.
 # Every other mention of an assembler is a call whose first argument is a
 # declaration or the variable its caller set from one, and every mention of
 # that variable is an assignment from a declaration or that argument. What is
@@ -244,14 +246,27 @@ check_outside=$(awk '{
     print line
   }' <<< "${check_code}" | grep -E '(^|[^A-Za-z0-9_])result([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_outside}" ]] || fail "the word result stands in bin/safedeps only in its assemblers' forms: ${check_outside}"
-check_names=$(sed -E 's/^[0-9]+:SAFEDEPS_CHECK_[A-Z_]+="[a-z_]+"$//; s/"\$\{SAFEDEPS_CHECK_[A-Z_]+\}"//g' <<< "${check_code}" | grep -E 'SAFEDEPS_CHECK_' || true)
-[[ -z "${check_names}" ]] || fail "a check result's name is assigned by its declaration and read whole: ${check_names}"
 check_args=$(sed -E 's/(sf_check_json|sf_npm_emit_closure_block_json)(\(\) \{|[[:space:]]+"\$\{(SAFEDEPS_CHECK_[A-Z_]+|result|block_result)\}"([[:space:]]|$))//g' <<< "${check_code}" \
   | grep -E '(^|[^A-Za-z0-9_])(sf_check_json|sf_npm_emit_closure_block_json)([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_args}" ]] || fail "every check report takes its result from a declaration: ${check_args}"
 check_block=$(sed -E 's/(local[[:space:]]+)?block_result="\$\{SAFEDEPS_CHECK_[A-Z_]+\}"([[:space:]]|$)//g; s/"\$\{block_result\}"//g' <<< "${check_code}" \
   | grep -E '(^|[^A-Za-z0-9_])block_result([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_block}" ]] || fail "a closure block's result is a declaration: ${check_block}"
+# Which value the assembler writes is a fact of running it, so it runs once
+# per declaration, with the declarations it reads and nothing else, and its
+# report carries that result. A filter a caller puts after the assembler to
+# rewrite the text it prints is not read here.
+check_assembled=$(
+  eval "$(grep -E '^SAFEDEPS_STATUS_[A-Z_]+=' lib/providers/providers.sh)"
+  eval "$(grep -E '^SAFEDEPS_NPM_SOURCE_JQ=' lib/npm/closure.sh)"
+  eval "$(grep -E '^SAFEDEPS_CHECK_[A-Z_]+=' bin/safedeps)"
+  eval "$(sed -n '/^sf_check_json() {$/,/^}$/p' bin/safedeps)"
+  for check_name in $(sed -nE 's/^(SAFEDEPS_CHECK_[A-Z_]+)=.*/\1/p' bin/safedeps); do
+    sf_check_json "${!check_name}" npm fixture 1.0.0 '{}' '{}' '{}' -n < /dev/null | jq -r '.result'
+  done
+) || true
+[[ "${check_assembled}" == "$(sed -nE 's/^SAFEDEPS_CHECK_[A-Z_]+="([a-z_]+)"$/\1/p' bin/safedeps)" ]] \
+  || fail "sf_check_json reports the result it is given, for each declaration (got: ${check_assembled//$'\n'/ })"
 pass "the check results are declared once, and SKILL.md's table names them"
 
 # Regression: a global install must resolve its package dir through the symlink.
