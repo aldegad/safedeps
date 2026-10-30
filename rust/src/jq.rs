@@ -289,15 +289,19 @@ pub fn system_message(message: &[u8]) -> String {
 /// where Rust's lossy decoder writes two, an overlong, surrogate or
 /// out-of-range sequence is one, and a lead byte with fewer bytes left than
 /// its length takes all of them. A byte that cannot lead (a continuation,
-/// 0xc0, 0xc1, 0xf5 and up) is one each. The inputs below hold each of these
-/// rules, and each bound of the lead table, of the overlong floor and of the
-/// surrogate and out-of-range checks from both sides: the first invalid
-/// sequence past it and the last valid one before it, which jq passes
-/// through as it is. Dropping the surrogate check or raising the
-/// out-of-range bound writes the same bytes, since `char::from_u32` refuses
-/// those code points. No line of a source file outside this one and the
-/// `*_tests.rs` files, `//` comment lines aside, spells an answer's keys, in
-/// any quoting.
+/// 0xc0, 0xc1, 0xf5 and up) is one each. The inputs below are a case of each
+/// of these rules, and they hold each bound of the lead table, of the
+/// overlong floor and of the surrogate and out-of-range checks from both
+/// sides: the first invalid sequence past it and the last valid one before
+/// it, which jq passes through as it is. Dropping the surrogate check or
+/// raising the out-of-range bound writes the same bytes, since
+/// `char::from_u32` refuses those code points. They do not hold the decoder
+/// as a whole: a lead byte between the bounds, the bit masks and the stop at
+/// a byte that does not continue a sequence, at each place and for each
+/// byte, are not each pinned. Holding those means comparing the decoder with
+/// jq over every sequence, which these inputs do not do. No line of a source
+/// file outside this one and the `*_tests.rs` files, `//` comment lines
+/// aside, spells an answer's keys, in any quoting.
 #[cfg(test)]
 #[test]
 fn hook_answers_are_pinned() {
