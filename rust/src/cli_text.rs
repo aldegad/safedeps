@@ -224,8 +224,8 @@ fn unquoted(code: &str) -> Option<Vec<u8>> {
 }
 
 /// The commands that take `source` or `.` as data among their arguments: jq,
-/// and the report assembler, which hands its arguments to jq.
-const SOURCE_AS_DATA: [&str; 2] = ["jq", "sf_check_json"];
+/// and the report's two assemblers, which hand their arguments to jq.
+const SOURCE_AS_DATA: [&str; 3] = ["jq", "sf_check_json", "sf_check_render"];
 
 /// One statement that sources a file, as the core's lexer reads the text:
 /// where it stands in the text when it is in the text itself, and its words
@@ -385,7 +385,7 @@ fn check_results_stand_only_in_their_declarations() {
     for (file, text) in &CLI_FILES[1..] {
         for (line, scanned) in code(text) {
             let scanned = String::from_utf8_lossy(&scanned);
-            assert!(!line.contains("SAFEDEPS_CHECK_") && ["sf_check_json", "sf_npm_emit_closure_block_json", "result"].iter()
+            assert!(!line.contains("SAFEDEPS_CHECK_") && ["sf_check_render", "sf_check_json", "sf_npm_emit_closure_block_json", "result"].iter()
                 .all(|w| stands(scanned.as_bytes(), w, word).is_empty()), "{file} names a check result or assembles a report outside bin/safedeps: {line}");
         }
     }

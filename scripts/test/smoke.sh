@@ -227,28 +227,31 @@ check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {p
 # carry one are an allow-list over bin/safedeps, comment lines aside, and
 # every allowed form is counted. Each assembler is defined once. The word
 # `result` stands only in the assemblers' own forms: each takes it as $1,
-# sf_check_json binds it to jq and writes it after HEAD, the closure block
-# passes it on, and its entries carry a status under the same key.
+# sf_check_render binds it to jq and writes it after HEAD, sf_check_json prints
+# what that made, the closure block passes it on, and its entries carry a status
+# under the same key. A check that did not finish has the one report jq does not
+# make, because jq may be what stopped it, and that report takes its result from
+# the declaration too.
 # Every other mention of an assembler is a call whose first argument is a
 # declaration or the variable its caller set from one, and every mention of
 # that variable is an assignment from a declaration or that argument. What is
 # left after the allowed forms are taken out is a second truth, misspelt or
 # not, and a call this row cannot read on one line is red with it.
 check_code=$(grep -nvE '^[[:space:]]*#' bin/safedeps)
-for check_form in 'sf_check_json() {:1' 'sf_npm_emit_closure_block_json() {:1' 'local result="$1":2' '--arg result "${result}":1' \
-    '{result:\$result}:1' 'result: .status,:1' 'sf_check_json "${result}":1'; do
+for check_form in 'sf_check_render() {:1' 'sf_check_json() {:1' 'sf_npm_emit_closure_block_json() {:1' 'local result="$1":2' '--arg result "${result}":1' \
+    '{result:\$result}:1' 'result: .status,:1' 'sf_check_json "${result}":1' '"result":"%s":1'; do
   [[ "$(grep -oF -- "${check_form%:*}" <<< "${check_code}" | grep -c .)" -eq "${check_form##*:}" ]] \
     || fail "bin/safedeps writes \`${check_form%:*}\` ${check_form##*:} time(s)"
 done
 check_outside=$(awk '{
     line = $0
-    n = split("local result=\"$1\"|--arg result \"${result}\"|{result:\\$result}|result: .status,|sf_check_json \"${result}\"", forms, "|")
+    n = split("local result=\"$1\"|--arg result \"${result}\"|{result:\\$result}|result: .status,|sf_check_json \"${result}\"|\"result\":\"%s\"", forms, "|")
     for (i = 1; i <= n; i++) while ((at = index(line, forms[i])) > 0) line = substr(line, 1, at - 1) " " substr(line, at + length(forms[i]))
     print line
   }' <<< "${check_code}" | grep -E '(^|[^A-Za-z0-9_])result([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_outside}" ]] || fail "the word result stands in bin/safedeps only in its assemblers' forms: ${check_outside}"
-check_args=$(sed -E 's/(sf_check_json|sf_npm_emit_closure_block_json)(\(\) \{|[[:space:]]+"\$\{(SAFEDEPS_CHECK_[A-Z_]+|result|block_result)\}"([[:space:]]|$))//g' <<< "${check_code}" \
-  | grep -E '(^|[^A-Za-z0-9_])(sf_check_json|sf_npm_emit_closure_block_json)([^A-Za-z0-9_]|$)' || true)
+check_args=$(sed -E 's/sf_check_render "\$@"//; s/(sf_check_render|sf_check_json|sf_npm_emit_closure_block_json)(\(\) \{|[[:space:]]+"\$\{(SAFEDEPS_CHECK_[A-Z_]+|result|block_result)\}"([[:space:]]|$))//g' <<< "${check_code}" \
+  | grep -E '(^|[^A-Za-z0-9_])(sf_check_render|sf_check_json|sf_npm_emit_closure_block_json)([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_args}" ]] || fail "every check report takes its result from a declaration: ${check_args}"
 check_block=$(sed -E 's/(local[[:space:]]+)?block_result="\$\{SAFEDEPS_CHECK_[A-Z_]+\}"([[:space:]]|$)//g; s/"\$\{block_result\}"//g' <<< "${check_code}" \
   | grep -E '(^|[^A-Za-z0-9_])block_result([^A-Za-z0-9_]|$)' || true)
@@ -265,13 +268,13 @@ check_assembled=$(
   eval "$(grep -E '^SAFEDEPS_STATUS_[A-Z_]+=' lib/providers/providers.sh)"
   eval "$(grep -E '^SAFEDEPS_NPM_SOURCE_JQ=' lib/npm/closure.sh)"
   eval "$(grep -E '^SAFEDEPS_CHECK_[A-Z_]+=' bin/safedeps)"
-  eval "$(sed -n '/^sf_check_json() {$/,/^}$/p' bin/safedeps)"
+  eval "$(sed -n '/^sf_check_render() {$/,/^}$/p' bin/safedeps)"
   for check_name in $(sed -nE 's/^(SAFEDEPS_CHECK_[A-Z_]+)=.*/\1/p' bin/safedeps); do
-    sf_check_json "${!check_name}" npm fixture 1.0.0 '{}' '{}' '{}' -n < /dev/null | jq -r '.result'
+    sf_check_render "${!check_name}" npm fixture 1.0.0 '{}' '{}' '{}' -n < /dev/null | jq -r '.result'
   done
 ) || true
 [[ "${check_assembled}" == "$(sed -nE 's/^SAFEDEPS_CHECK_[A-Z_]+="([a-z_]+)"$/\1/p' bin/safedeps)" ]] \
-  || fail "sf_check_json reports the result it is given, for each declaration, with one set of the other arguments (got: ${check_assembled//$'\n'/ })"
+  || fail "sf_check_render reports the result it is given, for each declaration, with one set of the other arguments (got: ${check_assembled//$'\n'/ })"
 pass "the check results are declared once, and SKILL.md's table names them"
 
 # Regression: a global install must resolve its package dir through the symlink.
