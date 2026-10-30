@@ -219,18 +219,26 @@ check_documented=$(awk '/^\| `result` \| Action \|$/ {t = 1; next} t && /^\|/ {p
   || fail "SKILL.md's result table names the declared check results (declared: ${check_declared//$'\n'/ }; table: ${check_documented//$'\n'/ })"
 [[ "$(grep -oE 'SAFEDEPS_CHECK_[A-Z_]+' bin/safedeps | sort -u)" == "$(sed -nE 's/^(SAFEDEPS_CHECK_[A-Z_]+)=.*/\1/p' bin/safedeps | sort -u)" ]] \
   || fail "every check result bin/safedeps names is declared"
-check_spelled=$(grep -nE 'result:[[:space:]]*\\?"' bin/safedeps || true)
-[[ -z "${check_spelled}" ]] || fail "no check report spells its result outside the declarations: ${check_spelled}"
-# A result reaches a report only as the first argument of its assembler, and
-# that argument is a declaration or the variable an assembler's caller set
-# from one; a word there, misspelt or not, is a second truth.
-check_args=$(grep -nE '(sf_check_json|sf_npm_emit_closure_block_json)[[:space:]]' bin/safedeps | grep -vE '^[0-9]+:[[:space:]]*#' \
-  | grep -vE '(sf_check_json|sf_npm_emit_closure_block_json)[[:space:]]+"\$\{(SAFEDEPS_CHECK_[A-Z_]+|result|block_result)\}"' || true)
+# A result reaches a report only through its assemblers, so the words that
+# carry one are an allow-list over bin/safedeps, comment lines aside. The word
+# `result` is written only inside the two assemblers' bodies. Every other
+# mention of an assembler is its definition or a call whose first argument is
+# a declaration or the variable its caller set from one, and every mention of
+# that variable is an assignment from a declaration or that argument. What is
+# left after the allowed forms are taken out is a second truth, misspelt or
+# not, and a call this row cannot read on one line is red with it.
+check_code=$(grep -nvE '^[[:space:]]*#' bin/safedeps)
+check_outside=$(awk '{line = $0; sub(/^[0-9]+:/, "", line)}
+  line ~ /^(sf_check_json|sf_npm_emit_closure_block_json)\(\) \{$/ {inside = 1; next}
+  inside && line ~ /^}$/ {inside = 0; next}
+  !inside' <<< "${check_code}" | grep -E '(^|[^A-Za-z0-9_])result([^A-Za-z0-9_]|$)' || true)
+[[ -z "${check_outside}" ]] || fail "only the check report assemblers write a result: ${check_outside}"
+check_args=$(sed -E 's/(sf_check_json|sf_npm_emit_closure_block_json)(\(\) \{|[[:space:]]+"\$\{(SAFEDEPS_CHECK_[A-Z_]+|result|block_result)\}"([[:space:]]|$))//g' <<< "${check_code}" \
+  | grep -E '(^|[^A-Za-z0-9_])(sf_check_json|sf_npm_emit_closure_block_json)([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_args}" ]] || fail "every check report takes its result from a declaration: ${check_args}"
-check_block=$(grep -nE '(^|[[:space:]])block_result=' bin/safedeps | grep -vE 'block_result="\$\{SAFEDEPS_CHECK_[A-Z_]+\}"$' || true)
+check_block=$(sed -E 's/(local[[:space:]]+)?block_result="\$\{SAFEDEPS_CHECK_[A-Z_]+\}"([[:space:]]|$)//g; s/"\$\{block_result\}"//g' <<< "${check_code}" \
+  | grep -E '(^|[^A-Za-z0-9_])block_result([^A-Za-z0-9_]|$)' || true)
 [[ -z "${check_block}" ]] || fail "a closure block's result is a declaration: ${check_block}"
-check_quoted=$(grep -nE "[\"'](${check_declared//$'\n'/|})[\"']" bin/safedeps | grep -vE '^[0-9]+:SAFEDEPS_CHECK_' || true)
-[[ -z "${check_quoted}" ]] || fail "bin/safedeps quotes a check result outside its declaration: ${check_quoted}"
 pass "the check results are declared once, and SKILL.md's table names them"
 
 # Regression: a global install must resolve its package dir through the symlink.
