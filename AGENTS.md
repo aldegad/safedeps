@@ -142,6 +142,14 @@ The bypass-harness and regression rule above still holds for every security chan
   stalled row asks for, so the row records that the fixture held nothing
   (`held` in `scripts/test/lib/native-budget-run.py`). One row with the time to
   spare must still hold it: the ceiling row of `scripts/test/self-budget.sh`.
+- **A run the machine spoiled does not count, and says so.** Load can take a
+  row's condition away, as when npm's own eight seconds land before the fixture
+  is ready, and it can only add to a run, so a wall-clock bound one run misses
+  says nothing about the path. Such a run prints a `# note` and the row runs
+  again, up to `row_runs` times (`scripts/test/self-budget.sh`). A slow path
+  stays over its bound on every run, and a row that never saw its condition is
+  red. The bounds do not move, and the runtime's own kill is not re-run: past
+  it the install runs unjudged.
 
 ### Citing a zero
 

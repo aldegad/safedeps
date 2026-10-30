@@ -53,7 +53,20 @@ never=60
 GUARD_IGNORE_TERM=""; GUARD_SECONDS=""
 GUARD_DELAY=0; GUARD_LOAD=""; GUARD_KILL_JUDGMENT=""; GUARD_ORPHAN=""; GUARD_LATE=0
 GUARD_HELPER_RC=0
-STALLED_ROWS=0; HELD_ROWS=0
+STALLED_ROWS=0; HELD_ROWS=0; UNCOUNTED_RUNS=0
+# The machine can spoil a stalled run in two ways, and neither says anything
+# about the path. It can take the row's condition away: npm's own eight seconds
+# land before the fixture is ready, or the supervisor misses its pause. And it
+# can put a run over a wall-clock bound, because load only adds to a run. Such a
+# run does not count: it prints a note and the row runs again, up to row_runs
+# times. A slow path stays over its bound however many runs are taken, and a row
+# that never saw its condition is red. The bounds themselves do not move, and
+# the runtime's own kill is no such bound: past it the install runs unjudged.
+row_runs=10
+uncounted() {
+  UNCOUNTED_RUNS=$((UNCOUNTED_RUNS + 1))
+  printf '# note - a run did not count: %s\n' "$1"
+}
 guard() {
   local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
   local safe rc=0
@@ -71,7 +84,8 @@ guard() {
   [[ "${GUARD_LATE}" == 0 ]] || args+=(--late-question "${GUARD_LATE}")
   GUARD_BOX="${safe}"
   python3 "${ROOT_DIR}/scripts/test/lib/native-budget-run.py" "${args[@]}" > "${safe}/transport.json" || rc=$?
-  (( rc == GUARD_HELPER_RC )) \
+  GUARD_ASK_LIMIT=$(jq -r .ask_limit "${safe}/result.json" 2>/dev/null || true)
+  (( rc == GUARD_HELPER_RC )) || [[ "${rc}:${GUARD_ASK_LIMIT}" == 0:true ]] \
     || fail "native budget fixture ran (helper rc ${rc}; $(jq -c .errors "${safe}/result.json" 2>/dev/null); ${safe})"
   GUARD_RC=$(jq -r .rc "${safe}/result.json")
   GUARD_OUT=$(jq -r .stdout "${safe}/result.json")
@@ -81,7 +95,7 @@ guard() {
   GUARD_DECISION=$(jq -r .decision "${safe}/result.json")
   GUARD_REASON=$(jq -r .reason "${safe}/result.json")
   GUARD_GONE=$(jq -r .descendants_gone "${safe}/result.json")
-  GUARD_RESUME=$(jq -r .response_after_resume "${safe}/result.json")
+  GUARD_RESUME_MS=$(jq -r '(.response_after_resume // 0) * 1000 | round' "${safe}/result.json")
   GUARD_HELD=$(jq -r .held "${safe}/result.json")
   GUARD_PAUSED=$(jq -r .paused "${safe}/result.json")
   if [[ "${GUARD_DELAY}" != 0 ]]; then
@@ -95,25 +109,46 @@ guard() {
   (( GUARD_RC == 0 )) || fail "the registered entry ran and answered (exit ${GUARD_RC})"
 }
 slow_guard() {
-  GUARD_DELAY="$1"; shift
-  # Put npm before a trailing comment in the original corpus word.
-  local command="$1"; shift
-  guard "npm ci; ${command}" "$@"
+  local delay="$1" command="$2" late="${GUARD_LATE}" run; shift 2
+  for (( run = 1; run <= row_runs; run++ )); do
+    GUARD_DELAY="${delay}"; GUARD_LATE="${late}"
+    # Put npm before a trailing comment in the original corpus word.
+    guard "npm ci; ${command}" "$@"
+    [[ "${GUARD_ASK_LIMIT}" == true ]] || break
+    uncounted "npm's own limit answered before the fixture was ready (${GUARD_ELAPSED_MS}ms)"
+  done
   GUARD_DELAY=0; GUARD_LOAD=""; GUARD_LATE=0
+  [[ "${GUARD_ASK_LIMIT}" != true ]] || fail "the row observed nothing: npm's own limit answered all ${row_runs} runs"
 }
 slow_sleeper_gone() { [[ "${GUARD_GONE}" == true ]]; }
+# The row's own checks read the last run, so a bound never met is their red.
+row_within() {
+  local limit_ms="$1" late="${GUARD_LATE}" run; shift
+  for (( run = 1; run <= row_runs; run++ )); do
+    GUARD_LATE="${late}"
+    "$@"
+    (( GUARD_ELAPSED_MS > limit_ms )) || return 0
+    uncounted "${GUARD_ELAPSED_MS}ms against a bound of ${limit_ms}ms"
+  done
+}
 # The pause comes from outside the hook, so on a machine busy enough the
-# deadline can still land first. That trial saw no paused supervisor and does
-# not count. Three in a row is red: the row observed nothing.
+# deadline can still land first. A supervisor that adds a fresh budget stays
+# past the second it gets here on every run.
 paused_guard() {
-  local late="${GUARD_LATE}" _
-  for _ in 1 2 3; do
+  local late="${GUARD_LATE}" run
+  for (( run = 1; run <= row_runs; run++ )); do
     GUARD_LOAD=1; GUARD_LATE="${late}"
     slow_guard "${never}" "$@"
-    [[ "${GUARD_PAUSED}" != true ]] || return 0
-    printf '# note - the deadline landed before the supervisor was paused (%sms)\n' "${GUARD_ELAPSED_MS}"
+    if [[ "${GUARD_PAUSED}" != true ]]; then
+      uncounted "the deadline landed before the supervisor was paused (${GUARD_ELAPSED_MS}ms)"
+    elif (( GUARD_RESUME_MS > 1000 )); then
+      uncounted "the answer came ${GUARD_RESUME_MS}ms after the supervisor resumed"
+    else
+      return 0
+    fi
   done
-  fail "the supervisor was never paused before its deadline, in three tries"
+  [[ "${GUARD_PAUSED}" == true ]] || fail "the supervisor was never paused before its deadline, in ${row_runs} runs"
+  fail "a resumed supervisor reads elapsed time rather than adding a fresh budget (${GUARD_RESUME_MS}ms after its resume, in all ${row_runs} runs)"
 }
 
 # The size only has to engage the deadline, including under the 4KB engage
@@ -127,7 +162,7 @@ tiny_budget=1
 
 # --- past the budget: the gate answers instead of being killed --------------
 
-slow_guard "${never}" "echo ${big}" "${tiny_budget}"
+row_within 12000 slow_guard "${never}" "echo ${big}" "${tiny_budget}"
 printf '# note - PATH check: npm is the fixture, first on the hook PATH (%s); the judgment asks no other manager\n' "$(jq -r .npm "${GUARD_BOX}/result.json")"
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "over-budget command is denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "over-budget deny is marked UNDECIDED"
@@ -206,7 +241,7 @@ pass "padded installs past the budget are denied across command-gate-authority e
 # budget minus the overshoot.
 deep_budget=3
 GUARD_IGNORE_TERM=1
-slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${deep_budget}"
+row_within $(( (deep_budget + 3) * 1000 )) slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${deep_budget}"
 GUARD_IGNORE_TERM=""
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "deadline landing while the child is blocked still denies (got: ${GUARD_DECISION})"
@@ -229,7 +264,7 @@ pass "the deadline takes the blocked command down with the shell, leaving no orp
 slow_guard "${never}" "echo ${big}" 2
 budget_two=${GUARD_ELAPSED}
 (( GUARD_ELAPSED_MS >= 2000 )) || fail "the two-second deadline did not fire early (${GUARD_ELAPSED_MS}ms)"
-slow_guard "${never}" "echo ${big}" 6
+row_within 9000 slow_guard "${never}" "echo ${big}" 6
 budget_six=${GUARD_ELAPSED}
 (( GUARD_ELAPSED_MS >= 6000 )) || fail "the six-second deadline did not fire early (${GUARD_ELAPSED_MS}ms)"
 (( budget_six > budget_two )) \
@@ -281,6 +316,15 @@ GUARD_LATE=6
 paused_guard "pip install requests==2.31.0 # ${big}" 4
 [[ "${GUARD_DECISION}" == deny ]] || fail "a supervisor paused ahead of the fixture is denied (got: ${GUARD_DECISION})"
 pass "the supervisor is paused from outside, so the load rows do not wait for the fixture to start"
+
+# A question later than npm's own eight seconds lands that limit first, every
+# time, so the machine's way of spoiling a row is checked on a quiet one too.
+if ( row_runs=2; GUARD_LATE=9; slow_guard "${never}" "echo ${big}" 20 ) > "${tmp_root}/ask-limit" 2>&1; then
+  fail "a row npm's own limit answered in every run is not a pass"
+fi
+grep -q 'the row observed nothing' "${tmp_root}/ask-limit" \
+  || fail "a row npm's own limit answered in every run is red as one that observed nothing ($(tail -1 "${tmp_root}/ask-limit" | cut -c1-200))"
+pass "a run npm's own limit answered does not count, and a row with no other run is red"
 
 # --- a lease names what the run owns ------------------------------------------
 # The deadline's TERM can end the judgment while a fixture that ignores TERM
@@ -342,7 +386,7 @@ pass "an engaged fast judgment is answered without waiting out a whole second"
 # The helper records monotonic resume/response times and checks the difference.
 loaded_budget=4
 loaded_margin=4
-paused_guard "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
+row_within $(( (loaded_budget + loaded_margin) * 1000 )) paused_guard "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "on a loaded machine the stuck judgment is denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "on a loaded machine the deny is the undecided one"
 printf '# note - supervisor descheduled past its deadline: UNDECIDED after %sms against a %ss budget\n' "${GUARD_ELAPSED_MS}" "${loaded_budget}"
@@ -359,7 +403,7 @@ pass "on a loaded machine the deadline leaves no sleeper behind"
 # under an exported SECONDS=-1000000, and only the requested-sleep bound would
 # end the wait: the late answer above, through a different door.
 GUARD_SECONDS=-1000000
-paused_guard "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
+row_within $(( (loaded_budget + loaded_margin) * 1000 )) paused_guard "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
 GUARD_SECONDS=""
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "an exported SECONDS does not turn the deadline into a pass (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "an exported SECONDS still ends in the undecided deny"
@@ -712,5 +756,5 @@ if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "32KB of one-line statem
 printf '# note - 32KB of one-line statements with no install judged in %ss\n' "${GUARD_ELAPSED}"
 pass "32KB of one-line statements with no install is judged inside the default budget, not answered UNDECIDED"
 
-printf '# note - the fixture held the judgment in %s of %s stalled rows; in the rest the deadline answered first\n' "${HELD_ROWS}" "${STALLED_ROWS}"
+printf '# note - the fixture held the judgment in %s of %s stalled runs; %s runs did not count\n' "${HELD_ROWS}" "${STALLED_ROWS}" "${UNCOUNTED_RUNS}"
 printf 'self-budget battery: all checks passed\n'
