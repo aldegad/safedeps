@@ -297,8 +297,8 @@ sf_check_json() {
 # removes its files and returns 4.
 #   sf_check_unavailable ECOSYSTEM PACKAGE RANGE VERSION REASON [CANDIDATE]
 # CANDIDATE is the patch candidate whose answer it was, where there was one.
-SF_UNAVAILABLE_PRIMARY="OSV primary unavailable or unreadable; no fresh cache"
-SF_UNAVAILABLE_BATCH="OSV batch primary unavailable or unreadable; no fresh cache for full closure"
+SF_UNAVAILABLE_PRIMARY="OSV or CISA KEV unavailable or unreadable; no fresh cache"
+SF_UNAVAILABLE_BATCH="OSV batch or CISA KEV unavailable or unreadable; no fresh cache for full closure"
 sf_check_unavailable() {
   local ecosystem="$1" package="$2" range="$3" version="$4" reason="$5" candidate="${6:-}"
 

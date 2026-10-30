@@ -519,61 +519,79 @@ safedeps_kev_catalog_path() {
   printf '%s/kev/known_exploited_vulnerabilities.json' "${SAFEDEPS_CACHE_DIR}"
 }
 
+# A KEV catalog is one JSON object whose `vulnerabilities` is a list with at least
+# one entry, and every entry is an object that names its CVE in a string `cveID`.
+# CISA's catalog is cumulative, so it is never empty: an empty file, a file this
+# user cannot read, an empty list and a list whose entries name nothing say
+# nothing about what is exploited, and none of them reads as no listing. The core
+# reads a catalog by the same rule (kev_answer in rust/src/post/providers.rs), and
+# `kev_answers_match_cli` holds the two together.
+safedeps_kev_is_answer() {
+  jq -es 'length == 1 and (.[0] | type == "object" and (.vulnerabilities | type == "array" and length > 0 and all(.[]; type == "object" and (.cveID | type == "string"))))' "$1" >/dev/null 2>&1
+}
+
+# A cache hit is a fresh file that holds a catalog. A fresh file that holds none
+# is a miss with a line in the record.
+safedeps_kev_cache_hit() {
+  local path="$1"
+
+  safedeps_cache_is_fresh "${path}" || return 1
+  safedeps_kev_is_answer "${path}" && return 0
+  safedeps_provider_log "WARN" "CISA KEV cache unreadable; asking again"
+  return 1
+}
+
+# The path of a catalog that can be read. A download that fails falls back on the
+# local file, stale or not, when that file holds a catalog. With none to read this
+# returns 1, and no caller reads that as no listing.
 safedeps_kev_refresh_catalog() {
   local cache_path
   local response_path
-  local http_status
+  local http_status=""
 
   safedeps_require_json_tools || return 1
   safedeps_providers_init
   cache_path=$(safedeps_kev_catalog_path)
 
-  if safedeps_cache_is_fresh "${cache_path}"; then
+  if safedeps_kev_cache_hit "${cache_path}"; then
     printf '%s' "${cache_path}"
     return 0
   fi
 
-  if ! safedeps_require_http_client; then
-    [[ -f "${cache_path}" ]] && printf '%s' "${cache_path}" && return 0
-    return 1
+  if safedeps_require_http_client; then
+    response_path=$(safedeps_cache_response_temp "${cache_path}") || return 1
+    http_status=$(curl -fsS --max-time 15 -o "${response_path}" -w '%{http_code}' "${SAFEDEPS_KEV_CATALOG_URL}" 2>/dev/null || true)
+
+    if [[ "${http_status}" == "200" ]] && safedeps_kev_is_answer "${response_path}" && mv -f "${response_path}" "${cache_path}"; then
+      safedeps_provider_log "INFO" "CISA KEV catalog refresh ok"
+      printf '%s' "${cache_path}"
+      return 0
+    fi
+
+    rm -f "${response_path}"
   fi
 
-  response_path=$(safedeps_cache_response_temp "${cache_path}") || return 1
-  http_status=$(curl -fsS --max-time 15 -o "${response_path}" -w '%{http_code}' "${SAFEDEPS_KEV_CATALOG_URL}" 2>/dev/null || true)
-
-  if [[ "${http_status}" == "200" ]] && jq -e '.vulnerabilities | type == "array"' "${response_path}" >/dev/null 2>&1; then
-    mv -f "${response_path}" "${cache_path}"
-    safedeps_provider_log "INFO" "CISA KEV catalog refresh ok"
-    printf '%s' "${cache_path}"
-    return 0
-  fi
-
-  rm -f "${response_path}"
-  if [[ -f "${cache_path}" ]]; then
+  if safedeps_kev_is_answer "${cache_path}"; then
     safedeps_provider_log "WARN" "CISA KEV refresh failed; using stale local catalog status=${http_status:-none}"
     printf '%s' "${cache_path}"
     return 0
   fi
 
-  safedeps_provider_log "WARN" "CISA KEV unavailable and no local catalog status=${http_status:-none}"
+  safedeps_provider_log "WARN" "CISA KEV unavailable and no readable local catalog status=${http_status:-none}"
   return 1
 }
 
+# The listing of one OSV answer in a catalog safedeps_kev_refresh_catalog gave. The
+# caller asks for the path once, because the rule reads the whole catalog.
 safedeps_kev_overlay() {
   local osv_json="$1"
   local queried_at="$2"
-  local catalog_path
+  local catalog_path="$3"
   local cve_array
   local status="ok"
   local warning=""
 
   cve_array=$(safedeps_extract_cves_from_osv "${osv_json}" | jq -R . | jq -s .) || return 1
-
-  if ! catalog_path=$(safedeps_kev_refresh_catalog); then
-    jq -cn --arg queried_at "${queried_at}" --argjson cves "${cve_array}" \
-      '{queried_at: $queried_at, status: "unavailable", warning: "CISA KEV catalog unavailable", cves_checked: $cves, exploited: false, matches: []}'
-    return
-  fi
 
   if ! safedeps_cache_is_fresh "${catalog_path}"; then
     status="stale"
@@ -586,7 +604,7 @@ safedeps_kev_overlay() {
     --arg warning "${warning}" \
     --argjson cves "${cve_array}" \
     --slurpfile catalog "${catalog_path}" '
-      ($catalog[0].vulnerabilities // []) as $items
+      $catalog[0].vulnerabilities as $items
       | ($items | map(select(.cveID as $id | $cves | index($id)))) as $matches
       | {
           queried_at: $queried_at,
@@ -676,6 +694,7 @@ safedeps_providers_query() {
   local queried_at
   local osv_file
   local temp_dir
+  local catalog_path
   local kev_file
   local ghsa_file
 
@@ -737,7 +756,8 @@ safedeps_providers_query() {
     return 1
   fi
 
-  if ! safedeps_kev_overlay "${osv_file}" "${queried_at}" > "${kev_file}"; then
+  if ! catalog_path=$(safedeps_kev_refresh_catalog) \
+    || ! safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_path}" > "${kev_file}"; then
     safedeps_provider_log "ERROR" "KEV overlay failed ecosystem=${ecosystem} package=${package_name} version=${version}"
     rm -rf "${temp_dir}"
     return 1
@@ -783,6 +803,7 @@ safedeps_providers_query_batch() {
   local osv_batch_file
   local osv_items_file
   local results_file
+  local catalog_path
 
   safedeps_require_json_tools || return 1
   queried_at=$(safedeps_now_iso)
@@ -797,6 +818,11 @@ safedeps_providers_query_batch() {
     rm -rf "${temp_dir}"
     return 1
   fi
+  if [[ -s "${osv_items_file}" ]] && ! catalog_path=$(safedeps_kev_refresh_catalog); then
+    safedeps_provider_log "ERROR" "KEV overlay failed ecosystem=${ecosystem}"
+    rm -rf "${temp_dir}"
+    return 1
+  fi
 
   while IFS= read -r item; do
     local osv_file
@@ -804,7 +830,7 @@ safedeps_providers_query_batch() {
     local status
     osv_file="${temp_dir}/osv-item.json"
     if ! jq -c '.osv' <<< "${item}" > "${osv_file}" \
-      || ! kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}") \
+      || ! kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_path}") \
       || ! status=$(jq -r --argjson kev "${kev_json}" "${SAFEDEPS_STATUS_JQ}"'status_of($kev.exploited; .osv.vulns // [])' <<< "${item}") \
       || ! jq -cn \
       --argjson item "${item}" \

@@ -16,14 +16,20 @@ fn osv_cache_path(cache: &Path, package: &[u8], version: &[u8]) -> PathBuf {
 }
 fn env(name:&str,default:&str)->String{std::env::var(name).ok().filter(|s|!s.is_empty()).unwrap_or_else(||default.into())}
 fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wall(os::WallRole::ProviderCacheExpiry).seconds()-m.mtime()<=ttl)}
-fn obj0(path:&Path)->Result<Value,()>{let s=jv::read_file(path).ok_or(())?;if s.failed{return Err(())}Ok(first(s))}
-fn first(s:jv::Stream)->Value{s.values.into_iter().next().filter(jv::truthy).unwrap_or_else(||jv::obj(vec![("vulns",Value::Arr(Vec::new()))]))}
 /// An OSV answer is one JSON object whose `vulns`, when it has one, is a list.
 /// OSV answers `{}` for a package it has nothing on, and nothing else says so:
 /// an empty file, a file this user cannot read and a `null` hold no answer, and
 /// none of them reads as no advisories. The CLI reads an answer by the same rule
 /// (safedeps_osv_is_answer), and `osv_answers_match_cli` holds the two together.
 fn osv_answer(v:Value)->Option<Value>{(matches!(v,Value::Obj(_))&&matches!(jv::field(&v,"vulns"),Ok(Value::Arr(_)|Value::Null))).then_some(v)}
+/// A KEV catalog is one JSON object whose `vulnerabilities` is a list with at
+/// least one entry, and every entry is an object that names its CVE in a string
+/// `cveID`. CISA's catalog is cumulative, so it is never empty: an empty file, a
+/// file this user cannot read, an empty list and a list whose entries name
+/// nothing say nothing about what is exploited, and none of them reads as no
+/// listing. The CLI reads a catalog by the same rule (safedeps_kev_is_answer),
+/// and `kev_answers_match_cli` holds the two together.
+fn kev_answer(v:Value)->Option<Value>{matches!(jv::field(&v,"vulnerabilities"),Ok(Value::Arr(a)) if !a.is_empty()&&a.iter().all(|e|matches!(jv::field(e,"cveID"),Ok(Value::Str(_))))).then_some(v)}
 fn tsv(s:&[u8])->W{let mut out=Vec::new();for b in s{match b{b'\\'=>out.extend(b"\\\\"),b'\t'=>out.extend(b"\\t"),b'\r'=>out.extend(b"\\r"),b'\n'=>out.extend(b"\\n"),_=>out.push(*b)}}out}
 /// The advisory status one provider answer gives one package. The CLI
 /// declares the same names and the same rule in lib/providers/providers.sh,
@@ -36,6 +42,10 @@ impl Status {
         if exploited { Self::HardBlock } else if records > 0 { Self::Vulnerable } else { Self::Clean }
     }
 }
+/// Which provider a batch could not read. Either one is a rollback; the report
+/// names the one that failed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unanswered { Osv, Kev }
 struct Scratch(PathBuf);
 impl Drop for Scratch{fn drop(&mut self){sh::rm_rf(&self.0);}}
 
@@ -67,36 +77,63 @@ impl Providers{
         c.arg(url).stdin(Stdio::null()).stderr(Stdio::null());
         c.output().map(|o|jv::captured(&[o.stdout])).unwrap_or_default()
     }
-    fn catalog(&mut self,path:&Path)->Option<Value>{self.kev_reads+=1;obj0(path).ok()}
+    fn catalog(&mut self,path:&Path)->Option<Value>{self.kev_reads+=1;jv::read_one_object(path).and_then(kev_answer)}
+    /// A catalog that can be read. A fresh file that holds none is a miss with a
+    /// line in the record. A download that fails falls back on the local file,
+    /// stale or not, when that file holds a catalog. With none to read this is
+    /// None, and no caller reads that as no listing.
     fn kev(&mut self)->Option<Value>{
         let cache=self.cache.join(KEV_CACHE_PATH);
-        if !fresh(&cache,self.ttl){
-            if !sh::command_exists("curl"){
-                eprintln!("safedeps providers: curl is required for provider queries");
-                return if sh::is_file(&cache){self.catalog(&cache)}else{None};
-            }
+        if fresh(&cache,self.ttl){
+            let held=self.catalog(&cache);
+            if held.is_some(){return held}
+            self.log(b"WARN",b"CISA KEV cache unreadable; asking again");
+        }
+        let mut status=Vec::new();
+        if sh::command_exists("curl"){
             let Some(tmp)=sh::mktemp(&cat(&[sh::bytes(&self.cache),b"/kev/.known_exploited_vulnerabilities.json."]))else{return None};
-            let status=Self::curl(&env("SAFEDEPS_KEV_CATALOG_URL",state::DEFAULT_KEV_CATALOG_URL),&tmp,None,"15");
-            let st=jv::read_file(&tmp);
-            let valid=st.as_ref().is_some_and(|s|!s.failed&&s.values.last().is_some_and(|v|matches!(jv::field(v,"vulnerabilities"),Ok(Value::Arr(_)))));
-            if status==b"200"&&valid{
+            status=Self::curl(&env("SAFEDEPS_KEV_CATALOG_URL",state::DEFAULT_KEV_CATALOG_URL),&tmp,None,"15");
+            let answer=jv::read_one_object(&tmp).and_then(kev_answer);
+            if status==b"200"&&answer.is_some(){
                 if fs::rename(&tmp,&cache).is_err(){sh::rm_f(&tmp);return None}
                 self.log(b"INFO",b"CISA KEV catalog refresh ok");
                 // The bytes just checked are the catalog now in place: they
                 // are the one read, not a second parse of the same file.
                 self.kev_reads+=1;
-                return st.map(first);
-            }else{
-                sh::rm_f(&tmp);let status=if status.is_empty(){b"none".as_slice()}else{&status};
-                if sh::is_file(&cache){self.log(b"WARN",&cat(&[b"CISA KEV refresh failed; using stale local catalog status=",status]));}
-                else{self.log(b"WARN",&cat(&[b"CISA KEV unavailable and no local catalog status=",status]));return None}
+                return answer;
             }
-        }self.catalog(&cache)
+            sh::rm_f(&tmp);
+        }else{eprintln!("safedeps providers: curl is required for provider queries");}
+        let status=if status.is_empty(){b"none".as_slice()}else{&status};
+        let held=self.catalog(&cache);
+        if held.is_some(){self.log(b"WARN",&cat(&[b"CISA KEV refresh failed; using stale local catalog status=",status]));}
+        else{self.log(b"WARN",&cat(&[b"CISA KEV unavailable and no readable local catalog status=",status]));}
+        held
     }
     /// Status per package, with the ids of the OSV records it has; post uses
     /// the hard_block and vulnerable summaries, and the ids name what an
     /// install kept under SAFEDEPS_ACCEPT_RISK accepted.
-    pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,Status,Vec<W>)>,()>{
+    pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,Status,Vec<W>)>,Unanswered>{
+        let items=self.osv_answers(specs).map_err(|()|Unanswered::Osv)?;
+        if items.is_empty(){return Ok(Vec::new())}
+        // Asked once for the closure: a refresh, its log line and the parse
+        // happen once.
+        let Some(catalog)=self.kev()else{self.log(b"ERROR",b"CISA KEV catalog unavailable; fail-closed");return Err(Unanswered::Kev)};
+        let Ok(Value::Arr(listed))=jv::field(&catalog,"vulnerabilities")else{return Err(Unanswered::Kev)};
+        let cve=Regex::new("^CVE-[0-9]{4}-[0-9]+$",false).unwrap();let mut output=Vec::new();
+        for (package,version,osv) in items{
+            let vulns=match jv::field(&osv,"vulns"){Ok(Value::Arr(a))=>a.as_slice(),_=>&[]};
+            let mut cves=Vec::new();let mut ids=Vec::new();
+            for v in vulns{
+                if let Ok(Value::Str(s))=jv::field(v,"id"){ids.push(s.clone());if cve.is_match(s){cves.push(s.clone());}}
+                if let Ok(Value::Arr(a))=jv::field(v,"aliases"){for x in a{if let Value::Str(s)=x{if cve.is_match(s){cves.push(s.clone());}}}}
+            }
+            let exploited=listed.iter().any(|v|matches!(jv::field(v,"cveID"),Ok(Value::Str(s)) if cves.contains(s)));
+            output.push((package,version,Status::of(exploited,vulns.len()),ids));
+        }Ok(output)
+    }
+    /// The OSV answer of each package, from the cache or from one batch query.
+    fn osv_answers(&mut self,specs:&[Spec])->Result<Vec<(W,W,Value)>,()>{
         self.init();let temp=sh::mktemp_dir(&sh::tmp_prefix("safedeps-providers")).ok_or(())?;let scratch=Scratch(temp);
         let mut items:Vec<(W,W,PathBuf,Option<Value>)>=Vec::new();
         for spec in specs{
@@ -134,21 +171,7 @@ impl Providers{
                 self.log(b"INFO",&cat(&[b"OSV batch live query ok ecosystem=npm package=",package,b" version=",version]));*stored=Some(v);
             }
         }
-        let cve=Regex::new("^CVE-[0-9]{4}-[0-9]+$",false).unwrap();let mut output=Vec::new();
-        // Asked where the first package asks for it, as before, and kept for
-        // the rest: a refresh, its log line and the parse happen once.
-        let mut catalog:Option<Option<Value>>=None;
-        for (package,version,_,value) in items{
-            let osv=value.ok_or(())?;let vulns=match jv::field(&osv,"vulns")?{Value::Arr(a)=>a.as_slice(),_=>&[]};
-            let mut cves=Vec::new();let mut ids=Vec::new();
-            for v in vulns{
-                if let Ok(Value::Str(s))=jv::field(v,"id"){ids.push(s.clone());if cve.is_match(s){cves.push(s.clone());}}
-                if let Ok(Value::Arr(a))=jv::field(v,"aliases"){for x in a{if let Value::Str(s)=x{if cve.is_match(s){cves.push(s.clone());}}}}
-            }
-            let catalog=catalog.get_or_insert_with(||self.kev());let mut exploited=false;
-            if let Some(c)=catalog{if let Ok(Value::Arr(a))=jv::field(c,"vulnerabilities"){exploited=a.iter().any(|v|matches!(jv::field(v,"cveID"),Ok(Value::Str(s)) if cves.contains(s)));}}
-            output.push((package,version,Status::of(exploited,vulns.len()),ids));
-        }Ok(output)
+        items.into_iter().map(|(package,version,_,value)|value.map(|osv|(package,version,osv)).ok_or(())).collect()
     }
 }
 
@@ -242,6 +265,43 @@ fn osv_answers_match_cli() {
         for body in bodies {
             fs::write(&file, body).unwrap();
             assert_eq!(jv::read_one_object(&file).and_then(osv_answer).is_some(), answer, "the core on {body:?}");
+            let cli = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .args(["-c", &script, "answer-contract"]).arg(&file).status().unwrap();
+            assert_eq!(cli.success(), answer, "the CLI on {body:?}");
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+#[test]
+fn kev_answers_match_cli() {
+    let cli = include_str!("../../../lib/providers/providers.sh");
+    let head = "safedeps_kev_is_answer() {";
+    let body = cli.split_once(head).unwrap().1.split_once("\n}").unwrap().0;
+    let script = format!("{head}{body}\n}}\nsafedeps_kev_is_answer \"$1\"");
+    let dir = std::env::temp_dir().join(format!("safedeps-kev-answer-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("catalog.json");
+    let one = r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"}]}"#;
+    let answers = [one.to_string(), format!("  {one}\n\n"),
+        r#"{"title":"t","count":2,"vulnerabilities":[{"cveID":"CVE-2026-1","notes":""},{"cveID":"CVE-2026-2","cwes":[]}]}"#.to_string(),
+        r#"{"vulnerabilities":false,"vulnerabilities":[{"cveID":"CVE-2026-1"}]}"#.to_string(),
+        r#"{"vulnerabilities":[{"cveID":1,"cveID":"CVE-2026-1"}]}"#.to_string()];
+    let none = ["", " ", "\n", "null", "false", "true", "[]", "[{}]", "1", r#""x""#, "not json", "{", "{}", "{}{}", "{} {}", "null {}",
+        r#"{"vulnerabilities":null}"#, r#"{"vulnerabilities":false}"#, r#"{"vulnerabilities":true}"#, r#"{"vulnerabilities":""}"#,
+        r#"{"vulnerabilities":"x"}"#, r#"{"vulnerabilities":1}"#, r#"{"vulnerabilities":{}}"#, r#"{"vulnerabilities":{"a":{"cveID":"CVE-2026-1"}}}"#,
+        r#"{"vulnerabilities":[]}"#, r#"{"vulnerabilities":[1]}"#, r#"{"vulnerabilities":[null]}"#, r#"{"vulnerabilities":[""]}"#, r#"{"vulnerabilities":[[]]}"#,
+        r#"{"vulnerabilities":[{}]}"#, r#"{"vulnerabilities":[{"cveID":null}]}"#, r#"{"vulnerabilities":[{"cveID":1}]}"#, r#"{"vulnerabilities":[{"cveID":[]}]}"#,
+        r#"{"vulnerabilities":[{"cve_id":"CVE-2026-1"}]}"#, r#"{"VULNERABILITIES":[{"cveID":"CVE-2026-1"}]}"#,
+        r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"},{}]}"#, r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"},1]}"#, r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"},{"cveID":1}]}"#,
+        r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"}],"vulnerabilities":false}"#, r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"}"#,
+        r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"}]} null"#, r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"}]} {}"#, r#"{"vulnerabilities":[{"cveID":"CVE-2026-1"}]} not json"#];
+    let answers: Vec<&str> = answers.iter().map(String::as_str).collect();
+    for (bodies, answer) in [(answers.as_slice(), true), (none.as_slice(), false)] {
+        for body in bodies {
+            fs::write(&file, body).unwrap();
+            assert_eq!(jv::read_one_object(&file).and_then(kev_answer).is_some(), answer, "the core on {body:?}");
             let cli = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .args(["-c", &script, "answer-contract"]).arg(&file).status().unwrap();
             assert_eq!(cli.success(), answer, "the CLI on {body:?}");

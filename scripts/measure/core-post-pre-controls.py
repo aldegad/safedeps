@@ -85,7 +85,7 @@ def write_unapproved(path,home):
     for sub in ['osv','kev']:(home/'cache'/sub).mkdir(parents=True,exist_ok=True)
     key=hashlib.sha256(b'osv\nnpm\nfixture-unapproved\n1.0.0').hexdigest()
     (home/'cache/osv'/(key+'.json')).write_text('{"vulns":[]}\n')
-    (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[]}\n')
+    (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}\n')
 
 def build_copy(stem,edits):
     tree=run/(stem+'-source');tree.mkdir()

@@ -4,8 +4,9 @@
 # A provider answer that a writer could not finish, or that names no status of
 # the list in lib/providers/providers.sh, approves nothing: the result is
 # provider_unavailable, the exit is 4, advisory.log has a line, and --json has a
-# report. A cached OSV file that holds no answer is no cache: the query is asked
-# again, and a failed query is the same provider_unavailable. Nothing here may
+# report. A cached OSV file or a local KEV catalog that holds no answer is no
+# cache: it is asked for again, and a failed request is the same
+# provider_unavailable. Nothing here may
 # depend on what a status is called: every row asserts the whole answer, because
 # a jq compile error also exits 3 and 5.
 #
@@ -70,6 +71,7 @@ closures="${tmp_root}/closures.json"
 cat > "${closures}" <<'JSON'
 {
   "fixture-clean@1.0.0": [{"package":"fixture-clean","version":"1.0.0","direct":true}],
+  "fixture-kev@1.0.0": [{"package":"fixture-kev","version":"1.0.0","direct":true}],
   "fixture-parent@1.0.0": [{"package":"fixture-parent","version":"1.0.0","direct":true},{"package":"fixture-child","version":"1.0.0","direct":false}],
   "fixture-vuln@1.0.0": [{"package":"fixture-vuln","version":"1.0.0","direct":true},{"package":"fixture-child","version":"1.0.0","direct":false}],
   "fixture-vuln@1.0.1": [{"package":"fixture-vuln","version":"1.0.1","direct":true}],
@@ -105,7 +107,8 @@ done
 exec "${real_jq}" "\${args[@]}"
 STUB
 chmod +x "${stub_bin}/jq"
-# curl, answering an OSV query with STUB_OSV_BODY where that is set.
+# curl, answering an OSV query with STUB_OSV_BODY and a KEV download with
+# STUB_KEV_BODY where those are set.
 real_curl=$(command -v curl)
 cat > "${stub_bin}/curl" <<STUB
 #!/usr/bin/env bash
@@ -114,8 +117,13 @@ args=("\$@")
 for ((i = 0; i < \${#args[@]}; i++)); do
   [[ "\${args[i]}" != -o ]] || out="\${args[i + 1]}"
 done
-[[ -n "\${STUB_OSV_BODY+set}" && "\$*" == *"/osv/v1/"* ]] || exec "${real_curl}" "\$@"
-printf '%s' "\${STUB_OSV_BODY}" > "\${out}"
+if [[ -n "\${STUB_OSV_BODY+set}" && "\$*" == *"/osv/v1/"* ]]; then
+  printf '%s' "\${STUB_OSV_BODY}" > "\${out}"
+elif [[ -n "\${STUB_KEV_BODY+set}" && "\$*" == *"/kev.json"* ]]; then
+  printf '%s' "\${STUB_KEV_BODY}" > "\${out}"
+else
+  exec "${real_curl}" "\$@"
+fi
 printf '200'
 STUB
 chmod +x "${stub_bin}/curl"
@@ -221,16 +229,197 @@ row "non-npm: a jq error in the KEV overlay is not read as no KEV listing" write
 row "npm: a package of the closure with no answer is not read as clean" \
   writer_failed npm fixture-parent@1.0.0 "${writer_item}"$'\n''"package":"fixture-child"'
 
-damaged_kev() {
-  local ecosystem="$1" spec="$2"
-  fresh_home
+# The catalog rows. A local KEV catalog with no catalog in it is no cache, fresh
+# or stale: it is downloaded again, the download replaces the file, and with no
+# catalog to read the check fails closed. An empty file once read as no listing:
+# a package on the catalog came out as merely vulnerable, and a clean one was
+# approved with nothing behind that.
+kev_file() { printf '%s/cache/kev/known_exploited_vulnerabilities.json' "${home}"; }
+kev_catalog='{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}'
+plant_kev() {
+  local body="$1" age="${2:-fresh}"
   mkdir -p "${home}/cache/kev"
-  printf 'not json' > "${home}/cache/kev/known_exploited_vulnerabilities.json"
-  check_in "${ecosystem}" "${spec}"
+  if [[ "${body}" == unreadable ]]; then
+    printf '%s' "${kev_catalog}" > "$(kev_file)"
+    chmod 000 "$(kev_file)"
+  else
+    printf '%s' "${body}" > "$(kev_file)"
+  fi
+  [[ "${age}" == fresh ]] || touch -t 202601010000 "$(kev_file)"
+}
+kev_down=(SAFEDEPS_KEV_CATALOG_URL="${closed_port}")
+hard_blocked() {
+  [[ "${rc}" == 3 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "kev_hard_block" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+}
+passed_clean() {
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "clean" and .approved == true' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+kev_replaced() {
+  jq -e '.vulnerabilities[0].cveID == "CVE-2026-9999"' "$(kev_file)" >/dev/null 2>&1 || no "the file does not hold the catalog"
+}
+kev_asked_again() {
+  local age="$1"
+  [[ "${age}" != fresh ]] || grep -q 'WARN CISA KEV cache unreadable; asking again' "${home}/advisory.log" \
+    || no "advisory.log does not say the file was not read"
+}
+kev_listing_counts() {
+  local ecosystem="$1" body="$2" age="$3"
+  fresh_home
+  plant_kev "${body}" "${age}"
+  check_in "${ecosystem}" fixture-kev@1.0.0
+  hard_blocked
+  kev_replaced
+  kev_asked_again "${age}"
+}
+kev_clean_passes() {
+  local ecosystem="$1" body="$2" age="$3"
+  fresh_home
+  plant_kev "${body}" "${age}"
+  check_in "${ecosystem}" fixture-clean@1.0.0
+  passed_clean
+  kev_replaced
+  kev_asked_again "${age}"
+}
+kev_and_download_failed() {
+  local ecosystem="$1" body="$2" age="$3"
+  fresh_home
+  plant_kev "${body}" "${age}"
+  check_in "${ecosystem}" fixture-clean@1.0.0 "${kev_down[@]}"
+  unavailable
+  kev_asked_again "${age}"
+  grep -q 'WARN CISA KEV unavailable and no readable local catalog status=' "${home}/advisory.log" \
+    || no "advisory.log does not say no catalog could be read"
+  ! grep -q 'using stale local catalog' "${home}/advisory.log" || no "the file was used as a stale catalog"
+}
+for body in '' ' ' 'null' 'false' '[]' '1' '"x"' 'not json' '{}' '{}{}' \
+  '{"vulnerabilities":null}' '{"vulnerabilities":false}' '{"vulnerabilities":""}' '{"vulnerabilities":{}}' '{"vulnerabilities":[]}' \
+  '{"vulnerabilities":[1]}' '{"vulnerabilities":[{}]}' '{"vulnerabilities":[{"cveID":1}]}' '{"vulnerabilities":[{"cve_id":"CVE-2026-9999"}]}' \
+  '{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]} {}' unreadable; do
+  for ecosystem in npm pypi; do
+    row "${ecosystem}: a KEV catalog of '${body}' is downloaded again and a listing counts" kev_listing_counts "${ecosystem}" "${body}" fresh
+    row "${ecosystem}: a KEV catalog of '${body}' is replaced and a clean package still passes" kev_clean_passes "${ecosystem}" "${body}" fresh
+    row "${ecosystem}: a KEV catalog of '${body}' with CISA down approves nothing" kev_and_download_failed "${ecosystem}" "${body}" fresh
+    row "${ecosystem}: a stale KEV catalog of '${body}' is replaced" kev_clean_passes "${ecosystem}" "${body}" stale
+    row "${ecosystem}: a stale KEV catalog of '${body}' with CISA down approves nothing" kev_and_download_failed "${ecosystem}" "${body}" stale
+  done
+done
+
+kev_absent_and_down() {
+  fresh_home
+  check_in "$1" fixture-clean@1.0.0 "${kev_down[@]}"
+  unavailable
+  grep -q 'WARN CISA KEV unavailable and no readable local catalog status=' "${home}/advisory.log" \
+    || no "advisory.log does not say no catalog could be read"
+}
+kev_fresh_hit() {
+  local ecosystem="$1" spec="$2" answer="$3"
+  fresh_home
+  plant_kev "${kev_catalog}"
+  check_in "${ecosystem}" "${spec}" "${kev_down[@]}"
+  "${answer}"
+}
+kev_stale_answers() {
+  local ecosystem="$1" spec="$2" answer="$3"
+  fresh_home
+  plant_kev "${kev_catalog}" stale
+  check_in "${ecosystem}" "${spec}" "${kev_down[@]}"
+  "${answer}"
+  grep -q 'WARN CISA KEV refresh failed; using stale local catalog status=' "${home}/advisory.log" \
+    || no "advisory.log does not say the catalog is stale"
+}
+kev_is_a_directory() {
+  fresh_home
+  mkdir -p "$(kev_file)"
+  check_in "$1" fixture-clean@1.0.0
   unavailable
 }
-row "npm: a KEV catalog that does not parse approves nothing" damaged_kev npm fixture-clean@1.0.0
-row "non-npm: a KEV catalog that does not parse approves nothing" damaged_kev pypi fixture-clean@1.0.0
+for ecosystem in npm pypi; do
+  row "${ecosystem}: no KEV catalog with CISA down approves nothing" kev_absent_and_down "${ecosystem}"
+  row "${ecosystem}: a fresh KEV catalog is a hit with CISA down" kev_fresh_hit "${ecosystem}" fixture-clean@1.0.0 passed_clean
+  row "${ecosystem}: a listing in a fresh KEV catalog counts with CISA down" kev_fresh_hit "${ecosystem}" fixture-kev@1.0.0 hard_blocked
+  row "${ecosystem}: a stale KEV catalog answers with CISA down, and says so" kev_stale_answers "${ecosystem}" fixture-clean@1.0.0 passed_clean
+  row "${ecosystem}: a listing in a stale KEV catalog counts with CISA down" kev_stale_answers "${ecosystem}" fixture-kev@1.0.0 hard_blocked
+  row "${ecosystem}: a directory where the KEV catalog goes approves nothing" kev_is_a_directory "${ecosystem}"
+done
+
+# A download that returned something other than a catalog is a failed download,
+# by the rule that reads the file: what is stored and what is read are one thing.
+kev_live_no_answer() {
+  local ecosystem="$1" body="$2"
+  fresh_home
+  check_in "${ecosystem}" fixture-clean@1.0.0 PATH="${stub_bin}:${PATH}" STUB_KEV_BODY="${body}"
+  unavailable
+  [[ ! -e "$(kev_file)" ]] || no "the download was stored"
+}
+kev_live_no_answer_keeps_stale() {
+  local ecosystem="$1" body="$2"
+  fresh_home
+  plant_kev "${kev_catalog}" stale
+  check_in "${ecosystem}" fixture-kev@1.0.0 PATH="${stub_bin}:${PATH}" STUB_KEV_BODY="${body}"
+  hard_blocked
+  kev_replaced
+}
+for body in '' 'null' '{}' '{"vulnerabilities":[]}' '{"vulnerabilities":[{}]}' '{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]} {}'; do
+  for ecosystem in npm pypi; do
+    row "${ecosystem}: a KEV download of '${body}' approves nothing" kev_live_no_answer "${ecosystem}" "${body}"
+    row "${ecosystem}: a KEV download of '${body}' leaves a stale catalog in place" kev_live_no_answer_keeps_stale "${ecosystem}" "${body}"
+  done
+done
+
+# The reader itself, for what the rows above cannot reach. With no curl on PATH
+# there is no jq or node either, so the row takes the check for curl away.
+kev_reader_rc() {
+  local state="$1" age="${2:-fresh}"
+  fresh_home
+  [[ "${state}" == absent ]] || plant_kev "${state}" "${age}"
+  rc=0
+  env SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_require_http_client() { return 1; }; if safedeps_kev_refresh_catalog; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
+}
+kev_no_curl() {
+  local want="$1" state="$2" age="${3:-fresh}"
+  kev_reader_rc "${state}" "${age}"
+  [[ "${rc}" == "${want}" ]] || no "exit ${rc}, not ${want}"
+}
+row "with no curl a fresh KEV catalog is read" kev_no_curl 0 "${kev_catalog}"
+row "with no curl a stale KEV catalog is read" kev_no_curl 0 "${kev_catalog}" stale
+row "with no curl an empty KEV catalog is no catalog" kev_no_curl 1 ''
+row "with no curl a stale empty KEV catalog is no catalog" kev_no_curl 1 '' stale
+row "with no curl and no KEV catalog there is none to read" kev_no_curl 1 absent
+
+kev_failure_reaches_caller() {
+  fresh_home
+  rc=0
+  env SAFEDEPS_HOME="${home}" "${kev_down[@]}" bash -c 'source lib/providers/providers.sh; if "$@"; then exit 0; fi; exit 1' writer "$@" >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" != 0 ]] || no "the writer returned 0"
+  grep -q 'ERROR KEV overlay failed' "${home}/advisory.log" || no "advisory.log has no ERROR line"
+}
+row "no KEV catalog to read reaches the caller of the single query" kev_failure_reaches_caller safedeps_providers_query pypi fixture-clean 1.0.0
+row "no KEV catalog to read reaches the caller of the batch query" kev_failure_reaches_caller safedeps_providers_query_batch npm "${one_package}"
+
+kev_said_once() {
+  fresh_home
+  plant_kev "${kev_catalog}" stale
+  check_in npm fixture-parent@1.0.0 "${kev_down[@]}"
+  passed_clean
+  [[ "$(grep -c 'using stale local catalog' "${home}/advisory.log")" == 1 ]] || no "the stale catalog is not said once for two packages"
+}
+row "npm: a closure reads the KEV catalog once, and says it is stale once" kev_said_once
+
+kev_recheck_counts_nothing() {
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  : > "$(kev_file)"
+  rc=0
+  json=$(env "${kev_down[@]}" SAFEDEPS_HOME="${home}" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 0 and .revoked == []' <<< "${json}" >/dev/null || no "the report: ${json}"
+  [[ -n "$(find "${home}/approved-specs" -name '*.json' -type f)" ]] || no "the entry is gone"
+}
+row "re-check with no KEV catalog to read counts nothing clean and revokes nothing" kev_recheck_counts_nothing
 
 # The cache rows. A fresh cache file with no OSV answer in it is no cache,
 # whatever it holds: the query is asked again, its answer replaces the file, and

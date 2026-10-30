@@ -50,7 +50,7 @@ def main():
         # Native post generates the INFO channel from these cache hits.
         (state / "cache/osv").mkdir(parents=True)
         (state / "cache/kev").mkdir()
-        (state / "cache/kev/known_exploited_vulnerabilities.json").write_text('{"vulnerabilities":[]}')
+        (state / "cache/kev/known_exploited_vulnerabilities.json").write_text('{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}')
         packages = {}
         for index in range(40):
             name = f"retention-fixture-{index}"

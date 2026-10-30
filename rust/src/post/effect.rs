@@ -1,13 +1,14 @@
 //! One closure over npm's two records, one ledger index, and one OSV batch.
-use super::{closure, jv, providers::{Providers, Status}, report::cat, sh, snapshot::Store, trace};
+use super::{closure, jv, providers::{Providers, Status, Unanswered}, report::cat, sh, snapshot::Store, trace};
 use crate::{json::Value, ledger, os, state};
 use std::io::Write;
 
 /// What an install kept under `SAFEDEPS_ACCEPT_RISK` accepted: the problems
 /// as the gate states them, and each package with the reason it was named.
 /// Only a package the ledger does not approve and a package OSV reports
-/// vulnerable can be here. A KEV listing, a closure that cannot be read and
-/// a check that cannot run are never accepted: they stay reasons.
+/// vulnerable can be here. A KEV listing, a closure that cannot be read, a KEV
+/// catalog that cannot be read and a check that cannot run are never accepted:
+/// they stay reasons.
 #[derive(Default)]
 pub struct Accepted { pub problems: Vec<Vec<u8>>, pub packages: Vec<Value> }
 
@@ -76,8 +77,10 @@ pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mu
             None => reasons.push(problem),
         }
     }
-    let Ok(results) = Providers::new(&store.home).batch(&all) else {
-        reasons.push(b"npm closure OSV batch verification failed; fail-closed".to_vec()); return
+    let results = match Providers::new(&store.home).batch(&all) {
+        Ok(results) => results,
+        Err(Unanswered::Osv) => { reasons.push(b"npm closure OSV batch verification failed; fail-closed".to_vec()); return }
+        Err(Unanswered::Kev) => { reasons.push(b"npm closure KEV catalog could not be read; fail-closed".to_vec()); return }
     };
     for (status, label) in [(Status::HardBlock, "KEV-blocked"), (Status::Vulnerable, "vulnerable")] {
         let found: Vec<_> = results.iter().filter(|(_,_,s,_)| *s == status).collect();

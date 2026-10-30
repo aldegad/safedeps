@@ -62,7 +62,7 @@ class Provider(BaseHTTPRequestHandler):
         self.send_response(200);self.end_headers();self.wfile.write(data)
     def do_GET(self):
         requests.append(dict(path=self.path))
-        self.send_response(200);self.end_headers();self.wfile.write(b'{"vulnerabilities":[]}')
+        self.send_response(200);self.end_headers();self.wfile.write(b'{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}')
 
 server=HTTPServer(('127.0.0.1',0),Provider)
 thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
@@ -89,7 +89,7 @@ def seed(d,n,l):
         for i in range(n):
             key=hashlib.sha256(('osv\nnpm\n%s\n1.0.0'%spec(i)).encode()).hexdigest()
             write_json(cache/'osv'/(key+'.json'),dict(vulns=[]))
-        write_json(cache/'kev/known_exploited_vulnerabilities.json',dict(vulnerabilities=[]))
+        write_json(cache/'kev/known_exploited_vulnerabilities.json',dict(vulnerabilities=[dict(cveID='CVE-2026-9999')]))
     if a.rotate_bytes:
         line=b'[2001-02-03T04:05:06Z] INFO synthetic rotation fixture\n'
         (home/'advisory.log').write_bytes(line*(a.rotate_bytes//len(line)+1))

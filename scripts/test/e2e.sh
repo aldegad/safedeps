@@ -805,6 +805,116 @@ else
 fi
 pass "the effect gate reads a cached file with no OSV answer as a miss"
 
+# The effect gate reads the KEV catalog by the rule the CLI reads it by: a file
+# that holds no catalog is a miss, it is downloaded again, and with no catalog to
+# read the install is rolled back. An empty file once read as no listing here: an
+# install stayed with no report and no line in the record, and a listed package
+# came out as merely vulnerable, which SAFEDEPS_ACCEPT_RISK can keep.
+kev_catalog_body='{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}'
+kev_catalog_install() {
+  local name="$1" body="$2" url="$3" listed="${4:-}" age="${5:-fresh}"
+  local dir="${tmp_root}/kev-catalog-${name}"
+  mkdir -p "${dir}/project"
+  printf '{"dependencies":{}}\n' > "${dir}/project/package.json"
+  export SAFEDEPS_HOME="${dir}/home" SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=86400
+  ./bin/safedeps --json check npm fixture-parent@1.0.0 >/dev/null
+  kev_catalog_project="${dir}/project"
+  kev_catalog_path="${SAFEDEPS_HOME}/cache/kev/known_exploited_vulnerabilities.json"
+  [[ -s "${kev_catalog_path}" ]] || fail "the check left the catalog the row replaces"
+  kev_catalog_pre=$(
+    pre_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${kev_catalog_project}","turn_id":"turn-e2e","model":"codex-test"}
+EOF
+  )
+  hook_response_parse "${kev_catalog_pre}" quiet || fail "${name}: the pre hook allows the approved spec"
+  cat > "${kev_catalog_project}/package-lock.json" <<'EOF'
+{
+  "name": "kev-catalog-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"}
+  }
+}
+EOF
+  case "${body}" in
+    absent) rm -f "${kev_catalog_path}" ;;
+    unreadable) chmod 000 "${kev_catalog_path}" ;;
+    *) printf '%s' "${body}" > "${kev_catalog_path}" ;;
+  esac
+  [[ "${age}" == fresh || "${body}" == absent ]] || touch -t 202601010000 "${kev_catalog_path}"
+  if [[ -n "${listed}" ]]; then
+    printf '%s\n' '{"vulnerable":[],"kev":["fixture-parent@1.0.0"]}' > "${state_file}"
+    rm -f "${SAFEDEPS_HOME}"/cache/osv/*.json
+  fi
+  kev_catalog_post=$(
+    SAFEDEPS_KEV_CATALOG_URL="${url}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${kev_catalog_project}"}
+EOF
+  )
+  printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+}
+kev_catalog_rolled_back() {
+  ! grep -q 'fixture-parent' "${kev_catalog_project}/package-lock.json" 2>/dev/null \
+    || fail "$1: the install is rolled back"
+}
+kev_catalog_homes=("${SAFEDEPS_HOME}" "${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-}")
+kev_catalog_url="${SAFEDEPS_KEV_CATALOG_URL}"
+kev_body_number=0
+for body in '' 'null' '{}' '{"vulnerabilities":false}' '{"vulnerabilities":[]}' '{"vulnerabilities":[{}]}' 'not json' unreadable; do
+  kev_body_number=$((kev_body_number + 1))
+  kev_row="listed-${kev_body_number}"
+  kev_catalog_install "${kev_row}" "${body}" "${kev_catalog_url}" listed
+  grep -q 'npm closure contains KEV-blocked package(s): fixture-parent@1.0.0' < "${kev_catalog_post}" \
+    || fail "a KEV catalog of '${body}' is downloaded again and a listing counts: $(cat "${kev_catalog_post}")"
+  kev_catalog_rolled_back "${kev_row}"
+  jq -e '.vulnerabilities | length > 0' "${kev_catalog_path}" >/dev/null || fail "${kev_row}: the download replaces the file"
+  grep -q 'WARN CISA KEV cache unreadable; asking again' "${SAFEDEPS_HOME}/advisory.log" \
+    || fail "${kev_row}: the record says the file was not read"
+  kev_row="down-${kev_body_number}"
+  kev_catalog_install "${kev_row}" "${body}" 'http://127.0.0.1:9/'
+  grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${kev_catalog_post}" \
+    || fail "a KEV catalog of '${body}' with CISA down fails closed: $(cat "${kev_catalog_post}")"
+  kev_catalog_rolled_back "${kev_row}"
+  grep -q 'WARN CISA KEV unavailable and no readable local catalog status=' "${SAFEDEPS_HOME}/advisory.log" \
+    || fail "${kev_row}: the record says no catalog could be read"
+  grep -q 'ERROR CISA KEV catalog unavailable; fail-closed' "${SAFEDEPS_HOME}/advisory.log" \
+    || fail "${kev_row}: the record says the gate failed closed"
+  kev_row="stale-${kev_body_number}"
+  kev_catalog_install "${kev_row}" "${body}" 'http://127.0.0.1:9/' '' stale
+  grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${kev_catalog_post}" \
+    || fail "a stale KEV catalog of '${body}' with CISA down fails closed: $(cat "${kev_catalog_post}")"
+  kev_catalog_rolled_back "${kev_row}"
+  kev_row="clean-${kev_body_number}"
+  kev_catalog_install "${kev_row}" "${body}" "${kev_catalog_url}"
+  hook_response_parse "${kev_catalog_post}" quiet \
+    || fail "a KEV catalog of '${body}' is replaced and a clean install stays: $(cat "${kev_catalog_post}")"
+  grep -q 'fixture-parent' "${kev_catalog_project}/package-lock.json" || fail "${kev_row}: a clean install stays"
+  jq -e '.vulnerabilities | length > 0' "${kev_catalog_path}" >/dev/null || fail "${kev_row}: the download replaces the file"
+done
+kev_catalog_install absent absent 'http://127.0.0.1:9/'
+grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${kev_catalog_post}" \
+  || fail "no KEV catalog with CISA down fails closed: $(cat "${kev_catalog_post}")"
+kev_catalog_rolled_back absent
+kev_catalog_install hit "${kev_catalog_body}" 'http://127.0.0.1:9/'
+hook_response_parse "${kev_catalog_post}" quiet || fail "a KEV catalog stays a hit with CISA down: $(cat "${kev_catalog_post}")"
+kev_catalog_install stale-hit "${kev_catalog_body}" 'http://127.0.0.1:9/' '' stale
+hook_response_parse "${kev_catalog_post}" quiet || fail "a stale KEV catalog answers with CISA down: $(cat "${kev_catalog_post}")"
+grep -q 'WARN CISA KEV refresh failed; using stale local catalog status=' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the record says the catalog is stale"
+kev_catalog_install stale-listed "${kev_catalog_body}" 'http://127.0.0.1:9/' listed stale
+grep -q 'npm closure contains KEV-blocked package(s): fixture-parent@1.0.0' < "${kev_catalog_post}" \
+  || fail "a listing in a stale KEV catalog counts with CISA down: $(cat "${kev_catalog_post}")"
+kev_catalog_rolled_back stale-listed
+export SAFEDEPS_HOME="${kev_catalog_homes[0]}"
+if [[ -n "${kev_catalog_homes[1]}" ]]; then
+  export SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${kev_catalog_homes[1]}"
+else
+  unset SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS
+fi
+pass "the effect gate reads a KEV catalog with no catalog in it as a miss, and fails closed with none to read"
+
 inert_project="${tmp_root}/inert-project"
 mkdir -p "${inert_project}"
 printf '{"dependencies":{}}\n' > "${inert_project}/package.json"
@@ -1029,6 +1139,23 @@ grep -q 'it keeps an install only where every problem is an unapproved or vulner
 grep -q 'fixture-kev' "${tmp_root}/accept-kev/package-lock.json" && fail "the KEV-listed lockfile is restored"
 [[ "$(accept_entries)" == "${accept_before}" ]] || fail "a KEV rollback writes no accepted-risk entry"
 pass "SAFEDEPS_ACCEPT_RISK never keeps a KEV-listed package"
+
+# A KEV catalog that cannot be read is no risk a person accepted: nobody can say
+# what is listed, so the override keeps nothing, whatever else it could keep.
+accept_project "${tmp_root}/accept-no-catalog"
+accept_before=$(accept_entries)
+unread_pre=$(accept_payload accept-no-catalog "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci" "${tmp_root}/accept-no-catalog" | pre_hook)
+[[ "$(hook_response_read decision "${unread_pre}")" == allow ]] || fail "npm ci with the override runs"
+payload=$(accept_payload accept-no-catalog "$(hook_response_read required-rewrite "${unread_pre}")" "${tmp_root}/accept-no-catalog")
+accept_lock "${tmp_root}/accept-no-catalog" "${accept_extra}"
+: > "${SAFEDEPS_HOME}/cache/kev/known_exploited_vulnerabilities.json"
+unread_post=$(SAFEDEPS_KEV_CATALOG_URL='http://127.0.0.1:9/' PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+grep -q 'suspicious dependency change detected. A rollback ran.' < "${unread_post}" || fail "a KEV catalog that cannot be read rolls back under the override: $(cat "${unread_post}")"
+grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${unread_post}" || fail "the rollback says no catalog could be read"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${unread_post}" \
+  || fail "the rollback says the override does not cover a catalog that cannot be read"
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a rollback for no KEV catalog writes no accepted-risk entry"
+pass "SAFEDEPS_ACCEPT_RISK keeps nothing when the KEV catalog cannot be read"
 
 # On Codex the pre-guard cannot withhold install scripts, so the override does
 # not lift the ledger check for a spec; the post-install override still holds.
