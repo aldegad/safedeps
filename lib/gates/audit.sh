@@ -133,16 +133,27 @@ print_severities() {
 }
 
 # Emit the per-ecosystem verdict and return 0/1/2 from a compact severity-count
-# object ($2) for ecosystem $1.
+# object ($2) for ecosystem $1. No count is no verdict: the callers run under
+# `||`, where errexit is off, and a jq that failed here read as zero findings.
 verdict_from_counts() {
   local eco="$1" counts="$2" n
-  n="$(printf '%s' "$counts" | counts_block_n)"
-  if [ "${n:-0}" -gt 0 ]; then
+  if ! n="$(printf '%s' "$counts" | counts_block_n)" || ! [[ "$n" =~ ^[0-9]+$ ]]; then
+    note "could not read the ${eco} audit counts."
+    return 2
+  fi
+  if [ "$n" -gt 0 ]; then
     printf '%s' "$counts" | print_severities
     note "$eco: ${n} advisory(ies) at or above \"${AUDIT_LEVEL}\" — blocking. Run \`${eco} audit\` for the full report."
     return 1
   fi
   return 0
+}
+
+# A non-zero exit is how npm, pnpm and yarn say they found something, so it
+# cannot stop the run. One with no finding in the report is a run that failed,
+# whatever it printed first. $1 is the exit, $2 the compact severity counts.
+failed_with_no_finding() {
+  [ "$1" -ne 0 ] && ! printf '%s' "$2" | jq -e 'any(.[]; . != 0)' >/dev/null 2>&1
 }
 
 # --- per-ecosystem audits -----------------------------------------------------
@@ -151,9 +162,9 @@ verdict_from_counts() {
 # {info,low,moderate,high,critical[,total]}; an unreachable registry surfaces a
 # top-level {"error":...} (or no/invalid JSON) instead.
 audit_npm_like() {
-  local eco="$1" report counts
+  local eco="$1" report counts audit_rc=0
   command -v "$eco" >/dev/null 2>&1 || { note "$eco not found — cannot audit ${eco} lockfile."; return 2; }
-  report="$("$eco" audit --json 2>/dev/null || true)"
+  report="$("$eco" audit --json 2>/dev/null)" || audit_rc=$?
   if [ -z "$report" ] \
      || ! printf '%s' "$report" | jq -e . >/dev/null 2>&1 \
      || printf '%s' "$report" | jq -e 'has("error")' >/dev/null 2>&1 \
@@ -161,7 +172,10 @@ audit_npm_like() {
     note "could not reach the advisory database via ${eco} (offline or registry error)."
     return 2
   fi
-  counts="$(printf '%s' "$report" | jq -c '.metadata.vulnerabilities')"
+  if ! counts="$(printf '%s' "$report" | jq -c '.metadata.vulnerabilities')" || failed_with_no_finding "$audit_rc" "$counts"; then
+    note "could not reach the advisory database via ${eco} (offline or registry error)."
+    return 2
+  fi
   verdict_from_counts "$eco" "$counts"
 }
 
@@ -183,10 +197,11 @@ audit_yarn() {
 # carries .data.vulnerabilities as {info,low,moderate,high,critical}. No summary
 # line means the audit could not complete (offline / missing lockfile) → 2.
 audit_yarn_classic() {
-  local out summary counts
-  out="$(yarn audit --json 2>/dev/null || true)"
+  local out summary counts audit_rc=0
+  out="$(yarn audit --json 2>/dev/null)" || audit_rc=$?
   summary="$(printf '%s\n' "$out" | grep -F '"type":"auditSummary"' | tail -1)"
-  if [ -z "$summary" ] || ! counts="$(printf '%s' "$summary" | jq -ce '.data.vulnerabilities' 2>/dev/null)"; then
+  if [ -z "$summary" ] || ! counts="$(printf '%s' "$summary" | jq -ce '.data.vulnerabilities' 2>/dev/null)" \
+     || failed_with_no_finding "$audit_rc" "$counts"; then
     note 'could not produce a yarn audit verdict (offline or registry error).'
     return 2
   fi
@@ -199,10 +214,10 @@ audit_yarn_classic() {
 # non-zero exit (no advisory lines) → could-not-run (2), never a silent clean.
 # Severities are fail-closed (an unrecognized value counts as critical).
 audit_yarn_berry() {
-  local out rc adv counts
+  local out rc adv counts adv_rc=0
   out="$(yarn npm audit --all --recursive --json 2>/dev/null)"; rc=$?
-  adv="$(printf '%s' "$out" | jq -c 'select(type == "object" and (.children.Severity? != null))' 2>/dev/null || true)"
-  if [ "${rc}" -ne 0 ] && [ -z "${adv}" ]; then
+  adv="$(printf '%s' "$out" | jq -c 'select(type == "object" and (.children.Severity? != null))' 2>/dev/null)" || adv_rc=$?
+  if [ "${adv_rc}" -ne 0 ] || { [ "${rc}" -ne 0 ] && [ -z "${adv}" ]; }; then
     note 'could not produce a Yarn Berry npm audit verdict (offline or registry error).'
     return 2
   fi

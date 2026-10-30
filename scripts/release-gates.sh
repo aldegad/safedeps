@@ -211,14 +211,18 @@ else
 fi
 
 section "python"
-PYTHON_SURFACE="$(detect_python_surface || true)"
-if [ -z "$PYTHON_SURFACE" ]; then
+# A find that failed is no reading of "no surface", and what it printed first
+# may be missing the directory it could not read.
+if ! PYTHON_SURFACE="$(detect_python_surface)"; then
+  strict_or_warn python "could not read the Python dependency surface"
+elif [ -z "$PYTHON_SURFACE" ]; then
   pass python "no Python dependency surface detected"
 elif [ -n "${SECURITY_RELEASE_GATES_PYTHON_AUDIT_COMMAND:-}" ]; then
   run_cmd python "custom Python audit command" bash -lc "$SECURITY_RELEASE_GATES_PYTHON_AUDIT_COMMAND"
 elif command -v pip-audit >/dev/null 2>&1; then
-  REQUIREMENTS="$(detect_requirements_files || true)"
-  if [ -n "$REQUIREMENTS" ]; then
+  if ! REQUIREMENTS="$(detect_requirements_files)"; then
+    strict_or_warn python "could not read the requirements files"
+  elif [ -n "$REQUIREMENTS" ]; then
     while IFS= read -r requirements_file; do
       [ -n "$requirements_file" ] || continue
       run_cmd python "pip-audit $requirements_file" pip-audit -r "$requirements_file"
