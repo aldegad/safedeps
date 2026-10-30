@@ -627,7 +627,9 @@ pass "block classifications"
 # candidate loop counts both risky statuses of the batch, and a status it reads
 # under a name the writer does not use counts nothing: the candidate is then
 # approved and written to the ledger, KEV listing and all. The exit code alone
-# cannot tell this apart from a jq error (3), so the whole answer is read.
+# cannot tell this apart from a jq error (3), so the whole answer is read. It
+# lists the version asked about, which is the one left unpatched; the candidate
+# it set aside is not in it.
 kev_candidate_closure="${tmp_root}/closure-kev-candidate.json"
 cat > "${kev_candidate_closure}" <<'EOF'
 {
@@ -642,7 +644,8 @@ kev_candidate_status=$?
 set -e
 [[ "${kev_candidate_status}" -eq 2 ]] || fail "a patch candidate with KEV in its closure exits 2 (got ${kev_candidate_status})"
 jq -e '.result == "cve_unpatched" and .approved == false and (has("suggested_spec") | not)
-  and ([.closure_vulnerabilities[] | select(.package == "fixture-kev" and .result == "hard_block")] | length) == 1' \
+  and ([.closure_vulnerabilities[] | select(.package == "fixture-vuln" and .version == "1.0.0" and .result == "vulnerable")] | length) == 1
+  and ([.closure_vulnerabilities[] | select(.package == "fixture-kev")] | length) == 0' \
   <<< "${kev_candidate_json}" >/dev/null || fail "a patch candidate with KEV in its closure is reported unpatched: ${kev_candidate_json}"
 if find "${kev_candidate_home}/approved-specs" -name '*.json' -type f -print -quit 2>/dev/null | grep . >/dev/null; then
   fail "a patch candidate with KEV in its closure writes no approval"

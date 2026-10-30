@@ -40,16 +40,17 @@ SAFEDEPS_GHSA_API_URL="${SAFEDEPS_GHSA_API_URL:-${SAFEDEPS_DEFAULT_GHSA_API_URL}
 # every writer and reader of a status names it through these. They are plain
 # assignments, never `${VAR:-...}`, so the environment cannot rename a status,
 # and SAFEDEPS_STATUS_JQ is code in every jq program it is put in front of.
-# The core's post::providers::Status is held to the first three and to
-# status_of by provider_statuses_match_cli. `blocked` is the answer of a query
-# that failed closed; no reader branches on it.
+# The core's post::providers::Status is held to the first three, to status_of
+# and to status_known by provider_statuses_match_cli. `blocked` is the answer of
+# a query that failed closed; no reader branches on it, and status_known leaves
+# it out, so a reader that meets it reads what it reads for any other word.
 SAFEDEPS_STATUS_HARD_BLOCK="hard_block"
 SAFEDEPS_STATUS_VULNERABLE="vulnerable"
 SAFEDEPS_STATUS_CLEAN="clean"
 SAFEDEPS_STATUS_BLOCKED="blocked"
 # The same names in a jq program. status_of takes filters, not values, so
 # `vulns` is not evaluated when `exploited` holds, as in the `if` it replaces.
-SAFEDEPS_STATUS_JQ="def status_hard_block: \"${SAFEDEPS_STATUS_HARD_BLOCK}\"; def status_vulnerable: \"${SAFEDEPS_STATUS_VULNERABLE}\"; def status_clean: \"${SAFEDEPS_STATUS_CLEAN}\"; def status_blocked: \"${SAFEDEPS_STATUS_BLOCKED}\"; def status_of(exploited; vulns): if exploited then status_hard_block elif (vulns | length) > 0 then status_vulnerable else status_clean end; def status_risky: . == status_vulnerable or . == status_hard_block; "
+SAFEDEPS_STATUS_JQ="def status_hard_block: \"${SAFEDEPS_STATUS_HARD_BLOCK}\"; def status_vulnerable: \"${SAFEDEPS_STATUS_VULNERABLE}\"; def status_clean: \"${SAFEDEPS_STATUS_CLEAN}\"; def status_blocked: \"${SAFEDEPS_STATUS_BLOCKED}\"; def status_of(exploited; vulns): if exploited then status_hard_block elif (vulns | length) > 0 then status_vulnerable else status_clean end; def status_risky: . == status_vulnerable or . == status_hard_block; def status_known: . == status_hard_block or . == status_vulnerable or . == status_clean; "
 
 safedeps_providers_init() {
   umask 077
@@ -95,6 +96,11 @@ safedeps_announce_truth_sources() {
   fi
 }
 
+# The query functions below run inside `if !` and `$(...)`, where bash turns
+# errexit off, so a failed step does not stop them. Each step answers for
+# itself and a function's status is what its caller reads: a jq that failed on
+# the way used to leave an empty status, or no line at all for a package, and an
+# empty answer reads as nothing to report.
 safedeps_provider_log() {
   local level="$1"
   local message="$2"
@@ -337,7 +343,7 @@ safedeps_osv_query_batch() {
   local miss_items_file
   local payload_file
   local response_file
-  local results_file
+  local closure_rows_file
   local http_status
   local index=0
   local package_name
@@ -354,9 +360,14 @@ safedeps_osv_query_batch() {
   miss_items_file="${temp_dir}/misses.jsonl"
   payload_file="${temp_dir}/payload.json"
   response_file="${temp_dir}/response.json"
-  results_file="${temp_dir}/results.json"
+  closure_rows_file="${temp_dir}/closure.tsv"
   : > "${all_items_file}"
   : > "${miss_items_file}"
+
+  if ! jq -r '.[] | [.package, (.version | tostring), ((.direct // false) | tostring)] | @tsv' "${closure_file}" > "${closure_rows_file}"; then
+    rm -rf "${temp_dir}"
+    return 1
+  fi
 
   while IFS=$'\t' read -r package_name version direct; do
     [[ -n "${package_name}" && -n "${version}" ]] || continue
@@ -367,26 +378,31 @@ safedeps_osv_query_batch() {
 
     if safedeps_cache_is_fresh "${cache_path}"; then
       safedeps_provider_log "INFO" "OSV batch cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-      jq -cn \
+      if ! jq -cn \
         --argjson index "${index}" \
         --arg ecosystem "${ecosystem}" \
         --arg package "${package_name}" \
         --arg version "${version}" \
         --argjson direct "${direct}" \
         --slurpfile osv "${cache_path}" \
-        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:($osv[0] // {vulns:[]})}' >> "${all_items_file}"
-    else
-      jq -cn \
+        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:($osv[0] // {vulns:[]})}' >> "${all_items_file}"; then
+        safedeps_provider_log "ERROR" "OSV cache unreadable ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
+        rm -rf "${temp_dir}"
+        return 1
+      fi
+    elif ! jq -cn \
         --argjson index "${index}" \
         --arg ecosystem "${ecosystem}" \
         --arg package "${package_name}" \
         --arg version "${version}" \
         --argjson direct "${direct}" \
         --arg cache_path "${cache_path}" \
-        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, cache_path:$cache_path}' >> "${miss_items_file}"
+        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, cache_path:$cache_path}' >> "${miss_items_file}"; then
+      rm -rf "${temp_dir}"
+      return 1
     fi
     index=$((index + 1))
-  done < <(jq -r '.[] | [.package, (.version | tostring), ((.direct // false) | tostring)] | @tsv' "${closure_file}")
+  done < "${closure_rows_file}"
 
   if [[ -s "${miss_items_file}" ]]; then
     safedeps_require_http_client || {
@@ -443,17 +459,20 @@ safedeps_osv_query_batch() {
         rm -rf "${temp_dir}"
         return 1
       fi
-      mv -f "${response_item_file}" "${cache_path}"
+      if ! mv -f "${response_item_file}" "${cache_path}" || ! jq -cn --argjson miss "${miss_item}" --slurpfile osv "${cache_path}" \
+        '$miss | del(.cache_path) | . + {osv: ($osv[0] // {vulns: []})}' >> "${all_items_file}"; then
+        rm -rf "${temp_dir}"
+        return 1
+      fi
       safedeps_provider_log "INFO" "OSV batch live query ok ecosystem=${osv_ecosystem} package=$(jq -r '.package' <<< "${miss_item}") version=$(jq -r '.version' <<< "${miss_item}")"
-      jq -cn --argjson miss "${miss_item}" --slurpfile osv "${cache_path}" \
-        '$miss | del(.cache_path) | . + {osv: ($osv[0] // {vulns: []})}' >> "${all_items_file}"
       miss_i=$((miss_i + 1))
     done < "${miss_items_file}"
   fi
 
-  jq -s 'sort_by(.index)' "${all_items_file}" > "${results_file}"
-  cat "${results_file}"
+  local rc=0
+  jq -s 'sort_by(.index)' "${all_items_file}" || rc=1
   rm -rf "${temp_dir}"
+  return "${rc}"
 }
 
 safedeps_extract_cves_from_osv() {
@@ -523,12 +542,12 @@ safedeps_kev_overlay() {
   local status="ok"
   local warning=""
 
-  cve_array=$(safedeps_extract_cves_from_osv "${osv_json}" | jq -R . | jq -s .)
+  cve_array=$(safedeps_extract_cves_from_osv "${osv_json}" | jq -R . | jq -s .) || return 1
 
   if ! catalog_path=$(safedeps_kev_refresh_catalog); then
     jq -cn --arg queried_at "${queried_at}" --argjson cves "${cve_array}" \
       '{queried_at: $queried_at, status: "unavailable", warning: "CISA KEV catalog unavailable", cves_checked: $cves, exploited: false, matches: []}'
-    return 0
+    return
   fi
 
   if ! safedeps_cache_is_fresh "${catalog_path}"; then
@@ -693,9 +712,14 @@ safedeps_providers_query() {
     return 1
   fi
 
-  safedeps_kev_overlay "${osv_file}" "${queried_at}" > "${kev_file}"
+  if ! safedeps_kev_overlay "${osv_file}" "${queried_at}" > "${kev_file}"; then
+    safedeps_provider_log "ERROR" "KEV overlay failed ecosystem=${ecosystem} package=${package_name} version=${version}"
+    rm -rf "${temp_dir}"
+    return 1
+  fi
   safedeps_ghsa_query "${ecosystem}" "${package_name}" "${queried_at}" > "${ghsa_file}"
 
+  local rc=0
   jq -cn \
     --arg ecosystem "${ecosystem}" \
     --arg package "${package_name}" \
@@ -721,8 +745,9 @@ safedeps_providers_query() {
             kev: {status: ($kev_result.status // "ok"), overlay: true},
             ghsa: {status: ($ghsa_result.status // "ok"), enrichment: true}
           }
-        }'
+        }' || rc=1
   rm -rf "${temp_dir}"
+  return "${rc}"
 }
 
 safedeps_providers_query_batch() {
@@ -731,16 +756,19 @@ safedeps_providers_query_batch() {
   local queried_at
   local temp_dir
   local osv_batch_file
+  local osv_items_file
   local results_file
 
   safedeps_require_json_tools || return 1
   queried_at=$(safedeps_now_iso)
   temp_dir=$(safedeps_provider_mktemp_dir) || return 1
   osv_batch_file="${temp_dir}/osv-batch.json"
+  osv_items_file="${temp_dir}/osv-items.jsonl"
   results_file="${temp_dir}/results.jsonl"
   : > "${results_file}"
 
-  if ! safedeps_osv_query_batch "${ecosystem}" "${closure_file}" > "${osv_batch_file}"; then
+  if ! safedeps_osv_query_batch "${ecosystem}" "${closure_file}" > "${osv_batch_file}" \
+    || ! jq -c '.[]' "${osv_batch_file}" > "${osv_items_file}"; then
     rm -rf "${temp_dir}"
     return 1
   fi
@@ -750,10 +778,10 @@ safedeps_providers_query_batch() {
     local kev_json
     local status
     osv_file="${temp_dir}/osv-item.json"
-    jq -c '.osv' <<< "${item}" > "${osv_file}"
-    kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}")
-    status=$(jq -r --argjson kev "${kev_json}" "${SAFEDEPS_STATUS_JQ}"'status_of($kev.exploited; .osv.vulns // [])' <<< "${item}")
-    jq -cn \
+    if ! jq -c '.osv' <<< "${item}" > "${osv_file}" \
+      || ! kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}") \
+      || ! status=$(jq -r --argjson kev "${kev_json}" "${SAFEDEPS_STATUS_JQ}"'status_of($kev.exploited; .osv.vulns // [])' <<< "${item}") \
+      || ! jq -cn \
       --argjson item "${item}" \
       --arg queried_at "${queried_at}" \
       --arg status "${status}" \
@@ -773,11 +801,16 @@ safedeps_providers_query_batch() {
           kev: {status: ($kev.status // "ok"), overlay: true},
           ghsa: {status: "skipped", enrichment: true, reason: "closure batch omits GHSA enrichment"}
         }
-      }' >> "${results_file}"
-  done < <(jq -c '.[]' "${osv_batch_file}")
+      }' >> "${results_file}"; then
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+  done < "${osv_items_file}"
 
-  jq -s 'sort_by(.index)' "${results_file}"
+  local rc=0
+  jq -s 'sort_by(.index)' "${results_file}" || rc=1
   rm -rf "${temp_dir}"
+  return "${rc}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

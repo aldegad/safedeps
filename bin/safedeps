@@ -292,6 +292,47 @@ sf_check_json() {
     "${SAFEDEPS_STATUS_JQ}${SAFEDEPS_NPM_SOURCE_JQ}"'def install_hint($v): "install with " + $package + "@" + $v; '"(${base}) + {command:\"check\", ecosystem:\$ecosystem, package:\$package, input_range:\$range} + (${head}) + {result:\$result} + (${tail})" "$@"
 }
 
+# What a check says when a provider gave no answer, or an answer with no status
+# of the list: nothing is approved, and it is a result of its own. The caller
+# removes its files and returns 4.
+#   sf_check_unavailable ECOSYSTEM PACKAGE RANGE VERSION REASON [CANDIDATE]
+# CANDIDATE is the patch candidate whose answer it was, where there was one.
+SF_UNAVAILABLE_PRIMARY="OSV primary unavailable or unreadable; no fresh cache"
+SF_UNAVAILABLE_BATCH="OSV batch primary unavailable or unreadable; no fresh cache for full closure"
+sf_check_unavailable() {
+  local ecosystem="$1" package="$2" range="$3" version="$4" reason="$5" candidate="${6:-}"
+
+  sf_err "${reason} — fail-closed"
+  sf_advisory_log "check fail-closed ecosystem=${ecosystem} package=${package} version=${candidate:-${version}}"
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    sf_check_json "${SAFEDEPS_CHECK_PROVIDER_UNAVAILABLE}" "${ecosystem}" "${package}" "${range}" '{}' \
+      '{resolved_version:$version} + (if $candidate == "" then {} else {suggested_spec:$candidate} end)' \
+      '{approved:false, error:$reason}' \
+      -n --arg version "${version}" --arg candidate "${candidate}" --arg reason "${reason}"
+  fi
+}
+
+# The same for an approval the ledger would not take: every approval a report
+# states is one the hook will find. The caller removes its files and returns 4.
+sf_check_not_written() {
+  local ecosystem="$1" package="$2" range="$3" version="$4"
+
+  sf_err "${package}@${version} cleared, but the ledger could not be written — not approved"
+  sf_advisory_log "check fail-closed ledger-write ecosystem=${ecosystem} package=${package} version=${version}"
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${package}" "${range}" '{}' '{resolved_version:$version}' \
+      '{approved:false, error:"ledger_write_failed"}' \
+      -n --arg version "${version}"
+  fi
+}
+
+# The status of one provider answer, or nothing when the answer is not one value
+# naming a status of the list. An unknown word and an empty one are the same
+# nothing, so a caller's test for a status is its whole test.
+sf_provider_status() {
+  jq -rs "${SAFEDEPS_STATUS_JQ}"'if length == 1 then .[0].status | select(status_known) else empty end' <<< "$1" 2>/dev/null || true
+}
+
 sf_closure_temp_file() {
   local tmp_dir="${TMPDIR:-/tmp}"
 
@@ -323,7 +364,12 @@ sf_npm_batch_check_closure() {
   if ! safedeps_providers_query_batch "npm" "${closure_file}" > "${batch_file}"; then
     return 1
   fi
-  jq -e 'type == "array"' "${batch_file}" >/dev/null
+  # One answer per package of the closure, each a status of the list. Everything
+  # after this counts what is bad, so a package that is missing here, or under a
+  # word no count looks for, would read as clean.
+  jq -e --slurpfile closure "${closure_file}" "${SAFEDEPS_STATUS_JQ}"'
+    type == "array" and length == ($closure[0] | length) and all(.[]; .status | status_known)
+  ' "${batch_file}" >/dev/null 2>&1
 }
 
 sf_npm_transitive_file_from_closure() {
@@ -420,6 +466,7 @@ sf_cmd_check_npm_full_closure() {
   evidence_file=$(sf_mktemp_evidence)
   transitive_file=$(sf_closure_temp_file)
   source_file=$(sf_mktemp_evidence)
+  local check_files=("${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}")
 
   sf_spinner_start "resolving npm closure (${pkg}@${version})"
   if ! sf_npm_closure_for_spec "${pkg}" "${version}" "${closure_file}" "${source_file}"; then
@@ -428,7 +475,7 @@ sf_cmd_check_npm_full_closure() {
     if [[ -s "${source_file}" ]]; then
       closure_source_json=$(cat "${source_file}")
     fi
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+    rm -f "${check_files[@]}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
         '{approved:false, error:(if ($closure_source | source_resolution_status?) then ($closure_source | source_resolution_status) else "npm_closure_resolution_failed" end), closure_source:$closure_source}' \
@@ -441,14 +488,8 @@ sf_cmd_check_npm_full_closure() {
   sf_spinner_start "batch-checking closure for advisories (OSV / KEV)"
   if ! sf_npm_batch_check_closure "${closure_file}" "${batch_file}"; then
     sf_spinner_stop
-    sf_err "no OSV batch response — fail-closed (closure cache miss + live query failed)"
-    sf_advisory_log "check fail-closed npm-closure package=${pkg} version=${version}"
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
-    if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-      sf_check_json "${SAFEDEPS_CHECK_PROVIDER_UNAVAILABLE}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
-        '{approved:false, error:"OSV batch primary unavailable; no fresh cache for full closure"}' \
-        -n --arg version "${version}"
-    fi
+    rm -f "${check_files[@]}"
+    sf_check_unavailable "${ecosystem}" "${pkg}" "${range}" "${version}" "${SF_UNAVAILABLE_BATCH}"
     return 4
   fi
   sf_spinner_stop
@@ -467,7 +508,7 @@ sf_cmd_check_npm_full_closure() {
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       sf_npm_emit_closure_block_json "${SAFEDEPS_CHECK_KEV_HARD_BLOCK}" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}" "${closure_file}" "${source_file}"
     fi
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+    rm -f "${check_files[@]}"
     return 3
   fi
 
@@ -476,39 +517,59 @@ sf_cmd_check_npm_full_closure() {
     if [[ "${direct_status}" == "${SAFEDEPS_STATUS_VULNERABLE}" ]]; then
       local direct_json
       local direct_evidence
+      local candidate_closure
+      local candidate_batch
+      local candidate_source
       local patched_versions=()
       local patched_version
       direct_evidence=$(sf_mktemp_evidence)
-      if safedeps_providers_query "${ecosystem}" "${pkg}" "${version}" > "${direct_evidence}"; then
-        while IFS= read -r patched_version; do
-          [[ -z "${patched_version}" ]] && continue
-          patched_versions+=("${patched_version}")
-        done < <(sf_extract_patched_versions "${direct_evidence}" "${version}" || true)
+      # A candidate is judged in files of its own. What is reported when none
+      # is approved is the requested version, so its closure and its answer stay
+      # as they were read.
+      candidate_closure=$(sf_closure_temp_file)
+      candidate_batch=$(sf_closure_temp_file)
+      candidate_source=$(sf_mktemp_evidence)
+      check_files+=("${direct_evidence}" "${candidate_closure}" "${candidate_batch}" "${candidate_source}")
+      if ! direct_json=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${version}") \
+        || [[ -z "$(sf_provider_status "${direct_json}")" ]]; then
+        rm -f "${check_files[@]}"
+        sf_check_unavailable "${ecosystem}" "${pkg}" "${range}" "${version}" "${SF_UNAVAILABLE_PRIMARY}"
+        return 4
       fi
+      printf '%s' "${direct_json}" > "${direct_evidence}"
+      while IFS= read -r patched_version; do
+        [[ -z "${patched_version}" ]] && continue
+        patched_versions+=("${patched_version}")
+      done < <(sf_extract_patched_versions "${direct_evidence}" "${version}" || true)
 
       for patched_version in "${patched_versions[@]+${patched_versions[@]}}"; do
         sf_warn "${pkg}@${version} direct vulnerable — re-checking closure for candidate ${patched_version}."
-        if ! sf_npm_closure_for_spec "${pkg}" "${patched_version}" "${closure_file}" "${source_file}"; then
+        if ! sf_npm_closure_for_spec "${pkg}" "${patched_version}" "${candidate_closure}" "${candidate_source}"; then
           continue
         fi
-        if ! sf_npm_batch_check_closure "${closure_file}" "${batch_file}"; then
-          rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+        if ! sf_npm_batch_check_closure "${candidate_closure}" "${candidate_batch}"; then
+          rm -f "${check_files[@]}"
+          sf_check_unavailable "${ecosystem}" "${pkg}" "${range}" "${version}" "${SF_UNAVAILABLE_BATCH}" "${patched_version}"
           return 4
         fi
-        vulnerable_count=$(jq "${SAFEDEPS_STATUS_JQ}"'[.[] | select(.status | status_risky)] | length' "${batch_file}")
+        vulnerable_count=$(jq "${SAFEDEPS_STATUS_JQ}"'[.[] | select(.status | status_risky)] | length' "${candidate_batch}")
         if [[ "${vulnerable_count}" -ne 0 ]]; then
           continue
         fi
 
-        sf_npm_transitive_file_from_closure "${closure_file}" "${pkg}" "${patched_version}" "${transitive_file}"
-        if safedeps_npm_source_is_deny_only "${source_file}"; then
+        sf_npm_transitive_file_from_closure "${candidate_closure}" "${pkg}" "${patched_version}" "${transitive_file}"
+        if safedeps_npm_source_is_deny_only "${candidate_source}"; then
           continue
         fi
-        sf_npm_evidence_file "${batch_file}" "${closure_file}" "${source_file}" "${evidence_file}"
+        sf_npm_evidence_file "${candidate_batch}" "${candidate_closure}" "${candidate_source}" "${evidence_file}"
         local spec_json
         local project_context_arg=""
-        if safedeps_context_kind_scopes "$(jq -r '.type' "${source_file}")"; then project_context_arg="${source_file}"; fi
-        spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${patched_version}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
+        if safedeps_context_kind_scopes "$(jq -r '.type' "${candidate_source}")"; then project_context_arg="${candidate_source}"; fi
+        if ! spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${patched_version}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}"); then
+          rm -f "${check_files[@]}"
+          sf_check_not_written "${ecosystem}" "${pkg}" "${range}" "${patched_version}"
+          return 4
+        fi
         local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
         local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
         local transitive_count; transitive_count=$(jq 'length' "${transitive_file}")
@@ -516,9 +577,9 @@ sf_cmd_check_npm_full_closure() {
         sf_info "ledger: ${hash}"
         sf_advisory_log "check approve(patched closure) package=${pkg} version=${patched_version} hash=${hash} transitive=${transitive_count} prev_version=${version}"
         local closure_source_json resolved_closure_json
-        closure_source_json=$(cat "${source_file}")
-        resolved_closure_json=$(cat "${closure_file}")
-        rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+        closure_source_json=$(cat "${candidate_source}")
+        resolved_closure_json=$(cat "${candidate_closure}")
+        rm -f "${check_files[@]}"
         if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
           sf_check_json "${SAFEDEPS_CHECK_PATCHED_AVAILABLE}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version, suggested_spec:$patched}' \
             '{approved:true, spec_hash:$hash, expires_at:$expires_at, transitive_count:$transitive_count, closure_source:$closure_source, resolved_closure:$resolved_closure, install_hint:install_hint($patched)}' \
@@ -532,7 +593,6 @@ sf_cmd_check_npm_full_closure() {
         return 0
       done
       block_result="${SAFEDEPS_CHECK_CVE_UNPATCHED}"
-      rm -f "${direct_evidence}"
     fi
 
     local affected_summary
@@ -542,7 +602,7 @@ sf_cmd_check_npm_full_closure() {
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       sf_npm_emit_closure_block_json "${block_result}" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}" "${closure_file}" "${source_file}"
     fi
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+    rm -f "${check_files[@]}"
     return 2
   fi
 
@@ -558,7 +618,7 @@ sf_cmd_check_npm_full_closure() {
         --arg error "${resolution_status}" \
         --slurpfile source "${source_file}" --slurpfile closure "${closure_file}"
     fi
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+    rm -f "${check_files[@]}"
     return 4
   fi
 
@@ -567,7 +627,11 @@ sf_cmd_check_npm_full_closure() {
   local spec_json
   local project_context_arg=""
   if safedeps_context_kind_scopes "$(jq -r '.type' "${source_file}")"; then project_context_arg="${source_file}"; fi
-  spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
+  if ! spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}"); then
+    rm -f "${check_files[@]}"
+    sf_check_not_written "${ecosystem}" "${pkg}" "${range}" "${version}"
+    return 4
+  fi
   local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
   local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
   local transitive_count; transitive_count=$(jq 'length' "${transitive_file}")
@@ -577,7 +641,7 @@ sf_cmd_check_npm_full_closure() {
   local closure_source_json resolved_closure_json
   closure_source_json=$(cat "${source_file}")
   resolved_closure_json=$(cat "${closure_file}")
-  rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+  rm -f "${check_files[@]}"
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
     sf_check_json "${SAFEDEPS_CHECK_CLEAN}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
       '{approved:true, spec_hash:$hash, expires_at:$expires_at, transitive_count:$transitive_count, closure_source:$closure_source, resolved_closure:$resolved_closure, install_hint:install_hint($version)}' \
@@ -671,7 +735,7 @@ cmd_check() {
       sf_info "ledger: ${hash}"
       if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
         sf_check_json "${SAFEDEPS_CHECK_ALREADY_APPROVED}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
-          '{approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at, closure_source:$project_context, resolved_closure:$resolved_closure}' \
+          '{approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at, closure_source:$project_context, resolved_closure:$resolved_closure, install_hint:install_hint($version)}' \
           -n --arg version "${version}" \
           --arg hash "${hash}" \
           --arg approved_at "${approved_at}" \
@@ -696,13 +760,7 @@ cmd_check() {
   sf_spinner_start "checking advisories (OSV / KEV / GHSA)"
   if ! provider_json=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${version}"); then
     sf_spinner_stop
-    sf_err "no OSV primary response — fail-closed (cache miss + live query failed)"
-    sf_advisory_log "check fail-closed ecosystem=${ecosystem} package=${pkg} version=${version}"
-    if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-      sf_check_json "${SAFEDEPS_CHECK_PROVIDER_UNAVAILABLE}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
-        '{approved:false, error:"OSV primary unavailable; no fresh cache"}' \
-        -n --arg version "${version}"
-    fi
+    sf_check_unavailable "${ecosystem}" "${pkg}" "${range}" "${version}" "${SF_UNAVAILABLE_PRIMARY}"
     return 4
   fi
   sf_spinner_stop
@@ -711,10 +769,8 @@ cmd_check() {
   tmp_evidence=$(sf_mktemp_evidence)
   printf '%s' "${provider_json}" > "${tmp_evidence}"
 
-  local status vuln_count kev_exploited
-  status=$(jq -r '.status' <<< "${provider_json}")
-  vuln_count=$(jq -r '(.vulnerabilities // []) | length' <<< "${provider_json}")
-  kev_exploited=$(jq -r '.kev.exploited // false' <<< "${provider_json}")
+  local status vuln_count
+  status=$(sf_provider_status "${provider_json}")
 
   case "${status}" in
     "${SAFEDEPS_STATUS_HARD_BLOCK}")
@@ -735,6 +791,7 @@ cmd_check() {
     "${SAFEDEPS_STATUS_VULNERABLE}")
       local patched_versions=()
       local patched_version
+      vuln_count=$(jq -r '(.vulnerabilities // []) | length' <<< "${provider_json}")
       while IFS= read -r patched_version; do
         [[ -z "${patched_version}" ]] && continue
         patched_versions+=("${patched_version}")
@@ -750,20 +807,15 @@ cmd_check() {
           last_patched="${patched_version}"
           sf_warn "${pkg}@${version} has ${vuln_count} CVE(s) — re-checking candidate ${patched_version}."
           sf_spinner_start "re-checking ${patched_version}"
-          if ! narrow_json=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${patched_version}"); then
+          if ! narrow_json=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${patched_version}") \
+            || ! narrow_status=$(sf_provider_status "${narrow_json}") || [[ -z "${narrow_status}" ]]; then
             sf_spinner_stop
-            sf_err "${pkg}@${patched_version} re-check failed — fail-closed"
             rm -f "${tmp_evidence}"
-            if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-              sf_check_json "${SAFEDEPS_CHECK_PROVIDER_UNAVAILABLE}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version, suggested_spec:$patched}' '{approved:false}' \
-                -n --arg version "${version}" \
-                --arg patched "${patched_version}"
-            fi
+            sf_check_unavailable "${ecosystem}" "${pkg}" "${range}" "${version}" "${SF_UNAVAILABLE_PRIMARY}" "${patched_version}"
             return 4
           fi
           sf_spinner_stop
 
-          narrow_status=$(jq -r '.status' <<< "${narrow_json}")
           last_status="${narrow_status}"
           if [[ "${narrow_status}" != "${SAFEDEPS_STATUS_CLEAN}" ]]; then
             sf_warn "patch candidate ${patched_version} is not clean either (status=${narrow_status}); trying the next candidate."
@@ -776,7 +828,11 @@ cmd_check() {
           printf '%s' "${narrow_json}" > "${narrow_evidence}"
           local narrow_range="${patched_version}"
           local spec_json
-          spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${narrow_range}" "safedeps-cli" "${narrow_evidence}")
+          if ! spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${narrow_range}" "safedeps-cli" "${narrow_evidence}"); then
+            rm -f "${narrow_evidence}" "${tmp_evidence}"
+            sf_check_not_written "${ecosystem}" "${pkg}" "${range}" "${patched_version}"
+            return 4
+          fi
           rm -f "${narrow_evidence}" "${tmp_evidence}"
           local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
           local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
@@ -815,7 +871,11 @@ cmd_check() {
 
     "${SAFEDEPS_STATUS_CLEAN}")
       local spec_json
-      spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${tmp_evidence}")
+      if ! spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${tmp_evidence}"); then
+        rm -f "${tmp_evidence}"
+        sf_check_not_written "${ecosystem}" "${pkg}" "${range}" "${version}"
+        return 4
+      fi
       rm -f "${tmp_evidence}"
       local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
       local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
@@ -832,8 +892,8 @@ cmd_check() {
       ;;
 
     *)
-      sf_err "unexpected provider status: ${status}"
       rm -f "${tmp_evidence}"
+      sf_check_unavailable "${ecosystem}" "${pkg}" "${range}" "${version}" "${SF_UNAVAILABLE_PRIMARY}"
       return 4
       ;;
   esac
@@ -1087,7 +1147,7 @@ cmd_recheck() {
       sf_warn "  no provider response — skipped"
       continue
     fi
-    local s; s=$(jq -r '.status' <<< "${pj}")
+    local s; s=$(sf_provider_status "${pj}")
     case "${s}" in
       "${SAFEDEPS_STATUS_CLEAN}")
         still_clean=$(( still_clean + 1 ))
@@ -1110,6 +1170,10 @@ cmd_recheck() {
         revoked_arr=$(jq -c \
           --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg reason "${reason}" \
           '. + [{ecosystem:$ecosystem, package:$package, version:$version, reason:$reason}]' <<< "${revoked_arr}")
+        ;;
+      *)
+        sf_warn "  no readable provider status — skipped"
+        sf_advisory_log "re-check skipped ecosystem=${ecosystem} package=${pkg} version=${version}"
         ;;
     esac
   done

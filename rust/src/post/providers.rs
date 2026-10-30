@@ -205,6 +205,13 @@ fn provider_statuses_match_cli() {
     assert!(out.status.success(), "CLI status rule: {}", String::from_utf8_lossy(&out.stderr));
     let core: Vec<String> = [(true, 0), (true, 1), (false, 1), (false, 0)].iter().map(|(e, n)| format!("\"{}\"", name(Status::of(*e, *n)))).collect();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("[{}]\n", core.join(",")));
+    // A reader takes the core's three statuses and no other word.
+    let script = format!("{}\njq -nc \"$SAFEDEPS_STATUS_JQ\"'[(\"{}\", \"{}\", \"{}\", \"blocked\", \"\", \"CLEAN\", \"clean \", null, 1) | status_known]'",
+        declarations.join("\n"), name(Status::HardBlock), name(Status::Vulnerable), name(Status::Clean));
+    let out = std::process::Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["-c", &script, "status-contract"]).output().unwrap();
+    assert!(out.status.success(), "CLI status list: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "[true,true,true,false,false,false,false,false,false]\n", "status_known is the core's statuses");
 }
 
 #[cfg(test)]
