@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=../lib/ledger/recheck-report.sh
+source "${ROOT_DIR}/lib/ledger/recheck-report.sh"
 SAFEDEPS_BIN="${SAFEDEPS_BIN:-${ROOT_DIR}/bin/safedeps}"
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_RECHECK_LOG="${SAFEDEPS_RECHECK_LOG:-${SAFEDEPS_HOME}/recheck.log}"
@@ -79,7 +81,7 @@ if [[ "${status}" -ne 0 ]]; then
   exit "${status}"
 fi
 
-if ! jq -e '.command == "re-check"' "${tmp_json}" >/dev/null 2>&1; then
+if ! jq -e "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_is_report' "${tmp_json}" >/dev/null 2>&1; then
   alert=$(jq -cn \
     --arg at "${run_at}" \
     --rawfile output "${tmp_json}" \
@@ -89,12 +91,12 @@ if ! jq -e '.command == "re-check"' "${tmp_json}" >/dev/null 2>&1; then
   exit 1
 fi
 
-checked=$(jq -r '.checked // 0' "${tmp_json}")
-still_clean=$(jq -r '.still_clean // 0' "${tmp_json}")
-newly_vulnerable=$(jq -r '(.newly_vulnerable // []) | length' "${tmp_json}")
-kev_hit=$(jq -r '(.kev_hit // []) | length' "${tmp_json}")
-revoked=$(jq -r '(.revoked // []) | length' "${tmp_json}")
-suspected_forgery=$(jq -r '(.suspected_forgery // []) | length' "${tmp_json}")
+checked=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_checked' "${tmp_json}")
+still_clean=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_still_clean' "${tmp_json}")
+newly_vulnerable=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_newly_vulnerable | length' "${tmp_json}")
+kev_hit=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_kev_hit | length' "${tmp_json}")
+revoked=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_revoked | length' "${tmp_json}")
+suspected_forgery=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_suspected_forgery | length' "${tmp_json}")
 skipped=$(( checked - still_clean - revoked ))
 if [[ "${skipped}" -lt 0 ]]; then
   skipped=0

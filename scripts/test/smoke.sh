@@ -1462,6 +1462,21 @@ alerts_after=$(wc -l < "${tmp_root}/safe-recheck/recheck-alerts.jsonl")
 [[ "${alerts_before}" -eq "${alerts_after}" ]] || fail "clean re-check must not append an alert"
 pass "clean re-check appends no alert"
 
+# The re-check report is declared once, in lib/ledger/recheck-report.sh: the
+# CLI builds it there and the wrapper reads it there. What the CLI prints has
+# the declared fields in the declared order, the wrapper's complete fixture
+# above has the same ones, and every reader reads back what its builder wrote.
+# shellcheck source=../../lib/ledger/recheck-report.sh
+source lib/ledger/recheck-report.sh
+recheck_report_json=$(HOME="${tmp_root}/home-recheck-report" SAFEDEPS_HOME="${tmp_root}/safe-recheck-report" ./bin/safedeps --json re-check)
+recheck_declared_keys=$(jq -cn "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(0; 0; []; []; []; []) | keys_unsorted')
+[[ "$(jq -c 'keys_unsorted' <<< "${recheck_report_json}")" == "${recheck_declared_keys}" ]] || fail "re-check --json prints the declared report fields"
+[[ "$(jq -c 'keys_unsorted' "${clean_fixture}")" == "${recheck_declared_keys}" ]] || fail "the wrapper's complete re-check fixture has the declared report fields"
+jq -en "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(1; 2; [3]; [4]; [5]; [6])
+  | [recheck_is_report, recheck_checked, recheck_still_clean, recheck_newly_vulnerable, recheck_kev_hit, recheck_revoked, recheck_suspected_forgery]
+  == [true, 1, 2, [3], [4], [5], [6]]' >/dev/null || fail "each re-check report reader reads the field its builder writes"
+pass "the re-check report is built and read from one declaration"
+
 # Release-time lane (absorbed from security-release-gates): commands must be
 # registered and resolve their gate scripts.
 gates_help=$(HOME="${tmp_root}/home-gates" SAFEDEPS_HOME="${tmp_root}/safe-gates" ./bin/safedeps help)

@@ -32,6 +32,8 @@ source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/ledger/ledger.sh"
 # shellcheck source=../lib/npm/closure.sh
 source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
+# shellcheck source=../lib/ledger/recheck-report.sh
+source "${SAFEDEPS_REPO_DIR}/lib/ledger/recheck-report.sh"
 
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR:-${SAFEDEPS_HOME}/approved-specs}"
@@ -1134,7 +1136,7 @@ cmd_recheck() {
       --argjson suspected_forgery "${suspected_forgery_arr}" \
       --argjson checked "${checked}" \
       --argjson still_clean "${still_clean}" \
-      '{command:"re-check", checked:$checked, still_clean:$still_clean, newly_vulnerable:$newly_vulnerable, kev_hit:$kev_hit, revoked:$revoked, suspected_forgery:$suspected_forgery}'
+      "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery)'
     return 0
   fi
 
