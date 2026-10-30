@@ -252,7 +252,7 @@ safedeps_ledger_read() {
   local context_hash="${4:-}"
   local ledger_file
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   [[ -f "${ledger_file}" ]] || return 1
   safedeps_ledger_validate_json "${ledger_file}" || return 1
   cat "${ledger_file}"
@@ -267,8 +267,8 @@ safedeps_ledger_check() {
   local expected_hash
   local stored_hash
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
-  expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
+  expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
 
   if [[ ! -f "${ledger_file}" ]]; then
     jq -cn --arg hash "${expected_hash}" '{approved: false, reason: "miss", hash: $hash}'
@@ -674,7 +674,7 @@ safedeps_ledger_revoke() {
   local revoked_at
   local entry
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}") || return 1
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   [[ -f "${ledger_file}" ]] || return 1
   safedeps_ledger_validate_json "${ledger_file}" || return 1
 
