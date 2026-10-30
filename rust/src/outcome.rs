@@ -12,7 +12,7 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -27,7 +27,7 @@ impl Outcome {
         let named;
         let action: &[u8] = match action {
             Action::Npm=>b"npm", Action::NpmConfig=>b"npm config", Action::NpmQuery=>b"npm query",
-            Action::NpmRebuild=>b"npm rebuild", Action::Judgment=>b"judgment",
+            Action::NpmRebuild=>b"npm rebuild", Action::Curl=>b"curl", Action::Judgment=>b"judgment",
             Action::Copy=>b"copy", Action::Removal=>b"removal",
             Action::Walk(path)=>{named=[b"the walk of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},

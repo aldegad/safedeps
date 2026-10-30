@@ -1,7 +1,7 @@
 //! OSV batch lookup and the KEV overlay. Requests use curl; provider init
 //! delegates log retention to state. Cache and JSON reads stay in process.
 use super::{jv,sh,closure::Spec,report::cat};
-use crate::{json::Value,state,os,sha256,ere::Regex};
+use crate::{json::Value,state,os,sha256,ere::Regex,outcome::{Outcome,Action,Form}};
 use std::{fs,path::{Path,PathBuf},process::{Command,Stdio},os::unix::fs::MetadataExt};
 type W=Vec<u8>;
 const CACHE_ENV: &str = "SAFEDEPS_CACHE_DIR";
@@ -69,13 +69,24 @@ impl Providers{
             if !ignored.is_empty(){self.raw_log(b"WARN",&cat(&[b"SAFEDEPS_ADVISORY_LOG=",ignored.as_bytes()," ignored — the record and the ledger it vouches for stay in one place (move SAFEDEPS_HOME instead).".as_bytes()]));}
         }self.raw_log(level,line);
     }
+    /// The HTTP code curl printed, which each caller compares to 200. curl
+    /// prints the code of a response it did not finish reading, so a curl that
+    /// failed adds how it ended, as the CLI's requests do: no failed request
+    /// reads as 200, and the record says both.
     fn curl(url:&str,response:&Path,payload:Option<&Path>,seconds:&str)->W{
         let mut c=Command::new("curl");c.args(["-fsS","--max-time",seconds]);
         if payload.is_some(){c.args(["-H","Content-Type: application/json"]);}
         c.arg("-o").arg(response).args(["-w","%{http_code}"]);
         if let Some(p)=payload{let mut data=b"@".to_vec();data.extend(sh::bytes(p));c.arg("-d").arg(sh::p(&data));}
         c.arg(url).stdin(Stdio::null()).stderr(Stdio::null());
-        c.output().map(|o|jv::captured(&[o.stdout])).unwrap_or_default()
+        match c.output(){
+            Err(error)=>Outcome::StartFailure(error).describe(Action::Curl,Form::Action),
+            Ok(o) if o.status.success()=>jv::captured(&[o.stdout]),
+            Ok(o)=>{
+                let code=jv::captured(&[o.stdout]);
+                cat(&[if code.is_empty(){b"none"}else{&code},b" ",&Outcome::status(o.status).describe(Action::Curl,Form::Detail)])
+            },
+        }
     }
     fn catalog(&mut self,path:&Path)->Option<Value>{self.kev_reads+=1;jv::read_one_object(path).and_then(kev_answer)}
     /// A catalog that can be read. A fresh file that holds none is a miss with a

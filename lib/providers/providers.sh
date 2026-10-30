@@ -117,6 +117,11 @@ safedeps_require_json_tools() {
   fi
 }
 
+# A request is read by the HTTP code it printed, and every caller compares that
+# text to 200. curl prints the code of a response it did not finish reading (a
+# body cut short, a timeout in the middle of one), so a curl that failed adds its
+# exit to the text, as `http_status=$(curl ...) || http_status="${http_status:-none} exit $?"`
+# does at each request: no failed request reads as 200, and the record says both.
 safedeps_require_http_client() {
   if ! command -v curl >/dev/null 2>&1; then
     printf 'safedeps providers: curl is required for provider queries\n' >&2
@@ -185,7 +190,7 @@ safedeps_cache_is_fresh() {
   local mtime
 
   [[ -f "${path}" ]] || return 1
-  now=$(date +%s)
+  now=$(date +%s) || return 1
   mtime=$(safedeps_file_mtime "${path}") || return 1
   [[ $(( now - mtime )) -le "${ttl}" ]]
 }
@@ -272,7 +277,7 @@ safedeps_osv_query() {
   safedeps_providers_init
 
   osv_ecosystem=$(safedeps_osv_ecosystem "${ecosystem}")
-  cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}")
+  cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}") || return 1
   cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
 
   if safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"; then
@@ -294,7 +299,7 @@ safedeps_osv_query() {
     --arg ecosystem "${osv_ecosystem}" \
     --arg package "${package_name}" \
     --arg version "${version}" \
-    '{version: $version, package: {name: $package, ecosystem: $ecosystem}}')
+    '{version: $version, package: {name: $package, ecosystem: $ecosystem}}') || return 1
 
   response_file=$(safedeps_cache_response_temp "${cache_path}") || return 1
   http_status=$(curl -fsS \
@@ -303,7 +308,7 @@ safedeps_osv_query() {
     -o "${response_file}" \
     -w '%{http_code}' \
     -d "${payload}" \
-    "${SAFEDEPS_OSV_API_URL}" 2>/dev/null || true)
+    "${SAFEDEPS_OSV_API_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
 
   if [[ "${http_status}" == "200" ]] && safedeps_osv_is_answer "${response_file}" && mv -f "${response_file}" "${cache_path}"; then
     safedeps_provider_log "INFO" "OSV live query ok ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
@@ -397,7 +402,10 @@ safedeps_osv_query_batch() {
     [[ -n "${package_name}" && -n "${version}" ]] || continue
     local cache_key
     local cache_path
-    cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}")
+    cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}") || {
+      rm -rf "${temp_dir}"
+      return 1
+    }
     cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
 
     if safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"; then
@@ -435,14 +443,18 @@ safedeps_osv_query_batch() {
       return 1
     }
 
-    jq -cn --arg ecosystem "${osv_ecosystem}" --slurpfile misses "${miss_items_file}" '
+    if ! jq -cn --arg ecosystem "${osv_ecosystem}" --slurpfile misses "${miss_items_file}" '
       {
         queries: [
           $misses[]
           | {version: .version, package: {name: .package, ecosystem: $ecosystem}}
         ]
       }
-    ' > "${payload_file}"
+    ' > "${payload_file}"; then
+      safedeps_provider_log "ERROR" "OSV batch query not written ecosystem=${osv_ecosystem}"
+      rm -rf "${temp_dir}"
+      return 1
+    fi
 
     http_status=$(curl -fsS \
       --max-time 20 \
@@ -450,7 +462,7 @@ safedeps_osv_query_batch() {
       -o "${response_file}" \
       -w '%{http_code}' \
       -d @"${payload_file}" \
-      "${SAFEDEPS_OSV_BATCH_API_URL}" 2>/dev/null || true)
+      "${SAFEDEPS_OSV_BATCH_API_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
 
     if [[ "${http_status}" != "200" ]] || ! jq -e '.results | type == "array"' "${response_file}" >/dev/null 2>&1; then
       safedeps_provider_log "ERROR" "OSV batch query failed status=${http_status:-none}"
@@ -460,10 +472,9 @@ safedeps_osv_query_batch() {
 
     local miss_count
     local result_count
-    miss_count=$(jq -s 'length' "${miss_items_file}")
-    result_count=$(jq '.results | length' "${response_file}")
-    if [[ "${miss_count}" != "${result_count}" ]]; then
-      safedeps_provider_log "ERROR" "OSV batch result count mismatch misses=${miss_count} results=${result_count}"
+    if ! miss_count=$(jq -s 'length' "${miss_items_file}") || ! result_count=$(jq '.results | length' "${response_file}") \
+      || [[ "${miss_count}" != "${result_count}" ]]; then
+      safedeps_provider_log "ERROR" "OSV batch result count mismatch misses=${miss_count:-none} results=${result_count:-none}"
       rm -rf "${temp_dir}"
       return 1
     fi
@@ -472,13 +483,13 @@ safedeps_osv_query_batch() {
     while IFS= read -r miss_item; do
       local cache_path
       local response_item_file
-      cache_path=$(jq -r '.cache_path' <<< "${miss_item}")
-      response_item_file=$(safedeps_cache_response_temp "${cache_path}") || {
+      if ! cache_path=$(jq -r '.cache_path' <<< "${miss_item}") \
+        || ! response_item_file=$(safedeps_cache_response_temp "${cache_path}"); then
         rm -rf "${temp_dir}"
         return 1
-      }
-      jq -c --argjson i "${miss_i}" '.results[$i]' "${response_file}" > "${response_item_file}"
-      if ! safedeps_osv_is_answer "${response_item_file}"; then
+      fi
+      if ! jq -c --argjson i "${miss_i}" '.results[$i]' "${response_file}" > "${response_item_file}" \
+        || ! safedeps_osv_is_answer "${response_item_file}"; then
         safedeps_provider_log "ERROR" "OSV batch result is not an answer ecosystem=${osv_ecosystem} index=${miss_i}"
         rm -f "${response_item_file}"
         rm -rf "${temp_dir}"
@@ -560,7 +571,7 @@ safedeps_kev_refresh_catalog() {
 
   if safedeps_require_http_client; then
     response_path=$(safedeps_cache_response_temp "${cache_path}") || return 1
-    http_status=$(curl -fsS --max-time 15 -o "${response_path}" -w '%{http_code}' "${SAFEDEPS_KEV_CATALOG_URL}" 2>/dev/null || true)
+    http_status=$(curl -fsS --max-time 15 -o "${response_path}" -w '%{http_code}' "${SAFEDEPS_KEV_CATALOG_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
 
     if [[ "${http_status}" == "200" ]] && safedeps_kev_is_answer "${response_path}" && mv -f "${response_path}" "${cache_path}"; then
       safedeps_provider_log "INFO" "CISA KEV catalog refresh ok"
@@ -671,7 +682,7 @@ safedeps_ghsa_query() {
   fi
 
   http_status=$(curl "${curl_args[@]}" \
-    "${SAFEDEPS_GHSA_API_URL}?ecosystem=${encoded_ecosystem}&affects=${encoded_package}&per_page=100" 2>/dev/null || true)
+    "${SAFEDEPS_GHSA_API_URL}?ecosystem=${encoded_ecosystem}&affects=${encoded_package}&per_page=100" 2>/dev/null) || http_status="${http_status:-none} exit $?"
 
   if [[ "${http_status}" == "200" ]] && jq -e 'type == "array"' "${response_file}" >/dev/null 2>&1; then
     mv -f "${response_file}" "${cache_path}"
