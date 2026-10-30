@@ -90,7 +90,7 @@ impl Context {
         out.kind="other".into();out.dir=here.clone();let mut run_dir=here.clone();let mut manager=false;
         if !mw.is_empty() {
             rd.read(&mw);
-            if rd.family=="npm"&&matches!(rd.kind.as_str(),"install"|"link"){out.kind="npm".into()}
+            if rd.family=="npm"&&matches!(rd.kind,manager::Kind::Install|manager::Kind::Link){out.kind="npm".into()}
             for (k,word) in mw.iter().enumerate() {
                 if rd.role[k]==b'm'{manager=true}
                 if rd.role[k]!=b'd'{continue}
@@ -102,7 +102,7 @@ impl Context {
             }
         }
         if out.kind!="npm"{return out}
-        if rd.kind=="link"{
+        if rd.kind==manager::Kind::Link{
             out.dir=b"global".to_vec();out.kind="npm-unrecorded".into();out.why=b"npm link installs a package the global tree does not have into npm's global prefix, where no lockfile records it".to_vec();return out
         }
         if q.word.is_empty(){out.dir=b"?".to_vec();out.why=b"safedeps could not find the npm word in this install statement, so it cannot ask npm where the install lands".to_vec();return out}

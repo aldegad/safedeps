@@ -17,7 +17,7 @@ use crate::ere::Regex;
 use crate::grammar;
 use crate::jq;
 use crate::json::{self, Value};
-use crate::{callid, md5, os, state};
+use crate::{callid::{self, record as rec}, md5, os, state};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -259,12 +259,12 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     }
     state::sweep_day_old(&entry_dir);
     let d = os::path(&dir);
-    let lock = os::tree_inode(&d.join("package-lock.json"));
-    let hidden = os::tree_inode(&d.join("node_modules/.package-lock.json"));
-    let tree = os::tree_inode(&d.join("node_modules"));
+    let lock = os::tree_inode(&d.join(rec::RECORDS[0]));
+    let hidden = os::tree_inode(&d.join(rec::RECORDS[1]));
+    let tree = os::tree_inode(&d.join(rec::TREE));
     let mut present = 0;
     let mut subsecond = 0;
-    for rel in ["package-lock.json", "node_modules/.package-lock.json", "node_modules"] {
+    for rel in [rec::RECORDS[0], rec::RECORDS[1], rec::TREE] {
         let path = d.join(rel);
         if std::fs::symlink_metadata(&path).is_err() {
             continue;
@@ -284,9 +284,9 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     if touched.is_err() {
         return;
     }
-    let mut resolution = "seconds";
+    let mut resolution = rec::SECONDS;
     if present > 0 && subsecond == present && os::clock_has_subsecond(&os::file_clock(&trace, b'm', false)) {
-        resolution = "subsecond";
+        resolution = rec::SUBSECOND;
     } else {
         let now = os::wall(os::WallRole::BackstopFallback).seconds();
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs((now - 2).max(0) as u64);
@@ -309,23 +309,20 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
         }
     }
     let mut fields = vec![
-        ("key", jq::s(&state::pending_key(&dir_hash, &call.command))),
-        ("baseline", jq::arg(&trace_text)),
-        ("resolution", jq::s(resolution)),
+        (rec::KEY, jq::s(&state::pending_key(&dir_hash, &call.command))),
+        (rec::BASELINE, jq::arg(&trace_text)),
+        (rec::RESOLUTION, jq::s(resolution)),
         (
-            "inodes",
-            jq::obj(vec![("package-lock.json", jq::s(&lock)), ("node_modules/.package-lock.json", jq::s(&hidden)), ("node_modules", jq::s(&tree))]),
+            rec::INODES,
+            jq::obj(vec![(rec::RECORDS[0], jq::s(&lock)), (rec::RECORDS[1], jq::s(&hidden)), (rec::TREE, jq::s(&tree))]),
         ),
         (
-            "clocks",
-            jq::obj(vec![
-                ("package-lock.json", jq::s(&os::tree_clock(&d.join("package-lock.json")))),
-                ("node_modules/.package-lock.json", jq::s(&os::tree_clock(&d.join("node_modules/.package-lock.json")))),
-            ]),
+            rec::CLOCKS,
+            jq::obj(rec::RECORDS.iter().map(|rel| (*rel, jq::s(&os::tree_clock(&d.join(rel))))).collect()),
         ),
     ];
     if let Some(listed) = listed {
-        fields.push(("entries", listed));
+        fields.push((rec::ENTRIES, listed));
     }
     let entry = jq::obj(fields);
     if state::write_state_file(&os::path(&cat(&[&base, b".json"])), jq::compact(&entry).as_bytes()).is_err() {

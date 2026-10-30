@@ -40,7 +40,7 @@ impl Snapshot {
             .filter(|e|e.file_type().is_ok_and(|t|t.is_file())).map(|e|e.file_name())
             .filter(|s|s.as_bytes().ends_with(b".csproj")).collect();
         csproj.sort();for name in csproj{snap.file(name.as_bytes())?;}
-        let tree=dir.join("node_modules/.package-lock.json");
+        let tree=dir.join(crate::callid::record::RECORDS[1]);
         if tree.is_file() && state::copy_state_file(&tree,&snap.path(b"npm-tree-record.json")).is_err() {
             state::log_advisory(&call.guard_dir,&cat(&[b"pre-guard: could not keep a copy of ",tree.as_os_str().as_bytes(),b", so the effect gate will compare this install with package-lock.json alone and may read packages already installed as new. Command: ",&call.command]));
         }
@@ -137,7 +137,7 @@ fn workspace_manifests(root:&Path)->Vec<W>{
     let listing=post::workspace_members(&root);if listing==b"none"{return Vec::new()}
     let prefix=cat(&[root.as_os_str().as_bytes(),b"/"]);
     let mut members:Vec<W>=listing.split(|b|*b==b'\n').skip(1).filter(|p|!p.starts_with(b"?")).map(Vec::from).collect();
-    for name in ["package-lock.json","node_modules/.package-lock.json"] {
+    for name in crate::callid::record::RECORDS {
         if let Some(st)=json::read_file(&root.join(name)){
             for v in st.values{if let Some(Value::Obj(fields))=v.get("packages"){
                 for (key,_) in fields{

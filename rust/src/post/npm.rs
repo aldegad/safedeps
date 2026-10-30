@@ -1,6 +1,6 @@
 //! npm records, fetch answers, and the machine-wide record of withheld bytes.
 use super::{jv,sh,closure,workspaces,tree,trace::{self,Install},snapshot::Store,report::{self,Report,cat}};
-use crate::{ask,json::Value,state,os,sha256};
+use crate::{ask,callid::record as rec,json::Value,state,os,sha256};
 use std::{fs,path::Path,time::{Duration,Instant}};
 type W=Vec<u8>;
 pub const WITHHELD_SCOPE:&[u8]=b"safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry";
@@ -10,7 +10,7 @@ fn alt(v:&Value,d:Value)->Value{if jv::truthy(v){v.clone()}else{d}}
 fn val_str(v:&Value,k:&str,default:&[u8])->Result<W,()>{Ok(strval(&alt(field(v,k)?,jv::s(default))))}
 fn pretty(v:&Value)->W{crate::jq::pretty(&jv::to_j(v)).into_bytes()}
 fn digest(p:&Path)->Option<String>{fs::read(p).ok().map(|b|sha256::hex(&b))}
-fn sourced(current:&Value)->bool{matches!(jv::path(current,&["npm_fetch","cause"]),Ok(Value::Str(s)) if s==b"sourced")}
+fn sourced(current:&Value)->bool{matches!(jv::path(current,&[rec::NPM_FETCH,"cause"]),Ok(Value::Str(s)) if s==b"sourced")}
 pub fn unread_note(meta:&Path)->W{if report::inert_unread(meta){cat(&[b". ",report::UNREAD])}else{Vec::new()}}
 
 #[derive(Default)]
@@ -18,7 +18,7 @@ pub struct Npm{pub sources:Vec<W>,pub nodes:Vec<W>,pub facts:Option<Value>,pub r
 impl Npm{
     pub fn facts(&mut self,store:&Store,current:&Value)->&Value{
         if self.facts.is_none(){
-            let pre=match field(current,"npm_fetch"){Ok(v@Value::Obj(_))=>v.clone(),_=>jv::obj(vec![("unknown",jv::s(b"the pre-guard left no answer about which registry this install fetches from"))])};
+            let pre=match field(current,rec::NPM_FETCH){Ok(v@Value::Obj(_))=>v.clone(),_=>jv::obj(vec![("unknown",jv::s(b"the pre-guard left no answer about which registry this install fetches from"))])};
             let post=ask::fetch_facts(&store.project,Instant::now()+Duration::from_secs(ask::POST_SECONDS),&[],&[b"--workspaces=false".to_vec()]);
             self.facts=Some(Value::Arr(vec![pre,post]));
         }self.facts.as_ref().unwrap()
@@ -120,11 +120,11 @@ impl Npm{
     }
     pub fn record(&mut self,store:&Store,current:&Value,trace:&Install,report:&mut Report){
         if trace.absent{return}
-        let hidden=store.project.join("node_modules/.package-lock.json");
+        let hidden=store.project.join(trace::RECORDS[1]);
         let judged=if sh::is_file(&hidden){sh::mktemp(&cat(&[sh::bytes(&store.home),b"/snapshots/.",&store.id,b"_judged."])).and_then(|p|if sh::cp(&hidden,&p)==0{Some(p)}else{sh::rm_f(&p);None})}else{None};
         let tree=judged.as_deref().unwrap_or(&hidden);
         let success=self.record_inner(store,current,tree,report);
-        if success&&!sourced(current)&&trace.records.iter().any(|r|r==b"node_modules/.package-lock.json"){
+        if success&&!sourced(current)&&trace.records.iter().any(|r|r==trace::RECORDS[1].as_bytes()){
             if let Some(j)=&judged{Self::observe(store,j);}
         }
         if let Some(j)=judged{sh::rm_f(&j);}
@@ -281,7 +281,7 @@ impl Npm{
             report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&why]));
             state::log_advisory(home,&cat(&[b"post-verify rebuild skipped: ",&why,b" -- project ",project]));return;
         }
-        if !sh::is_file(&store.project.join("node_modules/.package-lock.json")){
+        if !sh::is_file(&store.project.join(trace::RECORDS[1])){
             state::log_advisory(home,&cat(&[b"post-verify: npm rebuild skipped in ",project," — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read.".as_bytes()]));
             report.say(cat(&[b"npm rebuild was not run: ",project,b"/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
         }

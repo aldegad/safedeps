@@ -126,7 +126,7 @@ fn read_bundles(dir: &Path, keys: &[W]) -> Result<Bundles, ()> {
 
 fn records(dir: &Path) -> Result<Records, ()> {
     let mut out=Records::new();
-    for name in ["package-lock.json","node_modules/.package-lock.json"] {
+    for name in super::trace::RECORDS {
         let file=dir.join(name); if !sh::is_file(&file) { continue }
         let st=jv::read_file(&file).ok_or(())?; if st.failed { return Err(()) }
         for v in st.values {

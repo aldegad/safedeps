@@ -163,7 +163,7 @@ pub fn manager(input: &[u8]) -> i32 {
             rd.read(&words);
             let roles: String = (0..words.len()).map(|k| rd.role.get(k).copied().filter(|&r| r != 0).unwrap_or(b'-') as char).collect();
             let texts = (0..words.len()).map(|k| jq::arg(rd.text.get(k).map(Vec::as_slice).unwrap_or(b""))).collect();
-            Ok(jq::obj(vec![("family", jq::s(&rd.family)), ("kind", jq::s(&rd.kind)), ("localbin", J::Bool(rd.localbin)), ("roles", jq::s(&roles)), ("texts", J::Arr(texts))]))
+            Ok(jq::obj(vec![("family", jq::s(&rd.family)), ("kind", jq::s(rd.kind.as_str())), ("localbin", J::Bool(rd.localbin)), ("roles", jq::s(&roles)), ("texts", J::Arr(texts))]))
         }
         Some("option-class") => {
             let family = q.get("family").and_then(Value::as_str).ok_or("no family")?;

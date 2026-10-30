@@ -141,9 +141,37 @@ pub fn long_option(family: &str, path: &str, opt: &[u8]) -> W {
     }
 }
 
-/// `safedeps_manager_command`: the kind of a command path, `more` when a
+/// What a statement's command does: a kind `tables::COMMANDS` names
+/// (install, runner, create), npm's `link`, or `None` until a command is
+/// read. `as_str` is the name `query read` prints.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind { None, Install, Runner, Create, Link }
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self { Kind::None => "none", Kind::Install => "install", Kind::Runner => "runner", Kind::Create => "create", Kind::Link => "link" }
+    }
+    /// A kind as `tables::COMMANDS` spells it after `=`.
+    fn of_table(name: &[u8]) -> Option<Kind> {
+        [Kind::Install, Kind::Runner, Kind::Create].into_iter().find(|k| k.as_str().as_bytes() == name)
+    }
+}
+
+/// What `command` finds for a command path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Found {
+    Is(Kind),
+    /// Only a longer path starts with this one.
+    More,
+}
+
+/// Which of npm's verbs a statement runs (`npm_kind_of`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NpmVerb { Install, Link, Exec, Init, Other }
+
+/// `safedeps_manager_command`: the kind of a command path, `More` when a
 /// longer path starts with it.
-pub fn command(family: &str, path: &[u8]) -> Option<String> {
+pub fn command(family: &str, path: &[u8]) -> Option<Found> {
     let t = tables::COMMANDS.as_bytes();
     let mut needle = format!(" {}:", family).into_bytes();
     needle.extend_from_slice(path);
@@ -153,7 +181,7 @@ pub fn command(family: &str, path: &[u8]) -> Option<String> {
         let s = p + exact.len();
         let e = t[s..].iter().position(|b| !b.is_ascii_lowercase()).map(|q| s + q).unwrap_or(t.len());
         if e > s {
-            return Some(String::from_utf8_lossy(&t[s..e]).into_owned());
+            return Kind::of_table(&t[s..e]).map(Found::Is);
         }
     }
     let mut more = needle.clone();
@@ -164,7 +192,7 @@ pub fn command(family: &str, path: &[u8]) -> Option<String> {
             q += 1;
         }
         if q < t.len() && t[q] == b'=' {
-            return Some("more".to_string());
+            return Some(Found::More);
         }
     }
     None
@@ -280,7 +308,7 @@ pub struct Reader<'r> {
     pub role: Vec<u8>,
     pub text: Vec<W>,
     pub family: String,
-    pub kind: String,
+    pub kind: Kind,
     pub localbin: bool,
     /// Whether npm read a `--call` (`-c`) script in this statement, in any
     /// of its readings: the script is shell text the reader does not read.
@@ -295,7 +323,7 @@ pub struct Reader<'r> {
     npm_words: Vec<W>,
     npm_values: Vec<(i64, W, W)>,
     pub npm_switches: Vec<(W, bool)>,
-    npm_kind: String,
+    npm_kind: NpmVerb,
 }
 
 impl<'r> Reader<'r> {
@@ -307,7 +335,7 @@ impl<'r> Reader<'r> {
             role: vec![],
             text: vec![],
             family: "none".into(),
-            kind: "none".into(),
+            kind: Kind::None,
             localbin: false,
             call: false,
             ambiguous: -1,
@@ -320,7 +348,7 @@ impl<'r> Reader<'r> {
             npm_words: vec![],
             npm_values: vec![],
             npm_switches: vec![],
-            npm_kind: String::new(),
+            npm_kind: NpmVerb::Other,
         }
     }
 
@@ -853,7 +881,7 @@ impl<'r> Reader<'r> {
     fn read_union(&mut self, w: &[W]) {
         let role = self.role.clone();
         let text = self.text.clone();
-        let kind = self.kind.clone();
+        let kind = self.kind;
         let localbin = self.localbin;
         self.read_once(w);
         for k in 0..role.len() {
@@ -864,7 +892,7 @@ impl<'r> Reader<'r> {
                 self.settext(k, text[k].clone());
             }
         }
-        if self.kind == "none" {
+        if self.kind == Kind::None {
             self.kind = kind;
         }
         if localbin {
@@ -877,7 +905,7 @@ impl<'r> Reader<'r> {
         let n = w.len();
         let mut i = 0usize;
         self.family = "none".into();
-        self.kind = "none".into();
+        self.kind = Kind::None;
         self.localbin = false;
         self.role = vec![b'-'; n];
         self.text = vec![W::new(); n];
@@ -997,11 +1025,9 @@ impl<'r> Reader<'r> {
         if family == "bunx" {
             self.localbin = true;
         }
-        let mut kind = String::new();
-        if let Some(k) = command(&family, b"") {
-            if k != "more" {
-                kind = k;
-            }
+        let mut kind = None;
+        if let Some(Found::Is(k)) = command(&family, b"") {
+            kind = Some(k);
         }
         let mut path: W = W::new();
         let mut endopts = false;
@@ -1077,7 +1103,7 @@ impl<'r> Reader<'r> {
                 i += 1;
                 continue;
             }
-            if kind.is_empty() {
+            if kind.is_none() {
                 if i as i64 == self.force_value {
                     self.setrole(i, b'v');
                     unknown = false;
@@ -1113,8 +1139,8 @@ impl<'r> Reader<'r> {
                     self.setrole(i, b'-');
                     return;
                 };
-                if found != "more" {
-                    kind = found;
+                if let Found::Is(k) = found {
+                    kind = Some(k);
                 }
                 if family == "bun" && path == b"x" {
                     self.localbin = true;
@@ -1126,11 +1152,11 @@ impl<'r> Reader<'r> {
             if has(b's') {
                 endopts = true;
             }
-            match kind.as_str() {
-                "install" => self.setrole(i, b'o'),
-                "runner" | "create" => {
+            match kind {
+                Some(Kind::Install) => self.setrole(i, b'o'),
+                Some(Kind::Runner | Kind::Create) => {
                     if !named {
-                        if kind == "create" {
+                        if kind == Some(Kind::Create) {
                             self.setrole(i, b'C');
                         } else if family == "go" && !t.contains(&b'@') {
                             self.setrole(i, b'a');
@@ -1149,8 +1175,8 @@ impl<'r> Reader<'r> {
             }
             i += 1;
         }
-        if !kind.is_empty() {
-            self.kind = kind;
+        if let Some(k) = kind {
+            self.kind = k;
         }
     }
 
@@ -1163,9 +1189,9 @@ impl<'r> Reader<'r> {
         }
         let role = self.role.clone();
         let text = self.text.clone();
-        let kind = self.kind.clone();
+        let kind = self.kind;
         let localbin = self.localbin;
-        self.kind = "none".into();
+        self.kind = Kind::None;
         self.localbin = false;
         let saved = self.npm_options.clone();
         self.npm_options = self.options_as_other();
@@ -1181,7 +1207,7 @@ impl<'r> Reader<'r> {
                 self.settext(k, text[k].clone());
             }
         }
-        if kind != "none" {
+        if kind != Kind::None {
             self.kind = kind;
         }
         if localbin {
@@ -1203,15 +1229,15 @@ impl<'r> Reader<'r> {
 
     fn npm_kind_of(&mut self, cmd: &[u8]) {
         self.npm_kind = if self.rx.npm_verbs.is_match(cmd) {
-            "install"
+            NpmVerb::Install
         } else if self.rx.npm_link.is_match(cmd) {
-            "link"
+            NpmVerb::Link
         } else if self.rx.npm_exec.is_match(cmd) {
-            "exec"
+            NpmVerb::Exec
         } else if self.rx.npm_init.is_match(cmd) {
-            "init"
+            NpmVerb::Init
         } else {
-            "other"
+            NpmVerb::Other
         }
         .into();
     }
@@ -1241,7 +1267,7 @@ impl<'r> Reader<'r> {
         }
         let w0 = self.npm_words[0].clone();
         if w0 == b"exec" && self.family == "npx" {
-            self.npm_kind = "exec".into();
+            self.npm_kind = NpmVerb::Exec;
         } else {
             self.npm_kind_of(&w0);
         }
@@ -1260,7 +1286,7 @@ impl<'r> Reader<'r> {
             let at = at as usize;
             match key.as_slice() {
                 b"package" => {
-                    if self.npm_kind == "exec" {
+                    if self.npm_kind == NpmVerb::Exec {
                         self.setrole(at, b'p');
                         named = true;
                         if w.get(at).map(|x| x.as_slice()) != Some(text.as_slice()) {
@@ -1277,17 +1303,18 @@ impl<'r> Reader<'r> {
                 _ => {}
             }
         }
-        match self.npm_kind.as_str() {
-            "install" | "link" => self.kind = self.npm_kind.clone(),
-            "exec" => {
-                self.kind = "runner".into();
+        match self.npm_kind {
+            NpmVerb::Install => self.kind = Kind::Install,
+            NpmVerb::Link => self.kind = Kind::Link,
+            NpmVerb::Exec => {
+                self.kind = Kind::Runner;
                 self.localbin = true;
             }
-            "init" => {
-                self.kind = "create".into();
+            NpmVerb::Init => {
+                self.kind = Kind::Create;
                 self.localbin = true;
             }
-            _ => return true,
+            NpmVerb::Other => return true,
         }
         let words = self.npm_words.clone();
         let ats = self.npm_at.clone();
@@ -1297,11 +1324,11 @@ impl<'r> Reader<'r> {
                 continue;
             }
             let at = at as usize;
-            match self.kind.as_str() {
-                "install" | "link" => self.setrole(at, b'o'),
+            match self.kind {
+                Kind::Install | Kind::Link => self.setrole(at, b'o'),
                 _ => {
                     if k == 1 && !named && !call {
-                        self.setrole(at, if self.kind == "create" { b'C' } else { b'r' });
+                        self.setrole(at, if self.kind == Kind::Create { b'C' } else { b'r' });
                     } else {
                         if self.getrole(at) != b'g' {
                             continue;
@@ -1348,7 +1375,7 @@ impl<'r> Reader<'r> {
             k += 1;
         }
         if install {
-            self.kind = "install".into();
+            self.kind = Kind::Install;
         }
     }
 }
@@ -1384,4 +1411,22 @@ fn split_like_shell(v: &[u8]) -> Option<Vec<W>> {
         }
     }
     Some(out)
+}
+
+/// Every kind the command table spells is one `Kind` reads: a misspelled
+/// kind would name no role and read the command as none of them.
+#[cfg(test)]
+#[test]
+fn command_table_kinds_are_kinds() {
+    let mut seen = 0;
+    for entry in tables::COMMANDS.split_whitespace() {
+        let (key, kind) = entry.split_once('=').unwrap();
+        let (family, path) = key.split_once(':').unwrap();
+        assert_eq!(command(family, path.as_bytes()).map(|c| match c { Found::Is(k) => k.as_str(), Found::More => "more" }), Some(kind), "{entry}");
+        seen += 1;
+    }
+    assert!(seen > 50, "the table has its entries: {seen}");
+    for kind in [Kind::None, Kind::Install, Kind::Runner, Kind::Create, Kind::Link] {
+        assert_eq!(Kind::of_table(kind.as_str().as_bytes()).is_some(), !matches!(kind, Kind::None | Kind::Link), "{kind:?}");
+    }
 }

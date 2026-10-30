@@ -3,7 +3,7 @@
 use super::{call::{Call, Record}, effect, heuristics, journal::Journal, jv,
     npm::{self, Npm}, report::{self, Report, cat}, rollback::{Before, Rollback}, sh, snapshot,
     trace::{self, Install}};
-use crate::{os, state};
+use crate::{callid::record as rec, os, state};
 use std::{fs, io::Write, time::Instant};
 type W = Vec<u8>;
 
@@ -88,7 +88,7 @@ fn backstop(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W
 /// other program. So does a command safedeps rewrote with --ignore-scripts.
 fn runner_left_npm_untouched(call: &Call, trace: &Install) -> bool {
     let fact = |key: &str, want: bool| matches!(jv::path(&call.current, &[key]), Ok(crate::json::Value::Bool(v)) if *v == want);
-    trace.absent && trace.read && fact("runner_only", true) && fact("npm_install", false)
+    trace.absent && trace.read && fact(rec::RUNNER_ONLY, true) && fact(rec::NPM_INSTALL, false)
         && !npm::meta_true(&call.store.meta(), "ignore_scripts_injected")
 }
 
@@ -97,7 +97,7 @@ fn runner_left_npm_untouched(call: &Call, trace: &Install) -> bool {
 /// counts. A record that does not hold it as a string that is not blank
 /// holds none: the override is never inferred from a missing field.
 fn accept_risk(call: &Call) -> Option<W> {
-    match jv::field(&call.current, "accept_risk") {
+    match jv::field(&call.current, rec::ACCEPT_RISK) {
         Ok(crate::json::Value::Str(reason)) if reason.iter().any(|b| *b != b' ') => Some(reason.clone()),
         _ => None,
     }
@@ -119,7 +119,7 @@ fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<
     let audit = state::accepted_risk_path(&home);
     let entry = jv::obj(vec![
         ("at", jv::s(os::utc_stamp(os::wall(os::WallRole::AcceptedRiskEntry).seconds()).as_bytes())),
-        ("tool_use_id", jv::field(&call.current, "tool_use_id").ok().filter(|v| matches!(v, crate::json::Value::Str(_))).cloned().unwrap_or(crate::json::Value::Null)),
+        ("tool_use_id", jv::field(&call.current, rec::TOOL_USE_ID).ok().filter(|v| matches!(v, crate::json::Value::Str(_))).cloned().unwrap_or(crate::json::Value::Null)),
         ("project", jv::s(sh::bytes(&call.store.project))), ("command", jv::s(&call.command)), ("reason", jv::s(reason)),
         ("snapshot", jv::s(&call.store.id)), ("problems", crate::json::Value::Arr(accepted.problems.iter().map(|p| jv::s(p)).collect())),
         ("packages", crate::json::Value::Arr(accepted.packages.clone())),

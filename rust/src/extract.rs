@@ -11,7 +11,7 @@
 //! asks the regex engine for the POSIX leftmost-longest match.
 
 use crate::ere::Regex;
-use crate::manager::Reader;
+use crate::manager::{Kind, Reader};
 
 type W = Vec<u8>;
 
@@ -450,7 +450,7 @@ pub fn node_runner(rd: &mut Reader, words: &[u8]) -> bool {
         return false;
     }
     rd.read(&w);
-    if rd.kind != "runner" || rd.call || !matches!(rd.family.as_str(), "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "bun" | "bunx") {
+    if rd.kind != Kind::Runner || rd.call || !matches!(rd.family.as_str(), "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "bun" | "bunx") {
         return false;
     }
     let word_of = |k: usize| -> W {
@@ -504,7 +504,7 @@ pub fn extract_statement(x: &XRegexes, rd: &mut Reader, gate_reads: bool, words:
         return;
     }
     rd.read(&w);
-    if rd.kind == "none" {
+    if rd.kind == Kind::None {
         return;
     }
     let family = rd.family.clone();
@@ -550,7 +550,7 @@ pub fn extract_statement(x: &XRegexes, rd: &mut Reader, gate_reads: bool, words:
                 text = t;
             }
         }
-        if rd.kind == "link" && npa_is_local(x, &text) {
+        if rd.kind == Kind::Link && npa_is_local(x, &text) {
             continue;
         }
         let ks = k.to_string();

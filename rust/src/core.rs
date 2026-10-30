@@ -13,7 +13,7 @@ use crate::ere::Regex;
 use crate::extract::{self, XRegexes};
 use crate::grammar;
 use crate::lex::{self, Lex, Reading};
-use crate::manager::{self, Reader, Regexes};
+use crate::manager::{self, Kind, Reader, Regexes};
 
 type W = Vec<u8>;
 
@@ -588,14 +588,14 @@ impl<'c> Run<'c> {
                 kind = "other".into();
                 if !mw.is_empty() {
                     rd.read(&mw);
-                    if rd.family == "npm" && (rd.kind == "install" || rd.kind == "link") {
+                    if rd.family == "npm" && matches!(rd.kind, Kind::Install | Kind::Link) {
                         kind = "npm".into();
                     }
                 }
                 if kind != "npm" {
                     break;
                 }
-                if rd.kind == "link" {
+                if rd.kind == Kind::Link {
                     kind = "npm-unrecorded".into();
                 }
                 break;
@@ -741,7 +741,7 @@ impl<'c> Run<'c> {
                 return Invalid("the command could not be read");
             };
             rd.read(&statement.manager_words());
-            if self.recognized(&statement.rec) && rd.family == "npm" && rd.kind == "install" {
+            if self.recognized(&statement.rec) && rd.family == "npm" && rd.kind == Kind::Install {
                 let value = match accept_risk_value(&statement.tokens) {
                     Ok(Some(value)) => value,
                     Ok(None) => return Invalid("an npm install in this command does not carry it among its own prefix assignments"),

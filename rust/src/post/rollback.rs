@@ -1,6 +1,6 @@
 //! Rollback writes only the paths it inspected. It never runs npm.
 use super::{jv,snapshot::{self,Store},trace::{self,Install},report::{self,Report,cat},sh};
-use crate::{json::Value,state,os,outcome::{Outcome,Action,Form}};
+use crate::{callid::record as rec,json::Value,state,os,outcome::{Outcome,Action,Form}};
 use std::{collections::HashSet,path::Path};
 
 /// What node_modules was before the command, as a record taken then states
@@ -26,9 +26,9 @@ impl Before {
     pub fn of_entry(project:&Path,entry:&[u8],moved:bool)->Self{
         if moved||entry.is_empty(){return Self::Unknown}
         let Ok(v)=crate::json::parse_one(entry) else{return Self::Unknown};
-        match jv::path(&v,&["inodes","node_modules"]) {
+        match jv::path(&v,&[rec::INODES,rec::TREE]) {
             Ok(Value::Str(i)) if !i.is_empty()&&os::tree_inode(&project.join("node_modules")).as_bytes()==i.as_slice()=>{
-                let listed=match jv::field(&v,"entries") {
+                let listed=match jv::field(&v,rec::ENTRIES) {
                     Ok(Value::Arr(xs))=>xs.iter().map(|x|match x {Value::Str(s)=>Some(s.clone()),_=>None}).collect::<Option<Vec<_>>>(),
                     _=>None,
                 };
@@ -48,7 +48,7 @@ impl<'a> Rollback<'a>{
     /// Construct before restoring any file: comparisons are against the
     /// command's snapshot, even when the rollback target is an older one.
     pub fn new(store:&'a Store,report:&'a mut Report,trace:&'a mut Install,pre:Vec<u8>,target:Vec<u8>,backstop:bool,before:Before)->Self{
-        let npm_project=["package.json","package-lock.json","node_modules/.package-lock.json"].iter().any(|n|sh::is_file(&store.project.join(n)));
+        let npm_project=["package.json",rec::RECORDS[0],rec::RECORDS[1]].iter().any(|n|sh::is_file(&store.project.join(n)));
         let mut out=Self{store,report,trace,pre,target,backstop,before,npm_project,wrote:None,compared:Vec::new(),different:Vec::new(),refused:HashSet::new(),stepped:HashSet::new()};
         if out.pre.is_empty()||!sh::is_file(&store.path(&out.pre,b"meta.json")){return out}
         if !out.trace.records.is_empty(){out.wrote=Some(true);return out}

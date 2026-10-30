@@ -106,8 +106,8 @@ impl Call {
         let mut project = cwd;
         if let Some(p) = &pending {
             if let Some(value) = jv::read_one_object(p) {
-                snapshot_id = string(&value, "snapshot_id");
-                let dir = string(&value, "project_dir");
+                snapshot_id = string(&value, callid::record::SNAPSHOT_ID);
+                let dir = string(&value, callid::record::PROJECT_DIR);
                 if !dir.is_empty() { project = sh::p(&dir); }
                 current = value;
                 record = Record::Install;

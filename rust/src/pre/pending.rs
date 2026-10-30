@@ -1,7 +1,7 @@
 //! After the final verdict, one call's record and its install trace baseline.
 //! Backstop entries and install records are mutually exclusive caller paths.
 use super::{cat, Call, snapshot::Snapshot};
-use crate::{callid,jq,json::Value,md5,os,state};
+use crate::{callid::{self,record as rec},jq,json::Value,md5,os,state};
 use std::{fs,io,os::unix::{fs::{DirBuilderExt,MetadataExt,OpenOptionsExt},ffi::OsStrExt},path::{Path,PathBuf}};
 
 pub struct Record<'a> {
@@ -46,9 +46,8 @@ pub fn write(call:&Call,snapshot:&Snapshot,record:&Record)->io::Result<PathBuf> 
     let trace_path=os::path(&cat(&[base.as_os_str().as_bytes(),b".trace"]));
     let project=os::path(&snapshot.project);
     let trace=if record.npm_install||record.runner_only{
-        let value=jq::obj(vec![("baseline",jq::arg(trace_path.as_os_str().as_bytes())),("inodes",jq::obj(vec![
-            ("package-lock.json",jq::s(&inode(&project.join("package-lock.json")))),
-            ("node_modules/.package-lock.json",jq::s(&inode(&project.join("node_modules/.package-lock.json"))))]))]);
+        let value=jq::obj(vec![(rec::BASELINE,jq::arg(trace_path.as_os_str().as_bytes())),(rec::INODES,jq::obj(
+            rec::RECORDS.iter().map(|rel|(*rel,jq::s(&inode(&project.join(rel))))).collect()))]);
         fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&trace_path)?;
         value
     }else{jq::J::Null};
@@ -56,11 +55,11 @@ pub fn write(call:&Call,snapshot:&Snapshot,record:&Record)->io::Result<PathBuf> 
         jq::obj(vec![("unknown",jq::arg(&cat(&[b"npm was not asked which registry this install fetches from: ",record.fetch_why])))])
     };
     let value=jq::obj(vec![
-        ("snapshot_id",jq::s(&snapshot.id)),("project_dir",jq::arg(&snapshot.project)),("dir_hash",jq::s(&snapshot.hash)),
-        ("project_dir_from",jq::s(record.project_from)),("npm_install",jq::J::Bool(record.npm_install)),("runner_only",jq::J::Bool(record.runner_only)),
-        ("npm_trace",trace),("npm_unattributable",jq::arg(record.attribution)),
-        ("npm_fetch",fetch),("tool_use_id",id.as_deref().map(jq::s).unwrap_or(jq::J::Null)),
-        ("accept_risk",record.accept_risk.map(jq::arg).unwrap_or(jq::J::Null)),
+        (rec::SNAPSHOT_ID,jq::s(&snapshot.id)),(rec::PROJECT_DIR,jq::arg(&snapshot.project)),(rec::DIR_HASH,jq::s(&snapshot.hash)),
+        (rec::PROJECT_DIR_FROM,jq::s(record.project_from)),(rec::NPM_INSTALL,jq::J::Bool(record.npm_install)),(rec::RUNNER_ONLY,jq::J::Bool(record.runner_only)),
+        (rec::NPM_TRACE,trace),(rec::NPM_UNATTRIBUTABLE,jq::arg(record.attribution)),
+        (rec::NPM_FETCH,fetch),(rec::TOOL_USE_ID,id.as_deref().map(jq::s).unwrap_or(jq::J::Null)),
+        (rec::ACCEPT_RISK,record.accept_risk.map(jq::arg).unwrap_or(jq::J::Null)),
     ]);
     let path=os::path(&cat(&[base.as_os_str().as_bytes(),b".json"]));
     state::write_state_file(&path,jq::pretty(&value).as_bytes())?;

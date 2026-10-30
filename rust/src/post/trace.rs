@@ -3,7 +3,8 @@ use super::{jv, sh, report::cat};
 use crate::{json::Value, os, state, outcome::{Outcome,Action,Form}};
 use std::{fs, path::{Path,PathBuf}, os::unix::{ffi::OsStrExt,fs::MetadataExt}, time::{Duration,Instant}};
 
-pub const RECORDS: [&str;2] = ["package-lock.json","node_modules/.package-lock.json"];
+pub use crate::callid::record::RECORDS;
+use crate::callid::record as rec;
 
 /// jq raw output, captured by a command substitution. Errors erase the
 /// result where the shell caller assigns an explicit fallback.
@@ -121,19 +122,19 @@ pub struct Install { pub absent:bool,pub read:bool,pub records:Vec<Vec<u8>>,pub 
 impl Install {
     pub fn settle(project:&Path,home:&Path,current:&Value,command:&[u8])->Self {
         let mut out=Self::default();
-        let baseline=read(current,&["npm_trace","baseline"],b"");
+        let baseline=read(current,&[rec::NPM_TRACE,rec::BASELINE],b"");
         if baseline.is_empty() {out.line=b"the pending state of this command names no install-trace baseline".to_vec();return out}
         let baseline=sh::p(&baseline);
         if sh::is_file(&baseline) {
             for rel in RECORDS {
                 let file=project.join(rel); if !sh::exists(&file) {continue}
-                let recorded=match jv::path(current,&["npm_trace","inodes",rel]) {Ok(v)=>if jv::truthy(v) {jv::tostring(v)}else{Vec::new()},Err(_)=>b"?".to_vec()};
+                let recorded=match jv::path(current,&[rec::NPM_TRACE,rec::INODES,rel]) {Ok(v)=>if jv::truthy(v) {jv::tostring(v)}else{Vec::new()},Err(_)=>b"?".to_vec()};
                 let inode=fs::symlink_metadata(&file).map(|m|m.ino().to_string().into_bytes()).unwrap_or_default();
                 if (!inode.is_empty() && inode!=recorded) || newer(&file,&baseline,false,true) {out.records.push(rel.as_bytes().to_vec());}
             }
             if out.records.is_empty() {out.absent=true;out.read=true;out.line=cat(&[b"no install trace in ",sh::bytes(project),b": neither npm lockfile there is newer than the baseline taken before this command or has another inode"]);}
             else {
-                let why=read(current,&["npm_unattributable"],b"");
+                let why=read(current,&[rec::NPM_UNATTRIBUTABLE],b"");
                 if !why.is_empty() {state::log_advisory(home,&cat(&[b"post-verify UNGATED: the install trace in ",sh::bytes(project),b" cannot answer for every npm install in this command: ",&why,b", so one of them may have landed elsewhere unread. Command: ",command]));}
             }
         } else {out.absent=true;out.line=cat(&[b"no install trace in ",sh::bytes(project),b": the baseline file ",sh::bytes(&baseline),b" does not exist"]);}
@@ -154,7 +155,7 @@ pub fn backstop(project:&Path,entry:&[u8],none:&[u8],moved:bool)->(bool,Vec<u8>)
     let st=jv::read(entry);
     let mut lines=Vec::new();
     for v in &st.values {
-        for keys in [vec!["baseline"],vec!["resolution"],vec!["inodes","package-lock.json"],vec!["inodes","node_modules/.package-lock.json"],vec!["inodes","node_modules"],vec!["clocks","package-lock.json"],vec!["clocks","node_modules/.package-lock.json"]] {
+        for keys in [vec![rec::BASELINE],vec![rec::RESOLUTION],vec![rec::INODES,RECORDS[0]],vec![rec::INODES,RECORDS[1]],vec![rec::INODES,rec::TREE],vec![rec::CLOCKS,RECORDS[0]],vec![rec::CLOCKS,RECORDS[1]]] {
             match jv::path(v,&keys) {Ok(x)=>lines.extend(if jv::truthy(x) {jv::tostring(x)}else{Vec::new()}.split(|b|*b==b'\n').map(Vec::from)),Err(_)=>break}
         }
     }
@@ -173,7 +174,7 @@ pub fn backstop(project:&Path,entry:&[u8],none:&[u8],moved:bool)->(bool,Vec<u8>)
             }
         }
     } else {
-        for (i,rel) in [RECORDS[0],RECORDS[1],"node_modules"].iter().enumerate() {
+        for (i,rel) in [RECORDS[0],RECORDS[1],rec::TREE].iter().enumerate() {
             let recorded=&lines[2+i];let file=project.join(rel);
             if !sh::present(&file) {
                 if !recorded.is_empty(){return(true,cat(&[sh::bytes(&file),b" existed before this command and does not exist now"]))} continue;
@@ -182,7 +183,7 @@ pub fn backstop(project:&Path,entry:&[u8],none:&[u8],moved:bool)->(bool,Vec<u8>)
             if os::tree_inode(&file).as_bytes()!=recorded{return(true,cat(&[sh::bytes(&file),b" has another inode than before this command"]))}
             if i==2 {continue}
             if lines[5+i].is_empty() || os::tree_clock(&file).as_bytes()!=lines[5+i]{return(true,cat(&[sh::bytes(&file),b" has another status change time than the one recorded before this command"]))}
-            if lines[1]!=b"subsecond" && newer(&file,&baseline,true,true){return(true,cat(&[sh::bytes(&file),b" changed after the baseline taken before this command"]))}
+            if lines[1]!=rec::SUBSECOND.as_bytes() && newer(&file,&baseline,true,true){return(true,cat(&[sh::bytes(&file),b" changed after the baseline taken before this command"]))}
         }
     }
     let tree=project.join("node_modules");
@@ -261,7 +262,7 @@ mod tests {
 }
 pub fn drop_baseline(home:&Path,entry:&[u8]) {
     let st=jv::read(entry);
-    let (lines,rc)=jv::each(&st,|v|{let x=jv::field(v,"baseline")?;Ok(if jv::truthy(x){vec![jv::tostring(x)]}else{Vec::new()})});
+    let (lines,rc)=jv::each(&st,|v|{let x=jv::field(v,rec::BASELINE)?;Ok(if jv::truthy(x){vec![jv::tostring(x)]}else{Vec::new()})});
     if rc!=0{return}
     let path=jv::captured(&lines);
     let prefix=cat(&[sh::bytes(home),b"/pending/backstop/"]);
