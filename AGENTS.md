@@ -137,11 +137,16 @@ The bypass-harness and regression rule above still holds for every security chan
   or a subreaper, so a fixture names a process by what it runs (`judgment` in
   `scripts/test/lib/native_budget_owners.py`), never by the pid the kernel
   handed back.
-- **An owner is gone on a fact, and what is not known keeps the lease.** The
-  kernel has no such pid, `ps` shows a zombie, or `ps` shows another start and
-  another command under the pid (`running`). A failed `ps`, an empty field and
-  a broken record are not known, on the side that reads a record and on the
-  side that makes one: a run `ps` cannot name does not start.
+- **A process is its pid and the start the kernel stored, and an owner is gone
+  on a fact.** The start is a number (`kernel` in
+  `scripts/test/lib/native_budget_owners.py`: `sysctl KERN_PROC_PID` on macOS,
+  `/proc/<pid>/stat` field 22 on WSL1), so exec, a time zone, a locale and
+  `PATH` do not move it. The program in a record is a label no verdict reads.
+  Gone is one of three facts: the kernel has no such pid, it holds a zombie, or
+  it holds another start under the pid (`running`). A failed read, an empty
+  field and a broken record are not known, and what is not known keeps the
+  lease, on the side that reads a record and on the side that makes one: a run
+  the kernel cannot name does not start. A failed read never turns to `ps`.
 - **A fixture's start is not the contract.** A wall-clock budget and a fixture's
   own start race on a busy machine. A deadline that lands first is the answer a
   stalled row asks for, so the row records that the fixture held nothing

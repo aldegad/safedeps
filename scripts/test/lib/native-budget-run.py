@@ -102,9 +102,6 @@ else:raise SystemExit('unexpected npm question: '+repr(sys.argv))
 '''.replace('import json,os,signal,sys,time','import json,math,os,signal,subprocess,sys,time')
 
 
-def state(pid):
-    return subprocess.run(['ps','-o','stat=','-p',str(pid)],capture_output=True,text=True).stdout.strip()
-
 def children(pid):
     return [int(c) for c in subprocess.run(['pgrep','-P',str(pid)],capture_output=True,text=True).stdout.split()]
 
@@ -185,23 +182,13 @@ def main():
                 if absent:errors.append('no judgment process: '+absent)
                 elif not held and 'judgment process ended without' in reason:errors.append('no judgment process: it ended before the fixture reached it')
                 elif not held:errors.append('fixture did not reach its judgment signal')
-        states={}
-        for row in observed:
-            pid=row['pid'];s=''
-            for attempt in range(60):
-                s=state(pid)
-                if not s or s.startswith('Z'):break
-                time.sleep(.02)
-            states[str(pid)]=s
-        gone=all(not s or s.startswith('Z') for s in states.values())
-        if a.delay:
-            # pids.jsonl holds what the fixture got to write, and a deadline can
-            # land before it writes. The process table holds the rest.
-            for attempt in range(60):
-                left=subprocess.run(['pgrep','-f',str(npm)],capture_output=True,text=True).stdout.split()
-                if not left:break
-                time.sleep(.02)
-            gone=gone and not left
+        # The fixture registered each process before it wrote its line, so a record
+        # says which process is meant, and a pid reused since reads as gone.
+        left=owners.left([owners.load(lease/(str(row['pid'])+'.json')) for row in observed])
+        gone=not left
+        # pids.jsonl holds what the fixture got to write, and a deadline can land
+        # before it writes. The process table holds the rest.
+        if a.delay:gone=gone and owners.nothing_holds(str(npm))
         if a.delay and (not witness or witness.poll() is not None):errors.append('unrelated witness stopped')
         if list(box.glob('expired-*')):errors.append('fixture expired rather than supervisor cleanup')
         if 'UNDECIDED' in hook.get('permissionDecisionReason',''):
@@ -211,7 +198,7 @@ def main():
         result=dict(rc=proc.returncode if proc else None,stdout=raw,stderr=stderr,elapsed=elapsed,
                     elapsed_seconds=math.ceil(elapsed),elapsed_ms=round(elapsed*1000),
                     decision=hook.get('permissionDecision','pass'),reason=hook.get('permissionDecisionReason',''),
-                    advisory=log.read_text() if log.exists() else '',observed=observed,states=states,
+                    advisory=log.read_text() if log.exists() else '',observed=observed,left=left,
                     descendants_gone=gone,held=held,paused=resumed is not None,ask_limit=ask_limit,no_judgment=absent,npm=found,supervisor=supervisor,
                     response_after_resume=None if resumed is None else elapsed-(resumed-start),errors=errors)
         (box/'result.json').write_text(json.dumps(result,indent=2)+'\n')
