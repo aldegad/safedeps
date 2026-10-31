@@ -41,10 +41,10 @@ def swept(*suite):
     except Exception as e:return 'the sweep died: '+repr(e)
 
 @contextlib.contextmanager
-def failing_ps(tmp,times):
-    """ps exits 1 the next times it runs. PATH decides what starts, so no reader is stubbed."""
+def failing_ps(tmp,times,first=':'):
+    """ps exits 1 the next times it runs, after the shell in first. PATH decides what starts, so no reader is stubbed."""
     shim=Path(tmp)/'ps-shim';shim.mkdir(exist_ok=True);left=shim/'left';left.write_text(str(times)+'\n')
-    (shim/'ps').write_text('#!/bin/sh\nread left < "'+str(left)+'"\nif [ "$left" -gt 0 ]; then echo $((left - 1)) > "'+str(left)+'"; exit 1; fi\n'
+    (shim/'ps').write_text('#!/bin/sh\nread left < "'+str(left)+'"\nif [ "$left" -gt 0 ]; then echo $((left - 1)) > "'+str(left)+'"; '+first+'; exit 1; fi\n'
                            'exec '+shutil.which('ps')+' "$@"\n')
     (shim/'ps').chmod(0o755)
     with mock.patch.dict(os.environ,PATH=str(shim)+':'+os.environ['PATH']):yield
@@ -190,6 +190,13 @@ def main():
                 second=owners.cleanup(mine)
                 results.append(check(stayed and killed(witness) and not mine.exists() and second.get('unknown')==[],
                                      "cleanup keeps a lease while ps gives no word of its process, and finishes once ps answers"))
+            # An orphan, so nothing is left of it once it dies: no zombie for ps to find.
+            with markers(tmp,'ending'):
+                mine=owners.create(os.getpid())
+                pid=int(subprocess.run(['/bin/sh','-c','sleep 60 >/dev/null 2>&1 & echo $!'],capture_output=True,text=True).stdout)
+                owners.register(mine,pid,'npm')
+                with failing_ps(tmp,1,'kill -9 '+str(pid)+'; while kill -0 '+str(pid)+' 2>/dev/null; do :; done'):receipt=owners.cleanup(mine)
+                results.append(check(receipt.get('unknown')==[] and not mine.exists(),"a process that ends while ps is read is gone, not unknown"))
             with markers(tmp,'torn'):
                 child=sleeper();spawned.append(child);bare=sleeper();spawned.append(bare)
                 lease=lease_of(dead_pid(),'gone','torn');owners.register(lease,child.pid,'npm');(lease/'77.json').write_text('{"pid":')

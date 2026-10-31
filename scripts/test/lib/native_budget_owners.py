@@ -131,6 +131,7 @@ def running(row):
     if type(pid) is not int or pid<=1:return None
     if ended(pid) or stat(pid).startswith('Z'):return False
     then=IDENTITY.fullmatch(str(row.get('identity')));now=IDENTITY.fullmatch(identity(pid))
+    if not now and ended(pid):return False  # it ended while ps was read
     if not then or not now:return None
     if then[1]==now[1]:return True
     return None if then[2]==now[2] else False
