@@ -34,10 +34,10 @@ def killed(process):
     try:return process.wait(timeout=5)==-signal.SIGKILL
     except subprocess.TimeoutExpired:return False
 
-def swept(*suite):
+def swept(*suite,note=None):
     """A sweep's receipts, or what it died of. The leases it notes here are this control's."""
     try:
-        with contextlib.redirect_stderr(io.StringIO()):return owners.sweep(*suite)
+        with contextlib.redirect_stderr(note or io.StringIO()):return owners.sweep(*suite)
     except Exception as e:return 'the sweep died: '+repr(e)
 
 @contextlib.contextmanager
@@ -127,8 +127,7 @@ def main():
             results.append(check(not failed,"the pid in a lease's name is enough: with it gone a broken record goes, and its process"+(': '+str(failed) if failed else '')))
             with markers(tmp,'said'):
                 lease=owners.MARKERS/(str(os.getpid())+'-said');lease.mkdir();(lease/'owner.json').write_text('{"pid":')
-                note=io.StringIO()
-                with contextlib.redirect_stderr(note):owners.sweep()
+                note=io.StringIO();swept(note=note)
                 results.append(check(str(lease) in note.getvalue(),"a lease left because its owner is not known is named"))
             # A reader in another zone or locale prints the same process another way.
             with markers(tmp,'zone'):
