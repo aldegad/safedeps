@@ -136,7 +136,12 @@ The bypass-harness and regression rule above still holds for every security chan
 - **A lease names what the run started.** `getppid()` of an orphan answers init
   or a subreaper, so a fixture names a process by what it runs (`judgment` in
   `scripts/test/lib/native_budget_owners.py`), never by the pid the kernel
-  handed back. A failed `ps` read does not say an owner is gone.
+  handed back.
+- **An owner is gone on a fact, and what is not known keeps the lease.** The
+  kernel has no such pid, `ps` shows a zombie, or `ps` shows another start and
+  another command under the pid (`running`). A failed `ps`, an empty field and
+  a broken record are not known, on the side that reads a record and on the
+  side that makes one: a run `ps` cannot name does not start.
 - **A fixture's start is not the contract.** A wall-clock budget and a fixture's
   own start race on a busy machine. A deadline that lands first is the answer a
   stalled row asks for, so the row records that the fixture held nothing

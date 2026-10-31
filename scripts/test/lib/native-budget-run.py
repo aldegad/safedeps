@@ -40,7 +40,7 @@ def questions(parent):
     # Not pgrep: on macOS it leaves out its own ancestors, and this process is one.
     return subprocess.run(['ps','-A','-o','ppid='],capture_output=True,text=True).stdout.split().count(str(parent))
 def no_judgment(parent):
-    (box/'no-judgment').write_text('parent '+str(parent)+' is '+(owners.command(parent) or 'gone'))
+    (box/'no-judgment').write_text('parent '+str(parent)+' is '+(owners.command(parent) or 'not answered by ps'))
     raise SystemExit('no judgment process')
 if delay:
     signal.signal(signal.SIGTERM,signal.SIG_IGN)
