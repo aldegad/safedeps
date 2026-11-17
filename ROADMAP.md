@@ -8,7 +8,7 @@
 
 Safedeps gates **development dependency installs** (npm / pip / cargo / go / gem / maven / nuget). At release time it also runs a repo-tree secret scan, dependency audit, and git-hook install/check (the lane absorbed from the former `security-release-gates`).
 
-Out of scope: OS / system packages, container images, runtime sandboxing, registry integrity, and reputation analysis. Those are different security layers and stay in different tools — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 for the boundary.
+Out of scope: OS / system packages, runtime sandboxing, registry integrity, and reputation analysis. The daily watch reports the update status of host JDKs from official vendor sources, which is a status, not an advisory verdict: OSV stays the one advisory truth for packages. Packages inside container images are not measured, and a JDK image named in a Dockerfile is reported as unmeasured. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 for the boundary.
 
 ---
 
@@ -58,7 +58,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 - The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.20.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
-- The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
+- The daily watch uses no LLM tokens and is opt-in: the same macOS `launchd` user agent, installed by `install-safedeps-recheck-agent.mjs`, now runs `safedeps --json watch scan` daily. On top of the ledger re-check, it judges the lockfiles under the registered project roots and reports the update status of the host's JDKs. It writes `~/.safedeps/watch/state.json`, `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl`. It raises a macOS notification on new events, a population that is not fresh, a run with errors, a stale agent runtime, and the ledger alerts kept from the re-check (new CVE/KEV/revoke/provider-skip/suspected-forgery). A busy scan is recorded in `recheck-alerts.jsonl` without a notification. Network is used only for OSV / CISA KEV / GHSA queries, the OpenJDK Vulnerability Group advisories, the Adoptium API, and the native audits of pnpm, yarn and bun against the npm registry's advisory database.
 
 ## v2.2 — effect-based enforcement (npm)
 

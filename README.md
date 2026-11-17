@@ -354,7 +354,7 @@ What the lane is made of:
 - **`safedeps hooks install`** activates the repo-local hooks (`core.hooksPath = .githooks`).
 - The **pre-commit hook runs two checks**:
   - **Secret scan** (`safedeps scan secrets --staged`) on every commit, **fail-closed**. If the scanner (local `gitleaks` or Docker) cannot run, it blocks the commit instead of skipping silently.
-  - **Dependency audit** (`safedeps audit`) on **every commit** in a repo that has a supported lockfile. It auto-detects the ecosystem from the lockfile(s) present — npm (`package-lock.json`), pnpm (`pnpm-lock.yaml`), yarn (`yarn.lock`), or bun (`bun.lock`) — and delegates to that tool's native audit. This catches a vulnerable direct *or transitive* dependency — including a CVE that was published *after* you installed the package ("looked safe then, flagged now"), the kind of thing a human never reviews by hand. Running it every commit (not only when the lockfile changes) is the point: it re-queries the advisory DB so a newly-disclosed CVE on an already-installed dependency surfaces at the very next commit. The verdict and an availability failure are kept apart: a real finding **blocks** (fail-closed), but if the advisory DB is **unreachable** (offline / registry error) the hook **warns and lets the commit through** — an observable availability failover, never a silent skip. (CI and the daily re-check then re-cover what the offline commit could not verify.)
+  - **Dependency audit** (`safedeps audit`) on **every commit** in a repo that has a supported lockfile. It auto-detects the ecosystem from the lockfile(s) present — npm (`package-lock.json`), pnpm (`pnpm-lock.yaml`), yarn (`yarn.lock`), or bun (`bun.lock`) — and delegates to that tool's native audit. This catches a vulnerable direct *or transitive* dependency — including a CVE that was published *after* you installed the package ("looked safe then, flagged now"), the kind of thing a human never reviews by hand. Running it every commit (not only when the lockfile changes) is the point: it re-queries the advisory DB so a newly-disclosed CVE on an already-installed dependency surfaces at the very next commit. The verdict and an availability failure are kept apart: a real finding **blocks** (fail-closed), but if the advisory DB is **unreachable** (offline / registry error) the hook **warns and lets the commit through** — an observable availability failover, never a silent skip. (CI and the daily watch then re-cover what the offline commit could not verify.)
 
   The only intentional bypass is `git commit --no-verify`, which the human owns.
 
@@ -500,21 +500,49 @@ The installer is idempotent and only adds symlinks/hook entries. The `--link-bin
 
 If you want the skill folder itself to be the canonical local source, prefer the GitHub setup above.
 
-### Daily Re-check With macOS Alerts
+### Daily Watch With macOS Alerts
 
-Install a per-user LaunchAgent to re-check the approved-spec ledger once per day:
+Install a per-user LaunchAgent to run the daily watch once per day:
 
 ```bash
-node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0
+node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0 \
+  --population-command /usr/local/bin/list-projects \
+  --exclude /Volumes/share \
+  --followup remote_mount=remote-mount-plan
 ```
 
-This runs `safedeps re-check --json` against `~/.safedeps/approved-specs/`. It does not use LLM tokens; it only calls the advisory providers used by safedeps. If a new CVE/KEV is found, a spec is revoked, a provider check is skipped, or a ledger entry has no matching `advisory.log` approval record (a suspected forgery), the wrapper writes `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification.
+`--population-command` is the absolute path of the command that lists your project roots. It prints one `name<TAB>path` a line. `--exclude` is an absolute prefix the scan never reads. `--followup KIND=PLAN` names the plan that owns an unmeasured kind. `--tool-path DIR` names a directory for node, pnpm, yarn or bun. launchd's PATH has no pnpm, yarn or bun, so the installer records their directories. Without `--tool-path` it searches its own PATH. An option not given keeps what is there. `configure` writes only the watch options, without reinstalling.
+
+The agent's wrapper runs `safedeps --json watch scan`. One run does three things in order:
+
+1. It runs the ledger re-check, as the daily job did before.
+2. It refreshes the list of registered project roots and judges the lockfiles under each readable root.
+3. It reports the update status of the host's JDKs under the macOS system path and under SDKMAN. That is a status, not an advisory verdict.
+
+The scan classifies every root against the mount table and the exclude prefixes before it opens anything under it. It never reads a network mount or an excluded prefix. It counts them and reports them as unmeasured. A lockfile kind with no resolver yet, such as `Cargo.lock` or `go.sum`, is also an unmeasured row. It is not clean.
+
+There is no `clean` state. A finding closes only on evidence: a lockfile measured again holds a version outside the affected range, OSV withdrew the advisory, or you recorded the root as gone for good with `safedeps watch retire`. Nothing else closes it. A root that cannot be reached or a provider that failed keeps the finding as it was, marked `stale_measurement`.
+
+Every run prints one summary line. `complete` is true only when the population is fresh, nothing is unmeasured and nothing is blocked.
+
+The scan publishes its result to `~/.safedeps/watch/state.json`. Each wrapper run writes a line with `runtime_version` to `~/.safedeps/recheck.log`. Alerts go to `~/.safedeps/recheck-alerts.jsonl` and a macOS notification. The wrapper alerts once per run when there are new events, the population is not fresh, the run has errors, or the agent runtime is stale. A busy scan is recorded in `recheck-alerts.jsonl` without a notification. The wrapper keeps the old re-check alerts on the ledger part: a new CVE or KEV, a revoked spec, a skipped provider, a suspected forgery. If the report carries `agent_runtime_stale: true`, reinstall the agent.
+
+Exit codes of `safedeps watch scan`:
+
+- `0`: published.
+- `1`: published with errors. The full report is still printed.
+- `3`: nothing published. The previous generation stands.
+- `75`: busy. Another run holds the lock and nothing changed. Retry later.
+
+The watch detects and records. It never edits a project, installs anything or updates a JDK. A consumer outside safedeps takes the events with `safedeps watch claim` and `safedeps watch ack`. For how it works, see ["The daily watch" in ARCHITECTURE.md](./ARCHITECTURE.md#the-daily-watch).
 
 Useful commands:
 
 ```bash
 node scripts/install/install-safedeps-recheck-agent.mjs status
 node scripts/install/install-safedeps-recheck-agent.mjs uninstall
+safedeps watch status
+safedeps help watch
 tail -f ~/.safedeps/recheck.log
 ```
 

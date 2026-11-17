@@ -354,7 +354,7 @@ $ safedeps doctor --fix
 - **`safedeps hooks install`**는 repo 로컬 훅(`core.hooksPath = .githooks`)을 활성화합니다.
 - **pre-commit 훅은 두 가지 검사 실행**:
   - **시크릿 스캔** (`safedeps scan secrets --staged`) — 매 커밋마다 실행, **fail-closed**. 로컬 `gitleaks` 또는 Docker 스캐너가 실행 불가하면 무시하지 않고 커밋을 차단합니다.
-  - 지원 lockfile이 있는 repo에서 **매 커밋마다 의존성 감사** (`safedeps audit`)를 실행. 있는 lockfile에서 ecosystem을 자동 감지해 — npm(`package-lock.json`), pnpm(`pnpm-lock.yaml`), yarn(`yarn.lock`), bun(`bun.lock`) — 각 도구의 네이티브 audit에 위임합니다. 이는 취약한 직접 또는 전이 의존성을 잡습니다. 특히 설치 당시에는 안전했으나 나중에 CVE가 공개된 경우(“그때는 괜찮았는데 지금은 위험”)도 잡아낼 수 있습니다. lockfile 변경 시점만이 아니라 매 커밋마다 실행하는 이유가 바로 여기에 있습니다. advisory DB를 재조회해 새로 공개된 CVE를 바로 다음 커밋에서 감지합니다. 판정과 가용성 실패는 분리되어 처리되며, 실제 탐지는 **차단**하고 advisory DB가 **접근 불가**(오프라인/레지스트리 오류)인 경우에는 **경고 후 커밋 통과**합니다. 이는 가시적인 가용성 폴백이며 조용한 생략이 아닙니다. (CI와 일일 재검사가 오프라인 커밋에서 못 본 부분을 보완합니다.)
+  - 지원 lockfile이 있는 repo에서 **매 커밋마다 의존성 감사** (`safedeps audit`)를 실행. 있는 lockfile에서 ecosystem을 자동 감지해 — npm(`package-lock.json`), pnpm(`pnpm-lock.yaml`), yarn(`yarn.lock`), bun(`bun.lock`) — 각 도구의 네이티브 audit에 위임합니다. 이는 취약한 직접 또는 전이 의존성을 잡습니다. 특히 설치 당시에는 안전했으나 나중에 CVE가 공개된 경우(“그때는 괜찮았는데 지금은 위험”)도 잡아낼 수 있습니다. lockfile 변경 시점만이 아니라 매 커밋마다 실행하는 이유가 바로 여기에 있습니다. advisory DB를 재조회해 새로 공개된 CVE를 바로 다음 커밋에서 감지합니다. 판정과 가용성 실패는 분리되어 처리되며, 실제 탐지는 **차단**하고 advisory DB가 **접근 불가**(오프라인/레지스트리 오류)인 경우에는 **경고 후 커밋 통과**합니다. 이는 가시적인 가용성 폴백이며 조용한 생략이 아닙니다. (CI와 daily watch가 오프라인 커밋에서 못 본 부분을 보완합니다.)
 
   유일한 의도된 우회는 `git commit --no-verify`이며, 이는 사용자가 직접 결정합니다.
 
@@ -500,21 +500,49 @@ node scripts/install/install-safedeps-hooks.mjs
 
 에이전트 폴더 자체를 canonical 로컬 소스로 사용하려면 앞서의 GitHub 설정 방식을 사용하세요.
 
-### Daily Re-check With macOS Alerts
+### Daily Watch With macOS Alerts
 
-승인된 spec ledger를 하루 한 번 재검사하기 위해 사용자별 LaunchAgent를 설치합니다.
+daily watch를 하루 한 번 실행하기 위해 사용자별 LaunchAgent를 설치합니다.
 
 ```bash
-node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0
+node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0 \
+  --population-command /usr/local/bin/list-projects \
+  --exclude /Volumes/share \
+  --followup remote_mount=remote-mount-plan
 ```
 
-이 명령은 `~/.safedeps/approved-specs/`에 대해 `safedeps re-check --json`을 실행합니다. LLM 토큰은 사용하지 않으며, safedeps에서 사용하는 advisory provider만 호출합니다. 새 CVE/KEV가 발견되거나, spec이 폐기되거나, provider 확인이 생략되거나, `advisory.log` 승인 기록이 없는 ledger 엔트리(위조 의심)가 발견되면 wrapper가 `~/.safedeps/recheck-alerts.jsonl`에 기록하고 macOS 알림을 표시합니다.
+`--population-command`는 프로젝트 root 목록을 출력하는 명령의 절대 경로입니다. 이 명령은 한 줄에 `name<TAB>path` 하나를 출력합니다. `--exclude`는 scan이 절대 읽지 않는 절대 경로 prefix입니다. `--followup KIND=PLAN`은 측정되지 않은 kind를 맡는 plan을 지정합니다. `--tool-path DIR`은 node, pnpm, yarn, bun이 있는 디렉터리를 지정합니다. launchd의 PATH에는 pnpm, yarn, bun이 없으므로 installer가 이들의 디렉터리를 기록합니다. `--tool-path`가 없으면 installer 자신의 PATH에서 찾습니다. 지정하지 않은 옵션은 기존 값을 유지합니다. `configure`는 재설치 없이 watch 옵션만 기록합니다.
+
+agent의 wrapper는 `safedeps --json watch scan`을 실행합니다. 한 번의 실행은 세 가지 일을 순서대로 합니다.
+
+1. 이전의 일일 작업이 하던 대로 ledger re-check를 실행합니다.
+2. 등록된 프로젝트 root 목록을 갱신하고, 읽을 수 있는 각 root 아래의 lockfile을 판정합니다.
+3. macOS 시스템 경로와 SDKMAN 아래에 있는 host JDK의 업데이트 상태를 보고합니다. 이것은 상태이지 advisory 판정이 아닙니다.
+
+scan은 root 아래의 어떤 것도 열기 전에 모든 root를 mount table과 exclude prefix에 대조해 분류합니다. 네트워크 mount와 exclude된 prefix는 절대 읽지 않습니다. scan은 이들을 세고 미측정으로 보고합니다. `Cargo.lock`이나 `go.sum`처럼 아직 resolver가 없는 lockfile 종류도 미측정 행이 됩니다. 이것은 clean이 아닙니다.
+
+`clean` 상태는 없습니다. finding은 증거가 있을 때만 닫힙니다. 다시 측정한 lockfile이 영향 범위 밖의 버전을 담고 있거나, OSV가 advisory를 철회했거나, `safedeps watch retire`로 root가 완전히 없어졌다고 기록한 경우입니다. 그 밖의 어떤 것도 finding을 닫지 않습니다. 도달할 수 없는 root나 실패한 provider는 finding을 그대로 두고 `stale_measurement`로 표시합니다.
+
+모든 실행은 요약 한 줄을 출력합니다. `complete`는 population이 fresh이고, 미측정이 없고, blocked가 없을 때만 true입니다.
+
+scan은 결과를 `~/.safedeps/watch/state.json`에 publish합니다. wrapper는 실행할 때마다 `runtime_version`이 담긴 한 줄을 `~/.safedeps/recheck.log`에 기록합니다. 알림은 `~/.safedeps/recheck-alerts.jsonl`과 macOS 알림으로 갑니다. wrapper는 새 event가 있거나, population이 fresh가 아니거나, 실행에 error가 있거나, agent runtime이 stale이면 실행당 한 번 알립니다. busy인 scan은 알림 없이 `recheck-alerts.jsonl`에만 기록합니다. ledger 부분에 대한 기존 re-check 알림은 유지합니다. 새 CVE 또는 KEV, 폐기된 spec, 생략된 provider, 위조 의심입니다. report에 `agent_runtime_stale: true`가 있으면 agent를 다시 설치합니다.
+
+`safedeps watch scan`의 exit code:
+
+- `0`: publish했습니다.
+- `1`: error와 함께 publish했습니다. 전체 report는 그대로 출력됩니다.
+- `3`: 아무것도 publish하지 않았습니다. 이전 generation이 유지됩니다.
+- `75`: busy입니다. 다른 실행이 lock을 잡고 있으며 아무것도 바뀌지 않았습니다. 나중에 다시 시도합니다.
+
+watch는 탐지하고 기록합니다. 프로젝트를 수정하거나, 무언가를 설치하거나, JDK를 업데이트하지 않습니다. safedeps 밖의 consumer가 `safedeps watch claim`과 `safedeps watch ack`로 event를 가져갑니다. 동작 방식은 [ARCHITECTURE.md의 "The daily watch"](./ARCHITECTURE.md#the-daily-watch)를 참고합니다.
 
 유용한 명령:
 
 ```bash
 node scripts/install/install-safedeps-recheck-agent.mjs status
 node scripts/install/install-safedeps-recheck-agent.mjs uninstall
+safedeps watch status
+safedeps help watch
 tail -f ~/.safedeps/recheck.log
 ```
 

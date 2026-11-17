@@ -8,7 +8,7 @@
 
 Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven / nuget) 을 게이트한다. release 시점에는 repo 트리 secret scan, dependency audit, git hook install/check 도 실행한다 (옛 `security-release-gates` 에서 흡수한 lane).
 
-스코프 밖: OS / 시스템 패키지, 컨테이너 이미지, 런타임 sandbox, registry 무결성, 평판 분석. 이들은 다른 보안 layer 라서 다른 도구에 둔다 — 경계는 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 참고.
+스코프 밖: OS / 시스템 패키지, 런타임 sandbox, registry 무결성, 평판 분석. daily watch 는 공식 vendor 출처에서 host JDK 의 업데이트 상태를 보고하는데, 이것은 상태이지 advisory 판정이 아니다: 패키지에 대한 단 하나의 advisory 진실은 계속 OSV 다. 컨테이너 이미지 안의 패키지는 측정하지 않으며, Dockerfile 에 적힌 JDK 이미지는 미측정으로 보고한다. 경계는 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 참고.
 
 ---
 
@@ -58,7 +58,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 - npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.20.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
-- daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
+- daily watch 는 LLM 토큰을 쓰지 않으며 opt-in 이다: `install-safedeps-recheck-agent.mjs` 로 설치한 같은 macOS `launchd` user agent 가 이제 매일 `safedeps --json watch scan` 을 실행한다. ledger re-check 에 더해, 등록된 프로젝트 root 아래의 lockfile 을 판정하고 host JDK 의 업데이트 상태를 보고한다. `~/.safedeps/watch/state.json`, `~/.safedeps/recheck.log`, `~/.safedeps/recheck-alerts.jsonl` 를 쓴다. 새 event, fresh 가 아닌 population, error 가 있는 실행, stale 인 agent runtime, 그리고 re-check 에서 유지한 ledger 알림(새 CVE/KEV/revoke/provider-skip/위조-의심) 시 macOS notification 을 띄운다. busy 인 scan 은 notification 없이 `recheck-alerts.jsonl` 에만 기록한다. 네트워크는 OSV / CISA KEV / GHSA query, OpenJDK Vulnerability Group advisory, Adoptium API, 그리고 npm registry 의 advisory database 에 대한 pnpm, yarn, bun 의 native audit 에만 쓴다.
 
 ## v2.2 — effect 기반 enforcement (npm)
 

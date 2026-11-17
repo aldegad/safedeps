@@ -7,12 +7,13 @@ description: Gate dependency installs (npm/pip/cargo/go/gem/maven/nuget) with OS
 
 Hook registration is performed by `scripts/install/install-safedeps-hooks.mjs`, which is the single channel: it registers `scripts/safedeps-hook-entry.sh pre|post` for `PreToolUse` and, on Claude Code, both `PostToolUse` and `PostToolUseFailure` (Codex: `PostToolUse` alone) at the timeout it owns (ARCHITECTURE names the number once). The entry runs one Rust binary, `bin/native/<os>-<arch>/safedeps-core`, which is both hooks; a checkout builds it with `scripts/build-core.sh`, and the installer does so before it registers anything. This file used to declare the hook scripts directly in its frontmatter, which no runtime reads as a registration and which drifted from what the installer actually writes — a second description of a registration is a second thing to keep in sync, so there is one now.
 
-Two gates, one skill. Safedeps is an agent security skill backed by Claude/Codex hooks and a local CLI. It is not a Codex plugin bundle unless it is later wrapped with a plugin manifest.
+Two gates and a watch, one skill. Safedeps is an agent security skill backed by Claude/Codex hooks and a local CLI. It is not a Codex plugin bundle unless it is later wrapped with a plugin manifest.
 
-You (the agent) are the primary user — drive both:
+You (the agent) are the primary user — drive all three:
 
 - **Install-time gate** — clear every dependency install through an OSV-backed advisory check before it runs.
 - **Secret-leak gate** — stop a secret or a real `.env` from being committed (per-repo, local by default).
+- **Daily watch** — re-check the ledger and measure the lockfiles and JDKs of registered projects each day, and report what was not measured.
 
 ---
 
@@ -88,6 +89,48 @@ Running `safedeps gates run --root <repo> --strict` locally is the safe first st
 
 ---
 
+## Daily watch
+
+`safedeps watch` re-checks the ledger, measures the lockfiles and JDKs of registered projects, and publishes one state file, `~/.safedeps/watch/state.json`. It detects and records. It never edits a project, installs anything or updates a JDK.
+
+Entry points:
+
+- `safedeps watch status [--json]`: read the last published state without taking the lock. Use it to see the age of the last scan and of the last success.
+- `safedeps watch scan [--json]`: run a full scan under the lock. The installed LaunchAgent runs the same scan once a day.
+- `safedeps watch scan --root DIR`: measure one root again. Every other root's state and every undelivered event are kept. Run it before and after a repair.
+
+Reading a report:
+
+- Read the summary line first: `population <state> <count>; osv measured A; native audit B; unmeasured C (by kind); blocked D; open E (fixable F, triage G, no fix H)`.
+- `complete` is true only when the population is fresh, nothing is unmeasured and nothing is blocked. Only then say that every project was measured.
+- An unmeasured row has a `kind` and a `followup`. It is not clean. A row with no followup is counted as `unmeasured_without_followup`.
+- `provider_unavailable`: a provider failed, so those lockfiles were not judged. Their findings are kept, not closed.
+- `stale_measurement`: the finding could not be measured again and stays as it was, with the reason.
+- Exit 75 is busy: another run holds the lock, and nothing changed. It is neither a pass nor a finding. Retry later.
+- Exit 1 is published with errors. The full report is still printed. Read `errors`.
+- Exit 3 is nothing published. The previous generation stands.
+
+Rules:
+
+- Never call a project, a lockfile or a JDK clean. No state is named `clean`.
+- Never close a finding by hand. Record `safedeps watch retire --root DIR --evidence TEXT` only on the owner's evidence that the root is gone for good.
+- Never read a network mount or an excluded prefix to fill a gap. It is measured only on the host that owns it.
+- As a consumer: `claim --consumer ID`, then dispatch, then `ack --event ID --consumer ID` with `--task T` or `--unknown`. Never re-send by time.
+
+When you are handed a watch finding to repair:
+
+- Work in a fresh worktree from the project's main branch. If main is dirty or another worker is already in that project, record `blocked` and coordinate.
+- Run `safedeps check <eco> <pkg>@<fixed>` first, then go through the normal install gates. Raise the range of a direct dependency. Add an `overrides` entry for a transitive one.
+- Run the project's tests and `safedeps watch scan --root <root>` before and after.
+- Pass: merge locally only. Push and deploy follow that project's existing authority. A deploy left to its owner is `awaiting_deploy`.
+- Fail: keep the branch and the logs, leave main untouched, record `fix_failed`.
+- No fixed version: the finding is `no_fix_available` and is looked at again every day. Never use a made-up version or an arbitrary downgrade. `SAFEDEPS_ACCEPT_RISK` is a person's decision and is not a repair.
+- Record progress with `safedeps watch remediation --finding KEY --state S [--detail TEXT] [--task T]`. It does not close the finding. The next scan that sees the fixed version does.
+
+Options: `safedeps help watch`. How it works: [ARCHITECTURE.md, The daily watch](./ARCHITECTURE.md#the-daily-watch). Installing the agent: [`README.md`](./README.md#daily-watch-with-macos-alerts).
+
+---
+
 ## CLI reference
 
 ```
@@ -95,6 +138,7 @@ safedeps check <ecosystem> <pkg>@<version|range> [--json]
 safedeps ledger [--json]
 safedeps revoke <hash> | <ecosystem> <pkg>@<version> | <pkg>@<version> [--reason <r>] [--json]
 safedeps re-check [--json]
+safedeps watch <scan [--root DIR]|status|claim|claimed|ack|remediation|retire> [--json]
 safedeps doctor [--root <repo>] [--fix] [--json]
 safedeps hooks <install|check|init> [--root <repo>]
 safedeps scan secrets [--repo|--worktree|--staged] [--root <repo>]
@@ -160,9 +204,11 @@ safedeps version
 
 - `ledger`: `command`, `count`, and `specs`, each with `hash`, `ecosystem`, `package`, `version`, `version_range`, `approved_at`, `expires_at`, `approved_by`, `expired` and `revoked`.
 - `revoke`: `command`, `revoked`, `reason`, and `spec`, the ledger entry after revocation.
-- `re-check`: `command`, `checked`, `still_clean`, and the lists `newly_vulnerable`, `kev_hit`, `revoked` and `suspected_forgery`.
+- `re-check`: `command`, `checked`, `still_clean`, and the lists `newly_vulnerable`, `kev_hit`, `revoked`, `suspected_forgery` and `errors`. Each `errors` row has a `kind`: `ledger_entry_unreadable` with `file`, or `revoke_failed` with `ecosystem`, `package`, `version` and `file`. A report with errors exits 1 after it is printed.
 
 Any of the three answers `command` and `error: "ledger_unlisted"` with exit 4 when the ledger's files could not be listed. That is no reading of the ledger, not an empty one.
+
+- `watch scan`: `command`, `run_id`, `exit`, `kind` (`full` or `root`), `root`, `generation`, `scan_generation`, `state_file`, `population`, `summary`, `diff`, `new_events`, `runtime`, `agent_runtime_stale`, `errors` and `ledger`, which is the `re-check` report. A run that could not take the lock prints `command`, `busy`, `error` and `lock` instead.
 
 `migrate` ignores `--json` and always prints its own JSON report, without a `command` field.
 

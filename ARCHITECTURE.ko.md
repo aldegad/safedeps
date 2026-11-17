@@ -43,7 +43,7 @@ safedeps 는 **두 시점**의 보안 게이트를 한 스킬 아래 소유한�
 
 두 lane 은 시점·범위가 다르다(설치 전후 개별 패키지 effect vs 릴리스 전 repo 전체). 한 우산 아래 두되 command namespace 로 분리해 SRP 를 지킨다.
 
-**release-time lane 의 secret 누출 쪽은 repo 별이고 opt-in 이다.** 탐지 policy 가 safedeps 가 아니라 대상 repo 에 있어서, repo 가 `.gitleaks` config 와 활성 `.githooks/pre-commit` 을 제공하기 전까지는 아무 것도 하지 않는다. `safedeps doctor` 가 그 빈틈을 메우는 repo-entry 진단이다: secret 누출 lane 의 각 조각(`.gitleaks` policy, `pre-commit`, `core.hooksPath`, scanner 가용성)과 전역 install-time gate 를 함께 보고하고, repo 별 lane 에 gap 이 있으면 non-zero 로 끝난다. `safedeps doctor --fix`(= `safedeps hooks init` 후 `safedeps hooks install`)가 `lib/gates/templates/` 의 시작 policy 를 scaffold 하고 로컬 hook 을 활성화한다. scaffold 는 **비파괴적**이라 repo 가 소유한 기존 config 를 덮지 않으며, "safedeps 는 *실행*을 소유하고 *policy* 는 소유하지 않는다"는 불변식을 지킨다. scaffold 된 `pre-commit` 은 두 검사를 돌린다. 비밀키 스캔(`safedeps scan secrets --staged`)은 매 커밋 돌고 fail-closed 다: safedeps 미해석이나 scanner 부재 시 silent skip 이 아니라 커밋을 막는다. 의존성 audit(`safedeps audit`)도 지원 lockfile — npm·pnpm·yarn·bun, 있는 lockfile 에서 자동 감지해 각 ecosystem 의 네이티브 audit 에 위임 — 이 있는 repo 면 매 커밋 돈다 — lockfile 이 바뀔 때만이 아니라 — 그래서 패키지를 깐 *뒤에* 공개된 CVE 가 어드바이저리 DB 재조회로 다음 커밋에 잡힌다. audit 은 보안 판정과 가용성 실패를 의미 있는 exit code 로 구분한다(0 clean / 1 취약 / 2 못 돌림): 실제 취약점은 **차단**(fail-closed)하고, 어드바이저리 DB 도달 불가 시에는 hook 이 **경고하고 커밋을 통과**시킨다 — 명시적이고 관측 가능한 가용성 failover(no-silent-fallback 불변식대로: 커밋 출력에 남고 canonical truth 를 바꾸지 않음)이며, 오프라인 커밋이 못 본 건 CI 와 데일리 re-check 가 다시 메운다.
+**release-time lane 의 secret 누출 쪽은 repo 별이고 opt-in 이다.** 탐지 policy 가 safedeps 가 아니라 대상 repo 에 있어서, repo 가 `.gitleaks` config 와 활성 `.githooks/pre-commit` 을 제공하기 전까지는 아무 것도 하지 않는다. `safedeps doctor` 가 그 빈틈을 메우는 repo-entry 진단이다: secret 누출 lane 의 각 조각(`.gitleaks` policy, `pre-commit`, `core.hooksPath`, scanner 가용성)과 전역 install-time gate 를 함께 보고하고, repo 별 lane 에 gap 이 있으면 non-zero 로 끝난다. `safedeps doctor --fix`(= `safedeps hooks init` 후 `safedeps hooks install`)가 `lib/gates/templates/` 의 시작 policy 를 scaffold 하고 로컬 hook 을 활성화한다. scaffold 는 **비파괴적**이라 repo 가 소유한 기존 config 를 덮지 않으며, "safedeps 는 *실행*을 소유하고 *policy* 는 소유하지 않는다"는 불변식을 지킨다. scaffold 된 `pre-commit` 은 두 검사를 돌린다. 비밀키 스캔(`safedeps scan secrets --staged`)은 매 커밋 돌고 fail-closed 다: safedeps 미해석이나 scanner 부재 시 silent skip 이 아니라 커밋을 막는다. 의존성 audit(`safedeps audit`)도 지원 lockfile — npm·pnpm·yarn·bun, 있는 lockfile 에서 자동 감지해 각 ecosystem 의 네이티브 audit 에 위임 — 이 있는 repo 면 매 커밋 돈다 — lockfile 이 바뀔 때만이 아니라 — 그래서 패키지를 깐 *뒤에* 공개된 CVE 가 어드바이저리 DB 재조회로 다음 커밋에 잡힌다. audit 은 보안 판정과 가용성 실패를 의미 있는 exit code 로 구분한다(0 clean / 1 취약 / 2 못 돌림): 실제 취약점은 **차단**(fail-closed)하고, 어드바이저리 DB 도달 불가 시에는 hook 이 **경고하고 커밋을 통과**시킨다 — 명시적이고 관측 가능한 가용성 failover(no-silent-fallback 불변식대로: 커밋 출력에 남고 canonical truth 를 바꾸지 않음)이며, 오프라인 커밋이 못 본 건 CI 와 데일리 watch 가 다시 메운다.
 
 **원격 enforcement 는 의도적으로 opt-in 이고 비용 인식형이다.** `doctor` 는 repo 에 보안 workflow 가 이미 있는지 보고하고 default branch 자세를 둘로 나눠 이름 붙인다: branch rule 로 직접 push 를 막는 것(no runner minutes)과 Actions-backed PR status check 를 요구하는 것(hosted runner minute 사용 가능). branch protection 을 조회하거나 바꾸지 않고 `doctor --fix` 는 `.github/workflows` 를 만들지 않는다. 로컬 pre-commit 검사는 개발자 머신에서 돌지만, 원격 GitHub Actions, CI 의 gitleaks, required PR check 는 no-cost bundle 밖이다. JSON schema 는 이 권고를 `lane: "remote"` check 로 유지하고, `gaps`/`ok` 는 로컬 secret 누출 lane 에만 묶는다.
 
@@ -699,7 +699,7 @@ rebuild 검사가 읽는 lockfile 필드가 각각 무엇을 보증하고 무엇
 
 **막지 않는 것 (현재 한계):**
 
-- `approved_at` 이후 발견된 zero-day — daily re-check 로만 잡고, install 시점엔 못 잡는다.
+- `approved_at` 이후 발견된 zero-day — daily watch 로만 잡고, install 시점엔 못 잡는다.
 - npm registry 자체의 손상.
 - `.npmrc` 가 옮기거나 기록 밖에 둔 설치. 그런 설치는 `UNGATED` 로 기록하되 검사하지는 않는다. npm 이 읽는 어느 `.npmrc` 에서든 전역 트리는 npm 이 답하고, 프로젝트 설치를 기록 밖에 두는 설정은 프로젝트와 사용자의 `.npmrc` 에서 읽는다. 전역 npmrc 와 내장 npmrc 의 그런 설정은 읽지 않으므로, 거기서 기록 밖에 둔 설치는 기록되지 않는다. 어느 쪽이든 패키지와 바이너리는 검증 없이 놓인다. 스크립트는 돌지 않는다. 설치는 무실행이고, npm 이 rebuild 할 트리에 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전이 있으면 rebuild 를 건너뛴다.
 - 게이트가 본 곳에 흔적을 남기지 않은 npm 설치. 텍스트에 드러나지 않은 무언가가 다른 곳으로 보낸 설치, 그리고 설치 디렉터리를 npm 에게 물을 수 없었는데(훅의 `PATH` 에 npm 이 없거나, 실패하거나, 8초 안에 답하지 않거나, 셸이 실행 시점에 정하는 값을 받은 경우) cwd 에 떨어지지 않은 설치다. `UNGATED` 로 기록하되 검사하지는 않는다. dry run 과 실패한 설치도 같은 기록이 된다. 흔적으로는 둘을 구별할 수 없기 때문이다.
@@ -813,6 +813,15 @@ GHSA / NVD — 응답 무
 │   ├── osv/                   ← OSV query 응답 (24h TTL)
 │   └── kev/                   ← CISA KEV daily catalog
 ├── locks/                     ← atomic state (TOCTOU 방지)
+├── watch/                     ← daily watch
+│   ├── state.json             ← publish 된 단 하나의 state
+│   ├── lock                   ← 단 하나의 exclusive lock, scan 이나 re-check 가 잡는다
+│   ├── runs/                  ← run 당 receipt 한 개
+│   ├── config.json            ← installer 가 저장한 watch option
+│   ├── exclude                ← scan 이 읽지 않는 절대 경로 prefix
+│   └── retired                ← owner 가 폐기한 root 와 그 증거
+├── recheck.log                ← wrapper run 당 한 줄, `runtime_version` 포함
+├── recheck-alerts.jsonl       ← wrapper 가 올리는 alert
 ├── accepted-risk.jsonl       ← SAFEDEPS_ACCEPT_RISK에 의해 유지된 설치의 추가 전용 감사 기록
 ├── reorg.log                  ← reorg event (append-only)
 └── advisory.log               ← advisory-gate 결정 (approve / block)
@@ -823,6 +832,41 @@ GHSA / NVD — 응답 무
 - `cache/osv/`, `cache/kev/` 는 provider 응답을 TTL 로 보관.
 - `advisory.log` 는 모든 approve/block 결정의 audit trail.
 - `accepted-risk.jsonl`은 `SAFEDEPS_ACCEPT_RISK`에 의해 유지된 모든 설치의 타임스탬프, 도구 사용 ID, 프로젝트, 명령어, 사유 및 수용된 문제를 저장하는 감사 기록이다.
+- `watch/` 는 daily watch 를 담는다: lock, config, 그리고 publish 된 단 하나의 state 인 `state.json`; [The daily watch](#the-daily-watch) 참고.
+
+### The daily watch
+
+`safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]` 는 opt-in daily re-check 를 대체한다. Help: `safedeps help watch`. scheduler 는 그대로다: 같은 per-user macOS LaunchAgent, `com.aldegad.safedeps.recheck`, 기본 09:00. 그 wrapper `scripts/safedeps-recheck-alert.sh` 는 이제 `safedeps re-check --json` 대신 `safedeps --json watch scan` 을 실행한다.
+
+**lock 하나가 run 전체를 덮는다.** `safedeps watch scan` 이 하는 일은 모두 exclusive lock 하나, `~/.safedeps/watch/lock` 아래에서 일어난다. 이 lock 은 lock file 에 거는 `flock(2)` 이고, process 가 살아 있는 동안 잡고 있다: macOS 에서는 `/usr/bin/perl` 로, Linux 에서는 `flock(1)` 로 잡는다. TTL 은 없다. 그 tool 이 없는 machine 은 exit 70 으로 멈춘다. `safedeps re-check` 는 같은 lock 을 먼저 잡고, 그다음 이전과 같은 re-check 를 실행한다. 그래서 수동 re-check 와 scheduled scan 은 동시에 돌지 않는다. 다른 run 이 lock 을 잡고 있으면 그 run 은 busy 이고 exit 75 로 끝난다. provider 는 호출되지 않았고 아무것도 바뀌지 않았다. busy 는 pass 도 finding 도 아니다. 나중에 다시 시도한다.
+
+**state 는 통째로 publish 되는 document 하나다.** `~/.safedeps/watch/state.json` 은 generation, 마지막 scan, population, root, finding, diff, unmeasured row, error, event, delivery record 를 담는다. scan 은 lock 을 잡은 뒤에만 이전 state 를 읽는다. scan 은 결과를 그 document 에 merge 하고 atomic 하게 publish 한다: 같은 directory 의 임시 file 을 validate 하고 sync 한 뒤 이전 file 위로 rename 하고, 그다음 directory 를 sync 한다. rename 전에 멈춘 run 은 이전 generation 을 온전히 남긴다. 각 run 은 `~/.safedeps/watch/runs/` 에 receipt 도 남긴다. `safedeps watch status` 는 lock 없이 마지막으로 publish 된 state 를 읽는다: 마지막 scan 과 마지막 성공이 얼마나 지났는지다.
+
+**run 의 순서는 하나다.** 순서는 이렇다: lock, 이전 state, ledger re-check, population, 분류, lockfile, runtime stage, publish. ledger re-check 는 이전에 daily job 이 하던 일이고, 그 report 는 scan report 의 `ledger` field 다. 읽을 수 없거나 revoke 할 수 없는 ledger entry 는 re-check 의 `errors` list 의 row 다. re-check 는 나머지 entry 로 계속 진행하고, 전체 report 를 출력한 뒤 exit 1 로 끝난다. scan 은 그런 row 를 자신의 error 로 싣는다. `safedeps watch scan --root DIR` 는 root 하나를 다시 측정하고, 다른 모든 root 의 state 와 전달되지 않은 모든 event 를 유지한다. ledger re-check 는 돌리지 않고, population 을 갱신하지 않으며, host 의 JDK 도 읽지 않는다.
+
+**fresh 가 아닌 population 은 결코 전체 집계가 아니다.** population 은 project root 의 목록이다. scan 은 설정된 command 를 실행해 이를 갱신한다: 절대 경로와 argument, 그리고 기본 120 s 인 timeout. 그 command 는 한 줄에 `name<TAB>path` 하나를 출력한다. 그 command 가 이번 run 에서 exit 0 으로 끝났으면 population 은 `fresh` 다. command 가 실패했거나 설정되지 않아 마지막 목록을 썼으면 `stale` 이고, `generated_at` 과 reason 이 붙는다. 이때 그 뒤에 등록된 project 는 빠져 있을 수 있다. 목록이 아예 없으면 `missing` 이고, 이때 project stage 전체가 unmeasured 다. fresh 가 아닌 population 은 그 run 의 error 이자 unmeasured row 다: `population_stale` 또는 `population_missing`.
+
+**모든 root 는 그 아래의 무엇도 열기 전에 분류된다.** 경로는 component 하나씩 resolve 된다. 각 component 는 `lstat` 되기 전에 mount table 과 exclude prefix 에 대해 문자열로 판정된다. 짧은 local 목록에 없는 filesystem 위의 root 는 `remote_mount` 다: SMB, NFS, 모든 network filesystem 과 알 수 없는 filesystem. exclude prefix 아래의 root 는 `excluded` 다. 둘 다 읽지 않는다. 둘 다 센다. symlink 인 root 도 같은 방식으로 resolve 되므로, share 를 가리키는 symlink 는 remote root 다. exclude prefix 는 `~/.safedeps/watch/exclude` 에 있는 절대 경로다. glob 이 아니라 path prefix 로 비교한다. local root 안의 network mount 나 excluded prefix 는 그 root 의 walk 에서 잘라내고 보고한다: mount 에는 unmeasured `remote_mount` row, 그 root 의 `skipped` list, 그리고 그 root 의 `whole: false`. file 을 먼저 읽고 mount 를 나중에 확인하는 순서가 이 설계가 막으려는 순서다. network mount 나 excluded prefix 는 그것을 소유한 host 에서만, 그 host 를 운영하는 쪽이 측정한다. 이 host 에서 읽어서 측정하는 일은 없다. full scan 은 이 host 만 측정하고, 그 사실을 unmeasured `other_hosts` row 로 남긴다.
+
+**lockfile 은 kind 에 따라 판정된다.** 읽을 수 있는 root 의 walk 는 depth 4 까지 간다. `node_modules`, `.git`, plan worktree, 그리고 비슷한 build·vendor directory 에는 들어가지 않는다. `package-lock.json` 과 `npm-shrinkwrap.json` 은 install gate 자신의 closure reader, 모든 spec 에 대한 OSV querybatch, 응답한 모든 advisory 의 전체 읽기(alias, fixed version, withdrawal), 그리고 CISA KEV overlay 를 거친다. 결과는 root, lockfile, spec, advisory 당 finding 하나이고, alias 는 id 하나로 접힌다. `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`/`bun.lockb` 는 기존의 `safedeps audit <eco>` 를 거친다. 이것은 OSV 가 아니라 npm registry 의 advisory database 에 대한 각 tool 의 native audit 다. 답은 severity count 이고 package row 는 없다. 그래서 `vulnerable` 은 lockfile 당 `triage_needed` finding 하나가 되고, `no_finding` 은 OSV clean 으로 세지 않는다. 찾을 수 없는 tool 은 `unavailable` 이다. launchd 의 PATH 에는 pnpm, yarn, bun 이 없으므로 installer 가 그 directory 를 기록한다.
+
+**scan 이 판정하지 못하는 lockfile 은 그렇게 보고된다.** 그 밖의 모든 kind 는 kind 를 명시한 unmeasured row 다: Cargo.lock, uv.lock, poetry.lock, requirements file, Gemfile.lock, NuGet lockfile, go.sum, Gradle 과 Maven build. 아직 그 resolver 가 없다. clean 이 아니다. 실패한 provider(OSV, KEV, native audit)는 자신이 판정했을 lockfile 을 `provider_unavailable` 로 남긴다. 그 finding 은 close 되지 않고 유지된다.
+
+**runtime stage 는 advisory verdict 가 아니라 update status 를 보고한다.** Java 가 먼저다. 이 stage 는 macOS system path 와 SDKMAN 아래에 있는 host 의 JDK, 그리고 각 root 의 JDK pin 을 나열한다: `.java-version`, `.tool-versions`, `.sdkmanrc`, Gradle toolchain. source 는 공식이고 read-only 다: OpenJDK Vulnerability Group advisory 와 Adoptium API(Temurin build). 각 JDK 는 닫힌 집합에서 state 하나를 받는다. `update_available` 은 vendor, current, latest, 그리고 advisory URL 과 date 를 싣는다. `current_as_of` 는 advisory date 를 싣고, 발표되지 않은 CVE 는 그것으로 덮이지 않는다. `pre_announced` 는 가장 새 advisory 가 이 version 을 명시하고 vendor 에 더 새 build 가 없거나, 다음 예정 advisory 가 14 일 이내라는 뜻이다. 나머지 둘은 `vendor_feed_missing` 과 `feed_unavailable` 이고, 각각 unmeasured row 이기도 하다. `clean` 은 없다. package 에 대해서는 OSV 가 여전히 단 하나의 advisory truth 다. 이 stage 가 읽지 않는 위치(asdf, mise, Homebrew 등)의 JDK 는 unmeasured `jdk_location_not_scanned` row 다. JDK image 의 Dockerfile `FROM` 은 unmeasured `container_image` row 다: container image 안의 package 는 측정하지 않는다.
+
+**finding 은 evidence 가 있을 때만 close 된다.** state 는 `open`, `no_fix_available`, `triage_needed`, 그리고 세 가지 reason 중 하나를 가진 `closed` 다: `seen_fixed`, `advisory_withdrawn`, `root_retired`. `clean` 은 없다. evidence 는 셋 중 하나다. 다시 측정한 lockfile 이 affected range 밖의 version 을 담고 있다. OSV 가 advisory 를 withdraw 했다. 또는 owner 가 `safedeps watch retire --root DIR --evidence TEXT` 로 그 root 가 영영 없어졌다고 기록했다. 그 밖의 어떤 것도 finding 을 close 하지 않는다. 닿을 수 없는 root, 사라진 lockfile, population 에서 빠진 root, 실패한 provider, 이제 root 를 가리는 network mount 는 모두 finding 을 그대로 두고, reason 과 함께 `stale_measurement` 로 표시한다.
+
+**모든 unmeasured row 에는 `kind` 와 `followup` 이 있다.** followup 은 그 kind 를 소유한 plan 이다. install 때 `--followup KIND=PLAN` 으로 정한다. followup 이 없는 row 는 `unmeasured_without_followup` 으로 센다.
+
+**모든 run 은 summary line 하나를 출력한다.** 그 line 은 `population <state> <count>; osv measured A; native audit B; unmeasured C (by kind); blocked D; open E (fixable F, triage G, no fix H)` 다. `complete` 는 population 이 fresh 이고, unmeasured 가 없고, blocked 가 없을 때만 true 다. 그때에만 모든 project 가 측정되었다고 말할 수 있다.
+
+**event 는 한 번 올라오고 한 번 claim 된다.** 새 finding 이나 state 변화는 event 하나를 만들고, 그 key 는 finding 과 transition 이다. 같은 소식은 다음 날 scan 에서 다시 올라오지 않는다. `claim --consumer ID [--limit N]` 는 lock 아래에서 pending event 를 가져가고, consumer 가 무엇이든 dispatch 하기 전에 claim 을 publish 한다. `ack --event ID --consumer ID (--task T | --unknown)` 는 그 event 가 된 task 를 기록하거나, dispatch 가 일어났는지 알 수 없다는 것을 기록한다. 다른 consumer 는 claim 된 event 를 ack 할 수 없다. `claimed --consumer ID` 는 consumer 가 쥐고 있는 것을 나열한다. local state 와 바깥의 dispatcher 는 atomic 하지 않다. 그래서 일어났는지 알 수 없는 dispatch 는 `--unknown` 으로 기록한다. 시간이 지났다고 다시 보내지 않는다: 어떤 것도 claim 을 pending 으로 되돌리지 않고, 시간도 되돌리지 않는다.
+
+**watch 는 감지하고 기록하며, repair 는 safedeps 밖에서 일어난다.** watch 는 project 를 편집하지 않고, 아무것도 install 하지 않고, JDK 를 update 하지 않는다. safedeps 밖의 consumer 가 event 를 claim 하고 각각을 그 project 의 worker 에게 넘긴다. scan 뒤에 도는 scheduled agent routine 이 한 예다. consumer 는 watchdog 역할도 한다: 26 시간보다 오래되었거나 실패한 마지막 scan, fresh 가 아닌 population, followup 이 없는 unmeasured row 는 incident 다. worker 는 project 의 main branch 에서 만든 새 worktree 에서, safedeps 의 일반 install gate 를 거쳐 repair 한다. `safedeps check <eco> <pkg>@<fixed>` 가 먼저다. worker 는 전후에 project 의 test 와 `safedeps watch scan --root <root>` 를 실행한다. main branch 가 dirty 하거나 다른 worker 가 이미 그 project 에 있으면 `blocked` 로 기록하고 조율한다. pass 는 local 에서 merge 한다. push 와 deploy 는 그 project 의 기존 authority 를 따르고, owner 에게 남긴 deploy 는 `awaiting_deploy` 다. fail 은 branch 와 log 를 남기고, main 을 건드리지 않고, `fix_failed` 로 기록한다. fixed version 이 없으면 finding 은 `no_fix_available` 이고 매일 다시 본다: 지어낸 version 도, 임의의 downgrade 도 쓰지 않는다. `SAFEDEPS_ACCEPT_RISK` 는 사람의 결정이고 repair 가 아니다. `safedeps watch remediation` 은 repair 의 진행을 `dispatched`, `blocked`, `fix_failed`, `awaiting_deploy`, `fixed_pending_rescan` 중 하나로 기록한다. 이것은 finding 을 close 하지 않는다. fixed version 을 본 다음 scan 이 close 한다.
+
+**`watch scan` 의 exit code 는 다섯 개다.** `0` 은 publish 되었다는 뜻이다. `1` 은 error 와 함께 publish 되었다는 뜻이고, 전체 report 는 그대로 출력된다. `3` 은 아무것도 publish 되지 않았다는 뜻이고, 이전 generation 이 유지된다. `75` 는 busy 라는 뜻이다. `70` 은 이 machine 에 lock tool 이 없다는 뜻이다.
+
+**설치된 runtime 은 자신의 source 에 대한 기록을 가진다.** installer 는 runtime(`bin/safedeps`, `lib/`, wrapper)을 복사하고 그 안에 `.safedeps-runtime.json` 을 쓴다: version, source checkout, 그리고 그 file 들의 digest. 각 wrapper run 은 `~/.safedeps/recheck.log` 의 자기 줄에 `runtime_version` 을 쓴다. checkout 의 file 이 더 이상 digest 와 맞지 않으면 scan report 는 `agent_runtime_stale: true` 를 싣는다. 고치는 방법은 agent 를 다시 install 하는 것이다.
 
 ---
 
@@ -854,7 +898,7 @@ OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single A
 | `SKILL.md` | Claude/Codex skill loader 가 읽는 SSoT — 스킬 매니페스트 + advisory-gate 사용법. hook 을 선언하지 않고, 설치기가 등록한다. |
 | `README.md` | 사용자 install 가이드. |
 | `ARCHITECTURE.md` | 이 문서 — 내부 흐름·설계. |
-| `bin/safedeps` | CLI entry — advisory check, ledger 관리, re-check, migrate. |
+| `bin/safedeps` | CLI entry — advisory check, ledger 관리, re-check, migrate. `watch` 와 `re-check` 는 `lib/watch/watch.sh` 에 넘긴다. |
 | `scripts/safedeps-hook-entry.sh` | 두 hook 의 등록된 entry: `bin/native/<os>-<arch>/safedeps-core pre\|post` 를 돌리고, 바이너리가 답하지 못하는 모든 경우를 설명 붙은 exit 2 로 바꾼다. |
 | `scripts/build-core.sh` | 바이너리가 검사하는 소스 스탬프를 포함하여 바이너리를 `bin/native/<os>-<arch>/`에 빌드합니다. 설치 프로그램과 릴리스의 publish 빌드 모두 이 스크립트를 사용합니다. |
 | `lib/providers/` | OSV / KEV / GHSA (옵션 NVD / deps.dev / Snyk) adapter, 단일 query interface, CLI 용. core 의 post hook 은 OSV 와 KEV 를 직접 질의한다 (`rust/src/post/providers.rs`). |
@@ -862,6 +906,7 @@ OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single A
 | `lib/npm/closure.sh` | lockfile 에서 npm closure 해석, 더해 Yarn project context/closure 해석 (루트 `resolutions` + `yarn info`) 과 isolated candidate materialization. |
 | `lib/gates/` | release-time repo lane — `scan.sh`(gitleaks runner), `audit.sh`(멀티-ecosystem lockfile audit — npm/pnpm/yarn/bun, 각 네이티브 도구에 위임), `hooks.sh`(`install`/`check`/`init`), `doctor.sh`(자세 진단 + `--fix`), `repo-profile.sh`(public/private 판별). *실행*을 소유하고 *policy* 는 repo 가 소유. |
 | `lib/gates/templates/` | 시작용 `.gitleaks[.private].toml` + `.githooks/pre-commit`, `hooks init` 가 scaffold. repo 가 소유·튜닝하는 seed — 재실행 시 덮지 않음. |
+| `lib/watch/` | Daily watch. 자체 process 로 실행된다. `watch.sh` 가 entry 다. 함께 있는 것: `lock.sh`, `mounts.sh`, `population.sh`, `lockfiles.sh`, `runtime.sh`, `scan.sh`, 그리고 state 의 document, state, transition 을 선언하는 단 하나의 곳인 `state.jq`. [The daily watch](#the-daily-watch) 참고. |
 | `rust/` | `safedeps-core`, 두 hook 이 곧 이 바이너리다: PreToolUse command guard (ledger 일치, v1 hardcoded pattern, inert rewrite, snapshot) 와 PostToolUse effect gate 및 reorg, 그리고 그것들이 읽는 lexer, grammar, recognizer, spec extractor (14절). |
 
 ---
@@ -892,6 +937,10 @@ tail -f ~/.safedeps/reorg.log        # reorg event
 ls -lt ~/.safedeps/approved-specs/   # 현재 approved specs
 jq '.evidence' ~/.safedeps/approved-specs/sha256-abc123.json   # 특정 spec 의 evidence
 rm -rf ~/.safedeps/cache/osv/        # OSV cache 비우기 (강제 re-query)
+tail -f ~/.safedeps/recheck.log      # wrapper run 당 한 줄, runtime_version 포함
+safedeps watch status                # 마지막 scan 과 마지막 성공이 얼마나 지났는지
+jq '.summary.line' ~/.safedeps/watch/state.json   # 마지막으로 publish 된 summary line
+jq '.unmeasured' ~/.safedeps/watch/state.json     # unmeasured row, 각각 kind 와 followup
 ```
 
 ---
@@ -920,7 +969,8 @@ rm -rf ~/.safedeps/cache/osv/        # OSV cache 비우기 (강제 re-query)
 
 **현재 한계:**
 
-- `approved_at` 이후 발견된 zero-day 는 daily re-check 로만 잡는다.
+- `approved_at` 이후 발견된 zero-day 는 daily watch 로만 잡는다: approval 은 ledger re-check 로, 등록된 project 에 설치된 것은 lockfile stage 로 잡는다.
+- daily watch 는 다음을 아직 측정하지 않는다: resolver 가 없는 lockfile kind, OSV 로 보는 pnpm·yarn·bun lockfile, Gradle 과 Maven build 의 resolved dependency, container image 안의 package, macOS system path 와 SDKMAN 밖의 JDK, 다른 host 와 network mount. 각각은 그것을 소유한 plan 과 함께 unmeasured row 로 보고된다. [The daily watch](#the-daily-watch) 참고.
 - registry 자체(npm/PyPI/…) 손상은 막지 못한다.
 - KEV 는 하루 1회 update — 그 사이 등재된 KEV 는 다음 refresh 까지 못 잡는다.
 - transitive closure 검사는 ledger 를 수백 개로 키울 수 있어 최적화가 필요하다.
@@ -1031,7 +1081,7 @@ entry 를 거친 native hook 전체의 비용은 여기 기록되어 있지 않�
 
 ### Bash 에 남는 것
 
-CLI 인 `bin/safedeps` 는 Bash 이고, `lib/providers/providers.sh`, `lib/ledger/ledger.sh`, `lib/npm/closure.sh`(`lib/npm/ask.sh` 의 한 줄짜리 public-registry 상수를 읽는다), 그리고 providers 를 거쳐 `lib/truth-sources.sh` 를 source 한다. `bin/safedeps` 는 이제 `lib/ledger/recheck-report.sh` 도 직접 source 한다. 그 파일은 `safedeps re-check --json` 이 출력하는 보고서와 그 필드의 판독기를 선언한다. 매일 실행되는 래퍼 `scripts/safedeps-recheck-alert.sh` 도 같은 파일을 읽는다. `lib/ledger/ledger.sh` 와 `lib/npm/closure.sh` 는 각각 `lib/ledger/context-kinds.sh` 를 source 한다. 그 파일은 closure 출처 유형, 승인을 프로젝트로 한정하는 세 가지 `project_context` kind, 그리고 Yarn 의 materialization 명령어와 isolation 을 선언한다. `lib/advisory-log-rotate.sh` 와 `lib/gates/`(`scan.sh`, `audit.sh`, `hooks.sh`, `doctor.sh`, `repo-profile.sh` 와 그 template)는 CLI 와 release-time lane 을 위해 있다. CLI 가 ledger 를 쓰고 core 가 읽으며, 여러 값이 CLI 에 한 번, core 에 한 번 쓰여 있다. 각 쌍을 무엇이 묶고 무엇이 묶지 않는지는 08de62b 의 트리에서 읽었고, 여기 있는 그대로 적는다. 아홉 묶음:
+CLI 인 `bin/safedeps` 는 Bash 이고, `lib/providers/providers.sh`, `lib/ledger/ledger.sh`, `lib/npm/closure.sh`(`lib/npm/ask.sh` 의 한 줄짜리 public-registry 상수를 읽는다), 그리고 providers 를 거쳐 `lib/truth-sources.sh` 를 source 한다. `bin/safedeps` 는 이제 `lib/ledger/recheck-report.sh` 도 직접 source 한다. 그 파일은 `safedeps re-check --json` 이 출력하는 보고서와 그 필드의 판독기를 선언한다. 매일 실행되는 래퍼 `scripts/safedeps-recheck-alert.sh` 도 같은 파일을 읽는다. `lib/ledger/ledger.sh` 와 `lib/npm/closure.sh` 는 각각 `lib/ledger/context-kinds.sh` 를 source 한다. 그 파일은 closure 출처 유형, 승인을 프로젝트로 한정하는 세 가지 `project_context` kind, 그리고 Yarn 의 materialization 명령어와 isolation 을 선언한다. `lib/advisory-log-rotate.sh` 와 `lib/gates/`(`scan.sh`, `audit.sh`, `hooks.sh`, `doctor.sh`, `repo-profile.sh` 와 그 template)는 CLI 와 release-time lane 을 위해 있다. CLI 는 `lib/watch/` 를 source 하지 않는다: `safedeps watch` 와 `safedeps re-check` 는 `lib/watch/watch.sh` 를 별도의 process 로 실행한다. 그래서 CLI file 은 이 section 이 이름 붙인 아홉 개 그대로이고, 아래의 `cli_text` 읽기는 watch 의 file 을 읽지 않는다. CLI 가 ledger 를 쓰고 core 가 읽으며, 여러 값이 CLI 에 한 번, core 에 한 번 쓰여 있다. 각 쌍을 무엇이 묶고 무엇이 묶지 않는지는 08de62b 의 트리에서 읽었고, 여기 있는 그대로 적는다. 아홉 묶음:
 
 | 묶음 | 양쪽에 정의된 곳 | 묶는 것 | 묶이지 않은 채 남는 것 |
 |---|---|---|---|

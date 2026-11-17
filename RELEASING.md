@@ -100,6 +100,15 @@ intent to finish it, and do not report one finished while any step is open.
    lasts as long as the rebuild and the copy. Then push one benign command
    and one install through `scripts/safedeps-hook-entry.sh pre` and read both
    answers before going on.
+
+   On every host where the daily watch agent is installed, run
+   `node scripts/install/install-safedeps-recheck-agent.mjs install` from
+   the main checkout. The install keeps the watch config. It does not keep
+   the schedule, so pass the same `--hour` and `--minute` the host was
+   installed with, or the schedule becomes 09:00. Then run the installer's
+   `status` and read `agent_runtime_stale: false` and a runtime version
+   equal to the one in `package.json`. Until then that host's agent runs
+   the old copy, and its scan says so with `agent_runtime_stale: true`.
 8. **Push.** `git push origin main`.
 9. **Tag and publish the GitHub release.** An annotated tag `vX.Y.Z` on the
    pushed commit, pushed, and `gh release create vX.Y.Z --notes-file <notes>`.
