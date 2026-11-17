@@ -1,18 +1,34 @@
-//! OSV batch lookup and the KEV overlay. Requests use curl; provider init
-//! delegates log retention to state. Cache and JSON reads stay in process.
+//! OSV batch lookup and the KEV overlay. Requests use curl, each within the
+//! deadline post fixed when it started; provider init delegates log retention
+//! to state. JSON reads stay in process.
 use super::{jv,sh,closure::Spec,report::cat};
 use crate::{json::Value,state,os,sha256,ere::Regex,outcome::{Outcome,Action,Form}};
-use std::{fs,path::{Path,PathBuf},process::{Command,Stdio},os::unix::fs::MetadataExt};
+use std::{fs,path::{Path,PathBuf},process::{Command,Stdio},os::unix::fs::MetadataExt,time::{Duration,Instant}};
 type W=Vec<u8>;
 const CACHE_ENV: &str = "SAFEDEPS_CACHE_DIR";
 const CACHE_DIR: &str = "cache";
 const CACHE_TTL_ENV: &str = "SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS";
 const CACHE_TTL: i64 = 86400;
-const CACHE_NAMESPACES: [&str; 3] = ["osv", "kev", "ghsa"];
+const CACHE_NAMESPACES: [&str; 3] = ["osv-vuln", "kev", "ghsa"];
 const KEV_CACHE_PATH: &str = "kev/known_exploited_vulnerabilities.json";
-fn osv_cache_path(cache: &Path, package: &[u8], version: &[u8]) -> PathBuf {
-    let key = sha256::hex(&cat(&[b"osv\nnpm\n", package, b"\n", version]));
-    cache.join("osv").join(format!("{}.json", key))
+/// The pages one OSV query may take, the CLI's SAFEDEPS_OSV_PAGE_LIMIT. An
+/// answer that has not ended by this page is no answer.
+const OSV_PAGES: usize = 20;
+/// The longest one request may take, the CLI's own `--max-time` for each: an
+/// OSV batch page, an OSV record, the KEV catalog. No request runs past the
+/// deadline either (`Providers::curl`).
+const BATCH_SECONDS: u64 = 20;
+const RECORD_SECONDS: u64 = 15;
+const KEV_SECONDS: u64 = 15;
+/// A request with less time than this left before the deadline is not started.
+const LEAST_REQUEST: Duration = Duration::from_millis(100);
+/// Where the OSV record an answer named by its id and `modified` is kept. OSV
+/// changes `modified` whenever it changes a record, so the pair names one
+/// record. The CLI keeps it at the same path (safedeps_osv_vuln_detail), and
+/// `provider_cache_constants_match_cli` holds the two together.
+fn osv_record_path(cache: &Path, id: &[u8], modified: &[u8]) -> PathBuf {
+    let key = sha256::hex(&cat(&[b"osv-vuln\n", id, b"\n", modified, b"\n"]));
+    cache.join("osv-vuln").join(format!("{}.json", key))
 }
 fn env(name:&str,default:&str)->String{std::env::var(name).ok().filter(|s|!s.is_empty()).unwrap_or_else(||default.into())}
 fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wall(os::WallRole::ProviderCacheExpiry).seconds()-m.mtime()<=ttl)}
@@ -20,8 +36,25 @@ fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wa
 /// OSV answers `{}` for a package it has nothing on, and nothing else says so:
 /// an empty file, a file this user cannot read and a `null` hold no answer, and
 /// none of them reads as no advisories. The CLI reads an answer by the same rule
-/// (safedeps_osv_answer), and `osv_answers_match_cli` holds the two together.
+/// (osv_answer in SAFEDEPS_OSV_JQ), and `osv_answers_match_cli` holds the two
+/// together.
 fn osv_answer(v:Value)->Option<Value>{(matches!(v,Value::Obj(_))&&matches!(jv::field(&v,"vulns"),Ok(Value::Arr(_)|Value::Null))).then_some(v)}
+/// The token of the next page of an answer: None when the answer has ended (no
+/// `next_page_token`, or a null one), the token when it goes on, and Err for
+/// anything else. A page with a token is part of an answer, never the whole of
+/// one. The CLI reads it by the same rule (osv_page_token).
+fn page_token(v:&Value)->Result<Option<W>,()>{
+    match jv::field(v,"next_page_token"){Ok(Value::Null)=>Ok(None),Ok(Value::Str(t)) if !t.is_empty()=>Ok(Some(t.clone())),_=>Err(())}
+}
+/// The record GET /v1/vulns/<id> answers: an object that names that id. The
+/// CLI reads it by the same rule (osv_record).
+fn osv_record(v:Value,id:&[u8])->Option<Value>{matches!(jv::field(&v,"id"),Ok(Value::Str(s)) if s.as_slice()==id).then_some(v)}
+/// jq's @uri, which the CLI puts an id in its record URL with.
+fn uri(s:&[u8])->String{
+    let mut out=String::new();
+    for b in s{if b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.'|b'~'){out.push(*b as char)}else{out.push_str(&format!("%{:02X}",b))}}
+    out
+}
 /// A KEV catalog is one JSON object whose `vulnerabilities` is a list with at
 /// least one entry, and every entry is an object that names its CVE in a string
 /// `cveID`. CISA's catalog is cumulative, so it is never empty: an empty file, a
@@ -48,15 +81,20 @@ impl Status {
 pub enum Unanswered { Osv, Kev }
 struct Scratch(PathBuf);
 impl Drop for Scratch{fn drop(&mut self){sh::rm_rf(&self.0);}}
+/// One package of a batch while its answer is read: the advisories its pages
+/// named so far, and the token of its next page.
+struct Asked{package:W,version:W,vulns:Vec<Value>,token:Option<W>,ended:bool,pages:usize}
 
 /// `kev_reads` counts the parses of the KEV catalog: one `batch` reads the
 /// catalog at most once, whatever the number of packages. Read per package,
 /// the whole catalog was parsed again for every package of the closure.
-pub struct Providers{home:PathBuf,cache:PathBuf,ttl:i64,announced:bool,kev_reads:usize}
+/// `until` is the deadline post fixed when it started (post::LIMIT): no
+/// request runs past it.
+pub struct Providers{home:PathBuf,cache:PathBuf,ttl:i64,announced:bool,kev_reads:usize,until:Instant}
 impl Providers{
-    pub fn new(home:&Path)->Self{
+    pub fn new(home:&Path,until:Instant)->Self{
         let cache=std::env::var_os(CACHE_ENV).filter(|p|!p.is_empty()).map(PathBuf::from).unwrap_or_else(||home.join(CACHE_DIR));
-        Self{home:home.into(),cache,ttl:env(CACHE_TTL_ENV,&CACHE_TTL.to_string()).parse().unwrap_or(CACHE_TTL),announced:false,kev_reads:0}
+        Self{home:home.into(),cache,ttl:env(CACHE_TTL_ENV,&CACHE_TTL.to_string()).parse().unwrap_or(CACHE_TTL),announced:false,kev_reads:0,until}
     }
     fn init(&self){for sub in CACHE_NAMESPACES{sh::mkdir_p(&self.cache.join(sub));}sh::mkdir_p(&self.home);state::advisory_rotate_once(&self.home.join("advisory.log"));}
     fn raw_log(&self,level:&[u8],line:&[u8]){sh::append(&self.home.join("advisory.log"),&cat(&[b"[",os::utc_stamp(os::wall(os::WallRole::ProviderHeader).seconds()).as_bytes(),b"] ",level,b" ",line,b"\n"]));}
@@ -72,9 +110,14 @@ impl Providers{
     /// The HTTP code curl printed, which each caller compares to 200. curl
     /// prints the code of a response it did not finish reading, so a curl that
     /// failed adds how it ended, as the CLI's requests do: no failed request
-    /// reads as 200, and the record says both.
-    fn curl(url:&str,response:&Path,payload:Option<&Path>,seconds:&str)->W{
-        let mut c=Command::new("curl");c.args(["-fsS","--max-time",seconds]);
+    /// reads as 200, and the record says both. A request takes at most `cap`
+    /// seconds and never runs past `until`: its --max-time is the shorter of
+    /// the two, and a request the deadline leaves no time for is not started.
+    fn curl(url:&str,response:&Path,payload:Option<&Path>,cap:u64,until:Instant)->W{
+        let left=until.saturating_duration_since(Instant::now()).min(Duration::from_secs(cap));
+        if left<LEAST_REQUEST{return Outcome::Deadline.describe(Action::Curl,Form::Action)}
+        let seconds=format!("{}.{:03}",left.as_secs(),left.subsec_millis());
+        let mut c=Command::new("curl");c.args(["-fsS","--max-time",seconds.as_str()]);
         if payload.is_some(){c.args(["-H","Content-Type: application/json"]);}
         c.arg("-o").arg(response).args(["-w","%{http_code}"]);
         if let Some(p)=payload{let mut data=b"@".to_vec();data.extend(sh::bytes(p));c.arg("-d").arg(sh::p(&data));}
@@ -103,7 +146,7 @@ impl Providers{
         let mut status=Vec::new();
         if sh::command_exists("curl"){
             let Some(tmp)=sh::mktemp(&cat(&[sh::bytes(&self.cache),b"/kev/.known_exploited_vulnerabilities.json."]))else{return None};
-            status=Self::curl(&env("SAFEDEPS_KEV_CATALOG_URL",state::DEFAULT_KEV_CATALOG_URL),&tmp,None,"15");
+            status=Self::curl(&env("SAFEDEPS_KEV_CATALOG_URL",state::DEFAULT_KEV_CATALOG_URL),&tmp,None,KEV_SECONDS,self.until);
             let answer=jv::read_one_object(&tmp).and_then(kev_answer);
             if status==b"200"&&answer.is_some(){
                 if fs::rename(&tmp,&cache).is_err(){sh::rm_f(&tmp);return None}
@@ -126,9 +169,14 @@ impl Providers{
     /// install kept under SAFEDEPS_ACCEPT_RISK accepted.
     pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,Status,Vec<W>)>,Unanswered>{
         let items=self.osv_answers(specs).map_err(|()|Unanswered::Osv)?;
+        self.judge(items)
+    }
+    /// The status of each answer this run was given. The KEV catalog is asked
+    /// once for the closure: a refresh, its log line and the parse happen
+    /// once. A listing is found by an advisory's id and the CVE aliases of its
+    /// record.
+    fn judge(&mut self,items:Vec<(W,W,Value)>)->Result<Vec<(W,W,Status,Vec<W>)>,Unanswered>{
         if items.is_empty(){return Ok(Vec::new())}
-        // Asked once for the closure: a refresh, its log line and the parse
-        // happen once.
         let Some(catalog)=self.kev()else{self.log(b"ERROR",b"CISA KEV catalog unavailable; fail-closed");return Err(Unanswered::Kev)};
         let Ok(Value::Arr(listed))=jv::field(&catalog,"vulnerabilities")else{return Err(Unanswered::Kev)};
         let cve=Regex::new("^CVE-[0-9]{4}-[0-9]+$",false).unwrap();let mut output=Vec::new();
@@ -143,46 +191,126 @@ impl Providers{
             output.push((package,version,Status::of(exploited,vulns.len()),ids));
         }Ok(output)
     }
-    /// The OSV answer of each package, from the cache or from one batch query.
+    /// The whole OSV answer of each package, asked of OSV by this run as the
+    /// CLI asks it (safedeps_osv_query_batch): one querybatch, page by page,
+    /// then the record of every advisory that answered, which stands in the
+    /// answer in place of its name. querybatch names an advisory by its id and
+    /// `modified` only, and a KEV listing is found by the CVE aliases of the
+    /// record. No answer of an earlier run is read: it says what OSV knew then,
+    /// and an advisory published since is not in it. A result that is not an
+    /// answer, a token that is not one, an answer that has not ended within
+    /// OSV_PAGES pages, an advisory named without an id, a record that cannot be
+    /// read and a request the deadline cut are no answer, and the batch has
+    /// none.
     fn osv_answers(&mut self,specs:&[Spec])->Result<Vec<(W,W,Value)>,()>{
         self.init();let temp=sh::mktemp_dir(&sh::tmp_prefix("safedeps-providers")).ok_or(())?;let scratch=Scratch(temp);
-        let mut items:Vec<(W,W,PathBuf,Option<Value>)>=Vec::new();
+        let mut items:Vec<Asked>=Vec::new();
         for spec in specs{
             let package=match &spec.package{Value::Str(s)=>tsv(s),Value::Null=>Vec::new(),_=>return Err(())};let version=tsv(&spec.version);
             if package.is_empty()||version.is_empty(){continue}
-            let path=osv_cache_path(&self.cache,&package,&version);
-            // A fresh file that holds no answer is a miss with a line in the
-            // record: the query is asked again and its answer replaces the file.
-            let value=if fresh(&path,self.ttl){
-                let cached=jv::read_one_object(&path).and_then(osv_answer);
-                if cached.is_some(){self.log(b"INFO",&cat(&[b"OSV batch cache hit ecosystem=npm package=",&package,b" version=",&version]));}
-                else{self.log(b"WARN",&cat(&[b"OSV cache unreadable; asking again ecosystem=npm package=",&package,b" version=",&version]));}
-                cached
-            }else{None};items.push((package,version,path,value));
+            items.push(Asked{package,version,vulns:Vec::new(),token:None,ended:false,pages:0});
         }
-        let missing:Vec<_>=items.iter().enumerate().filter(|(_,i)|i.3.is_none()).map(|(n,_)|n).collect();
-        if !missing.is_empty(){
-            if !sh::command_exists("curl"){
-                eprintln!("safedeps providers: curl is required for provider queries");self.log(b"ERROR",b"OSV batch unavailable; cache miss ecosystem=npm");return Err(());
+        if items.is_empty(){return Ok(Vec::new())}
+        if !sh::command_exists("curl"){
+            eprintln!("safedeps providers: curl is required for provider queries");self.log(b"ERROR",b"OSV batch unavailable; no answer ecosystem=npm");return Err(());
+        }
+        let url=env("SAFEDEPS_OSV_BATCH_API_URL",state::DEFAULT_OSV_BATCH_API_URL);
+        let payload=scratch.0.join("payload.json");let response=scratch.0.join("response.json");
+        // Every page: the queries whose answer has not ended, each with the
+        // token its last page gave. OSV keeps the order of the queries, so the
+        // k-th result answers the k-th package still asked.
+        let mut page=0usize;
+        loop{
+            let asked:Vec<usize>=(0..items.len()).filter(|n|!items[*n].ended).collect();
+            if asked.is_empty(){break}
+            page+=1;
+            if page>OSV_PAGES{
+                self.log(b"ERROR",&cat(&[b"OSV batch answer did not end within ",OSV_PAGES.to_string().as_bytes(),b" pages ecosystem=npm queries=",asked.len().to_string().as_bytes()]));return Err(())
             }
-            let queries=Value::Arr(missing.iter().map(|i|{let (p,v,_,_)=&items[*i];jv::obj(vec![("version",jv::s(v)),("package",jv::obj(vec![("name",jv::s(p)),("ecosystem",jv::s(b"npm"))]))])}).collect());
-            let payload=scratch.0.join("payload.json");let response=scratch.0.join("response.json");
+            let queries=Value::Arr(asked.iter().map(|n|{
+                let item=&items[*n];
+                let mut query=vec![("version",jv::s(&item.version)),("package",jv::obj(vec![("name",jv::s(&item.package)),("ecosystem",jv::s(b"npm"))]))];
+                if let Some(token)=&item.token{query.push(("page_token",jv::s(token)));}
+                jv::obj(query)
+            }).collect());
             fs::write(&payload,cat(&[&jv::dump(&jv::obj(vec![("queries",queries)])),b"\n"])).map_err(|_|())?;
-            let status=Self::curl(&env("SAFEDEPS_OSV_BATCH_API_URL",state::DEFAULT_OSV_BATCH_API_URL),&response,Some(&payload),"20");
+            let status=Self::curl(&url,&response,Some(&payload),BATCH_SECONDS,self.until);
             let st=jv::read_file(&response);
             if status!=b"200"||!st.as_ref().is_some_and(|s|!s.failed&&s.values.last().is_some_and(|v|matches!(jv::field(v,"results"),Ok(Value::Arr(_))))){
-                self.log(b"ERROR",&cat(&[b"OSV batch query failed status=",if status.is_empty(){b"none"}else{&status}]));return Err(());
+                self.log(b"ERROR",&cat(&[b"OSV batch query failed status=",if status.is_empty(){b"none"}else{&status},b" page=",page.to_string().as_bytes()]));return Err(())
             }
             let st=st.unwrap();if st.values.len()!=1{return Err(())}
             let Value::Arr(results)=jv::field(&st.values[0],"results")?else{return Err(())};
-            if results.len()!=missing.len(){self.log(b"ERROR",&cat(&[b"OSV batch result count mismatch misses=",missing.len().to_string().as_bytes(),b" results=",results.len().to_string().as_bytes()]));return Err(())}
-            for (n,(i,r)) in missing.iter().zip(results).enumerate(){
-                let Some(v)=osv_answer(r.clone())else{self.log(b"ERROR",&cat(&[b"OSV batch result is not an answer ecosystem=npm index=",n.to_string().as_bytes()]));return Err(())};
-                let (package,version,path,stored)=&mut items[*i];state::write_state_file(path,&jv::dump(&v)).map_err(|_|())?;
-                self.log(b"INFO",&cat(&[b"OSV batch live query ok ecosystem=npm package=",package,b" version=",version]));*stored=Some(v);
+            if results.len()!=asked.len(){self.log(b"ERROR",&cat(&[b"OSV batch result count mismatch queries=",asked.len().to_string().as_bytes(),b" results=",results.len().to_string().as_bytes()]));return Err(())}
+            for (n,result) in asked.iter().zip(results){
+                let Some((answer,token))=osv_answer(result.clone()).and_then(|a|page_token(&a).ok().map(|t|(a,t)))else{
+                    self.log(b"ERROR",&cat(&[b"OSV batch result is not an answer ecosystem=npm page=",page.to_string().as_bytes()]));return Err(())
+                };
+                let item=&mut items[*n];
+                if let Ok(Value::Arr(vulns))=jv::field(&answer,"vulns"){item.vulns.extend(vulns.iter().cloned());}
+                item.ended=token.is_none();item.token=token;item.pages+=1;
             }
         }
-        items.into_iter().map(|(package,version,_,value)|value.map(|osv|(package,version,osv)).ok_or(())).collect()
+        // Every advisory that answered, read whole once.
+        let mut records:Vec<(W,Value)>=Vec::new();
+        for item in &items{
+            for vuln in &item.vulns{
+                let named=match (jv::field(vuln,"id"),jv::field(vuln,"modified")){
+                    (Ok(Value::Str(id)),Ok(Value::Null|Value::Bool(false))) if !id.is_empty()=>Some((id.clone(),Vec::new())),
+                    (Ok(Value::Str(id)),Ok(Value::Str(modified))) if !id.is_empty()=>Some((id.clone(),modified.clone())),
+                    _=>None,
+                };
+                let Some((id,modified))=named else{
+                    self.log(b"ERROR",b"OSV batch answer names an advisory it does not identify ecosystem=npm");return Err(())
+                };
+                if records.iter().any(|(known,_)|*known==id){continue}
+                let Some(record)=self.record(&url,&id,&modified)else{return Err(())};
+                records.push((id,record));
+            }
+        }
+        // One line per package OSV answered, with the pages its answer took,
+        // as the CLI writes it.
+        for item in &items{
+            self.log(b"INFO",&cat(&[b"OSV batch live query ok ecosystem=npm package=",&item.package,b" version=",&item.version,b" pages=",item.pages.to_string().as_bytes()]));
+        }
+        let mut out=Vec::new();
+        for item in items{
+            let mut vulns:Vec<Value>=Vec::new();
+            for vuln in &item.vulns{
+                let Ok(Value::Str(id))=jv::field(vuln,"id")else{return Err(())};
+                let Some((_,record))=records.iter().find(|(known,_)|known==id)else{return Err(())};
+                if !vulns.iter().any(|v|matches!(jv::field(v,"id"),Ok(Value::Str(s)) if s==id)){vulns.push(record.clone());}
+            }
+            out.push((item.package,item.version,jv::obj(vec![("vulns",Value::Arr(vulns))])));
+        }
+        Ok(out)
+    }
+    /// One advisory record, as the CLI reads it (safedeps_osv_vuln_detail):
+    /// GET the batch URL with `querybatch` replaced by `vulns/<id>`, so the
+    /// record comes from the source whose answer named it. A record kept under
+    /// the id and the `modified` the answer gave is read again under that
+    /// pair; with no `modified` nothing names one record, so it is asked and
+    /// not kept.
+    fn record(&mut self,url:&str,id:&[u8],modified:&[u8])->Option<Value>{
+        let path=osv_record_path(&self.cache,id,modified);
+        if !modified.is_empty(){
+            if let Some(record)=jv::read_one_object(&path).and_then(|v|osv_record(v,id)){return Some(record)}
+        }
+        let Some(base)=url.strip_suffix("/querybatch")else{
+            self.log(b"ERROR",&cat(&[b"OSV record URL cannot be derived from ",url.as_bytes(),b" id=",id]));return None
+        };
+        let Some(tmp)=sh::mktemp(&cat(&[sh::bytes(&self.cache),b"/osv-vuln/.record."]))else{return None};
+        let status=Self::curl(&format!("{}/vulns/{}",base,uri(id)),&tmp,None,RECORD_SECONDS,self.until);
+        let record=if status==b"200"{jv::read_one_object(&tmp).and_then(|v|osv_record(v,id))}else{None};
+        let kept=match &record{
+            Some(_) if !modified.is_empty()=>fs::rename(&tmp,&path).is_ok(),
+            _=>{sh::rm_f(&tmp);true},
+        };
+        if !kept{sh::rm_f(&tmp);}
+        match record{
+            Some(record) if kept=>Some(record),
+            _=>{self.log(b"ERROR",&cat(&[b"OSV record read failed id=",id,b" status=",if status.is_empty(){b"none"}else{&status}]));None},
+        }
     }
 }
 
@@ -261,9 +389,10 @@ fn provider_statuses_match_cli() {
 #[test]
 fn osv_answers_match_cli() {
     let cli = include_str!("../../../lib/providers/providers.sh");
+    let rule = cli.lines().find(|line| line.starts_with("SAFEDEPS_OSV_JQ=")).expect("the CLI declares the OSV rules");
     let head = "safedeps_osv_answer() {";
     let body = cli.split_once(head).unwrap().1.split_once("\n}").unwrap().0;
-    let script = format!("{head}{body}\n}}\nsafedeps_osv_answer \"$1\" >/dev/null");
+    let script = format!("{rule}\n{head}{body}\n}}\nsafedeps_osv_answer \"$1\" >/dev/null");
     let dir = std::env::temp_dir().join(format!("safedeps-osv-answer-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join("answer.json");
@@ -280,6 +409,38 @@ fn osv_answers_match_cli() {
                 .args(["-c", &script, "answer-contract"]).arg(&file).status().unwrap();
             assert_eq!(cli.success(), answer, "the CLI on {body:?}");
         }
+    }
+    // The token of the next page: an answer with none, or a null one, has
+    // ended; a string that is not empty goes on; anything else is no answer.
+    let token_script = format!("{rule}\njq -j \"$SAFEDEPS_OSV_JQ\"'osv_page_token // \"\"' \"$1\"");
+    let tokens: [(&str, Result<Option<&str>, ()>); 10] = [("{}", Ok(None)), (r#"{"vulns":[]}"#, Ok(None)), (r#"{"next_page_token":null}"#, Ok(None)),
+        (r#"{"next_page_token":"t"}"#, Ok(Some("t"))), (r#"{"vulns":[1],"next_page_token":"t"}"#, Ok(Some("t"))),
+        (r#"{"next_page_token":""}"#, Err(())), (r#"{"next_page_token":1}"#, Err(())), (r#"{"next_page_token":false}"#, Err(())),
+        (r#"{"next_page_token":["t"]}"#, Err(())), (r#"{"next_page_token":{}}"#, Err(()))];
+    for (body, want) in tokens {
+        fs::write(&file, body).unwrap();
+        let core = page_token(&jv::read_one_object(&file).unwrap());
+        assert_eq!(core, want.map(|t| t.map(|t| t.as_bytes().to_vec())), "the core's token on {body:?}");
+        let out = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .args(["-c", &token_script, "token-contract"]).arg(&file).output().unwrap();
+        match want {
+            Ok(token) => { assert!(out.status.success(), "the CLI's token on {body:?}"); assert_eq!(out.stdout, token.unwrap_or("").as_bytes(), "the CLI's token on {body:?}"); }
+            Err(()) => assert!(!out.status.success(), "the CLI refuses the token on {body:?}"),
+        }
+    }
+    // The record of one id: one object that names it, and nothing else.
+    let record_head = "safedeps_osv_vuln_answer() {";
+    let record_body = cli.split_once(record_head).unwrap().1.split_once("\n}").unwrap().0;
+    let record_script = format!("{rule}\n{record_head}{record_body}\n}}\nsafedeps_osv_vuln_answer \"$1\" GHSA-x >/dev/null");
+    let records = [(r#"{"id":"GHSA-x"}"#, true), (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, true), ("  {\"id\":\"GHSA-x\"}\n", true),
+        (r#"{"id":"GHSA-y"}"#, false), (r#"{"id":"ghsa-x"}"#, false), (r#"{"id":1}"#, false), (r#"{"id":null}"#, false), ("{}", false), ("[]", false),
+        (r#"[{"id":"GHSA-x"}]"#, false), ("null", false), ("", false), ("not json", false), (r#"{"id":"GHSA-x"} {"id":"GHSA-x"}"#, false), (r#"{"id":"GHSA-x"} null"#, false)];
+    for (body, record) in records {
+        fs::write(&file, body).unwrap();
+        assert_eq!(jv::read_one_object(&file).and_then(|v| osv_record(v, b"GHSA-x")).is_some(), record, "the core's record on {body:?}");
+        let cli = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .args(["-c", &record_script, "record-contract"]).arg(&file).status().unwrap();
+        assert_eq!(cli.success(), record, "the CLI's record on {body:?}");
     }
     let _ = fs::remove_dir_all(&dir);
 }
@@ -344,20 +505,23 @@ fn provider_cache_constants_match_cli() {
         assert!(cli.contains(&format!("\"${{SAFEDEPS_CACHE_DIR}}/{namespace}\"")), "CLI namespace {namespace}");
     }
     assert!(cli.contains(&format!("printf '%s/{KEV_CACHE_PATH}' \"${{SAFEDEPS_CACHE_DIR}}\"")), "CLI KEV filename");
-    assert!(cli.contains("\"${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json\""), "CLI OSV filename");
+    assert!(cli.contains("cache_path=\"${SAFEDEPS_CACHE_DIR}/osv-vuln/${cache_key}.json\""), "CLI OSV record filename");
+    assert!(cli.lines().any(|line| line == format!("SAFEDEPS_OSV_PAGE_LIMIT={OSV_PAGES}")), "CLI OSV page limit");
+    // No OSV answer is kept: the CLI writes no cache/osv path at all.
+    assert!(!cli.contains("${SAFEDEPS_CACHE_DIR}/osv/"), "the CLI keeps no OSV answer");
     let function = |name: &str| -> String {
         let head = format!("{name}() {{");
         let body = cli.split_once(&head).unwrap().1.split_once("\n}").unwrap().0;
         format!("{head}{body}\n}}\n")
     };
-    let script = format!("{}{}safedeps_cache_key osv npm \"$1\" \"$2\"", function("safedeps_hash_text"), function("safedeps_cache_key"));
-    for (package, version) in [("@scope/pkg", "1.2.3"), ("Case sensitive", "v1+meta"), ("line\nnext", "tab\tvalue")] {
+    let script = format!("{}{}safedeps_cache_key osv-vuln \"$1\" \"$2\" \"\"", function("safedeps_hash_text"), function("safedeps_cache_key"));
+    for (id, modified) in [("GHSA-xxxx-yyyy-zzzz", "2026-11-17T16:00:03Z"), ("CVE-2026-1", "v1+meta"), ("line\nnext", "tab\tvalue")] {
         let out = std::process::Command::new("/bin/bash").env_clear().env("PATH", "/usr/bin:/bin")
-            .args(["-c", &script, "cache-contract", package, version]).output().unwrap();
+            .args(["-c", &script, "cache-contract", id, modified]).output().unwrap();
         assert!(out.status.success(), "CLI cache hash: {}", String::from_utf8_lossy(&out.stderr));
         let key = String::from_utf8(out.stdout).unwrap();
-        assert_eq!(osv_cache_path(Path::new("cache root"), package.as_bytes(), version.as_bytes()),
-            Path::new("cache root/osv").join(format!("{}.json", key.trim_end_matches('\n'))));
+        assert_eq!(osv_record_path(Path::new("cache root"), id.as_bytes(), modified.as_bytes()),
+            Path::new("cache root/osv-vuln").join(format!("{}.json", key.trim_end_matches('\n'))));
     }
 }
 
@@ -367,26 +531,24 @@ mod catalog_tests {
 
     struct Fixture { root: PathBuf, providers: Providers }
     impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); } }
-    /// A home whose OSV answers and KEV catalog are all in the cache and fresh,
-    /// so a batch starts no curl.
-    fn fixture(name: &str, osv: &[(&str, &str)], kev: &[&str]) -> Fixture {
+    /// A home whose KEV catalog is in the cache and fresh, so judging the
+    /// answers starts no curl. OSV answers are never kept: a test hands the
+    /// judgment the answers a run was given.
+    fn fixture(name: &str, kev: &[&str]) -> Fixture {
         let root = std::env::temp_dir().join(format!("safedeps-kev-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let cache = root.join("cache");
         for sub in CACHE_NAMESPACES { fs::create_dir_all(cache.join(sub)).unwrap(); }
-        for (spec, body) in osv {
-            let (package, version) = spec.split_once('@').unwrap();
-            fs::write(osv_cache_path(&cache, package.as_bytes(), version.as_bytes()), body).unwrap();
-        }
         let entries: Vec<String> = kev.iter().map(|id| format!("{{\"cveID\":\"{}\"}}", id)).collect();
         fs::write(cache.join(KEV_CACHE_PATH), format!("{{\"vulnerabilities\":[{}]}}", entries.join(","))).unwrap();
-        let providers = Providers { home: root.join("home"), cache, ttl: CACHE_TTL, announced: false, kev_reads: 0 };
+        let providers = Providers { home: root.join("home"), cache, ttl: CACHE_TTL, announced: false, kev_reads: 0,
+            until: Instant::now() + Duration::from_secs(25) };
         Fixture { root, providers }
     }
-    fn specs(names: &[String]) -> Vec<Spec> {
-        names.iter().map(|spec| {
+    fn answers(osv: &[(&str, &str)]) -> Vec<(W, W, Value)> {
+        osv.iter().map(|(spec, body)| {
             let (package, version) = spec.split_once('@').unwrap();
-            Spec { package: Value::Str(package.as_bytes().to_vec()), version: version.as_bytes().to_vec() }
+            (package.as_bytes().to_vec(), version.as_bytes().to_vec(), crate::json::parse_one(body.as_bytes()).unwrap())
         }).collect()
     }
 
@@ -394,17 +556,19 @@ mod catalog_tests {
     fn one_batch_reads_the_kev_catalog_once() {
         let names: Vec<String> = (0..60).map(|n| format!("fixture-{}@1.0.{}", n, n)).collect();
         let osv: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "{}")).collect();
-        let mut f = fixture("once", &osv, &["CVE-2026-9999"]);
-        let out = f.providers.batch(&specs(&names)).unwrap();
+        let mut f = fixture("once", &["CVE-2026-9999"]);
+        let out = f.providers.judge(answers(&osv)).unwrap();
         assert_eq!(out.len(), 60);
         assert_eq!(f.providers.kev_reads, 1, "the KEV catalog is read once for 60 packages");
-        let mut empty = fixture("none", &[], &["CVE-2026-9999"]);
+        let mut empty = fixture("none", &["CVE-2026-9999"]);
         empty.providers.batch(&[]).unwrap();
         assert_eq!(empty.providers.kev_reads, 0, "a batch with no package does not read the catalog");
     }
 
     /// One package of each state. Holds without the read counter, so it reads
-    /// the same against the per-package reading this replaced.
+    /// the same against the per-package reading this replaced. The KEV-listed
+    /// package names its CVE only in the aliases of a GHSA record, as a record
+    /// a batch reads whole does.
     #[test]
     fn batch_states_are_hard_block_vulnerable_and_clean() {
         let osv = [
@@ -412,9 +576,8 @@ mod catalog_tests {
             ("fixture-vuln@1.0.0", r#"{"vulns":[{"id":"CVE-2026-0002"}]}"#),
             ("fixture-clean@1.0.0", "{}"),
         ];
-        let names: Vec<String> = osv.iter().map(|(n, _)| n.to_string()).collect();
-        let mut f = fixture("states", &osv, &["CVE-2026-0001"]);
-        let out = f.providers.batch(&specs(&names)).unwrap();
+        let mut f = fixture("states", &["CVE-2026-0001"]);
+        let out = f.providers.judge(answers(&osv)).unwrap();
         let states: Vec<(String, Status)> = out.iter().map(|(p, v, s, _)| (format!("{}@{}", String::from_utf8_lossy(p), String::from_utf8_lossy(v)), *s)).collect();
         assert_eq!(states, vec![
             ("fixture-kev@1.0.0".to_string(), Status::HardBlock),

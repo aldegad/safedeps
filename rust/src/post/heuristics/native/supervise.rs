@@ -5,7 +5,6 @@ use crate::{json::{self, Value}, os, outcome::{Action, Form, Outcome}, post::{jv
 use std::{io::{Read, Write}, os::unix::process::CommandExt, path::Path, process::{Child, Command, Stdio}, time::{Duration, Instant}};
 
 const RESPONSE_BYTES: u64 = 64 * 1024;
-const POST_LIMIT: Duration = Duration::from_secs(25);
 struct Owned { child: Child, reaped: bool }
 impl Owned {
     fn finish(&mut self) -> std::io::Result<std::process::ExitStatus> {
@@ -20,7 +19,7 @@ fn observed(outcome: Outcome, dir: &Path) -> Inspection {
 
 pub(crate) fn inspect(store: &Store, post_started: Instant) -> Inspection {
     let dir = store.project.join("node_modules/.bin");
-    let until = (Instant::now()+SCAN_TIME).min(post_started+POST_LIMIT);
+    let until = (Instant::now()+SCAN_TIME).min(post_started+crate::post::LIMIT);
     if Instant::now() >= until { return observed(Outcome::Deadline,&dir) }
     let exe = match std::env::current_exe() { Ok(exe) => exe, Err(e) => return observed(Outcome::Io(Err(e)),&dir) };
     let mut command = Command::new(exe);

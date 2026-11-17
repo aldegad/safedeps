@@ -52,10 +52,17 @@ SAFEDEPS_STATUS_BLOCKED="blocked"
 # `vulns` is not evaluated when `exploited` holds, as in the `if` it replaces.
 SAFEDEPS_STATUS_JQ="def status_hard_block: \"${SAFEDEPS_STATUS_HARD_BLOCK}\"; def status_vulnerable: \"${SAFEDEPS_STATUS_VULNERABLE}\"; def status_clean: \"${SAFEDEPS_STATUS_CLEAN}\"; def status_blocked: \"${SAFEDEPS_STATUS_BLOCKED}\"; def status_of(exploited; vulns): if exploited then status_hard_block elif (vulns | length) > 0 then status_vulnerable else status_clean end; def status_risky: . == status_vulnerable or . == status_hard_block; def status_known: . == status_hard_block or . == status_vulnerable or . == status_clean; "
 
+# The pages one OSV query may take. OSV pages an answer of more than a thousand
+# advisories, or one that took longer than it allows, and an answer that has not
+# ended by this page is no answer. A plain assignment: the environment cannot
+# lift it. The core holds the same number (OSV_PAGES in
+# rust/src/post/providers.rs, held equal by provider_cache_constants_match_cli).
+SAFEDEPS_OSV_PAGE_LIMIT=20
+
 safedeps_providers_init() {
   umask 077
   mkdir -p \
-    "${SAFEDEPS_CACHE_DIR}/osv" \
+    "${SAFEDEPS_CACHE_DIR}/osv-vuln" \
     "${SAFEDEPS_CACHE_DIR}/kev" \
     "${SAFEDEPS_CACHE_DIR}/ghsa" \
     "$(dirname "${SAFEDEPS_ADVISORY_LOG}")"
@@ -195,31 +202,28 @@ safedeps_cache_is_fresh() {
   [[ $(( now - mtime )) -le "${ttl}" ]]
 }
 
-# An OSV answer is one JSON object whose `vulns`, when it has one, is a list.
-# OSV answers `{}` for a package it has nothing on, and nothing else says so: an
-# empty file, a file this user cannot read and a `null` hold no answer, and none
-# of them reads as no advisories. The core reads an answer by the same rule
-# (osv_answer in rust/src/post/providers.rs), and `osv_answers_match_cli` holds
-# the two together. The answer this prints is the one the rule read, and it is
-# the only copy a verdict reads: the file may hold something else by the time
-# anything opens it again.
+# What one OSV page says, declared once as jq and read by every OSV reader.
+#   osv_answer       one JSON object whose `vulns`, when it has one, is a list.
+#                    OSV answers `{}` for a package it has nothing on, and
+#                    nothing else says so: an empty file, a file this user
+#                    cannot read and a `null` hold no answer, and none of them
+#                    reads as no advisories.
+#   osv_page_token   the token of the next page: null when the answer has ended
+#                    (no `next_page_token`, or a null one), a string that is not
+#                    empty when it goes on, and an error for anything else. A
+#                    page with a token is part of an answer, never the whole of
+#                    one.
+#   osv_record($id)  the record GET /v1/vulns/<id> answers: an object that
+#                    names that id.
+# The core reads by the same rules (osv_answer, page_token and record in
+# rust/src/post/providers.rs), and `osv_answers_match_cli` holds them together.
+SAFEDEPS_OSV_JQ='def osv_answer: type == "object" and (.vulns | type == "array" or . == null); def osv_page_token: .next_page_token as $t | if $t == null then null elif ($t | type) == "string" and ($t | length) > 0 then $t else error("not a page token") end; def osv_record($id): type == "object" and .id == $id;'
+
+# The answer this prints is the one the rule read, and it is the only copy a
+# verdict reads: the file may hold something else by the time anything opens it
+# again.
 safedeps_osv_answer() {
-  jq -ces 'select(length == 1 and (.[0] | type == "object" and (.vulns | type == "array" or . == null))) | .[0]' "$1" 2>/dev/null
-}
-
-# A cache hit prints the answer a fresh file holds. A fresh file that holds none
-# is a miss with a line in the record: the query is asked again, its answer
-# replaces the file, and a failed query fails closed as any other miss does.
-safedeps_osv_cache_hit() {
-  local path="$1"
-  local osv_ecosystem="$2"
-  local package_name="$3"
-  local version="$4"
-
-  safedeps_cache_is_fresh "${path}" || return 1
-  safedeps_osv_answer "${path}" && return 0
-  safedeps_provider_log "WARN" "OSV cache unreadable; asking again ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-  return 1
+  jq -ces "${SAFEDEPS_OSV_JQ}"'select(length == 1 and (.[0] | osv_answer)) | .[0]' "$1" 2>/dev/null
 }
 
 # Puts a checked file where the cache keeps it. mv moves a file into a directory
@@ -270,37 +274,31 @@ safedeps_ghsa_ecosystem() {
   esac
 }
 
+# The whole answer of one OSV query, asked of OSV by this run: every page, and
+# nothing a run before this one was told. An answer from an earlier run says
+# what OSV knew then, and an advisory published since is not in it, so no
+# verdict reads one. A page that is not an answer, a token that is not one, and
+# an answer that has not ended within SAFEDEPS_OSV_PAGE_LIMIT pages are no
+# answer, and a query with no answer fails closed. Prints `{"vulns":[...]}`.
 safedeps_osv_query() {
   local ecosystem="$1"
   local package_name="$2"
   local version="$3"
   local osv_ecosystem
-  local cache_key
-  local cache_path
+  local temp_dir
   local payload
   local response_file
+  local page_file
+  local pages_file
   local http_status
-  local answer
+  local page=0
 
   safedeps_require_json_tools || return 1
   safedeps_providers_init
 
   osv_ecosystem=$(safedeps_osv_ecosystem "${ecosystem}")
-  cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}") || return 1
-  cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
-
-  if answer=$(safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"); then
-    safedeps_provider_log "INFO" "OSV cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-    printf '%s\n' "${answer}"
-    return
-  fi
-
   safedeps_require_http_client || {
-    if [[ -f "${cache_path}" ]]; then
-      safedeps_provider_log "ERROR" "OSV unavailable; stale cache refused ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-    else
-      safedeps_provider_log "ERROR" "OSV unavailable; cache miss ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-    fi
+    safedeps_provider_log "ERROR" "OSV unavailable; no answer ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
     return 1
   }
 
@@ -309,29 +307,42 @@ safedeps_osv_query() {
     --arg package "${package_name}" \
     --arg version "${version}" \
     '{version: $version, package: {name: $package, ecosystem: $ecosystem}}') || return 1
+  temp_dir=$(safedeps_provider_mktemp_dir) || return 1
+  response_file="${temp_dir}/response.json"
+  page_file="${temp_dir}/page.json"
+  pages_file="${temp_dir}/pages.jsonl"
+  : > "${pages_file}"
 
-  response_file=$(safedeps_cache_response_temp "${cache_path}") || return 1
-  http_status=$(curl -fsS \
-    --max-time 15 \
-    -H 'Content-Type: application/json' \
-    -o "${response_file}" \
-    -w '%{http_code}' \
-    -d "${payload}" \
-    "${SAFEDEPS_OSV_API_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
+  while [[ -n "${payload}" ]]; do
+    page=$((page + 1))
+    if [[ "${page}" -gt "${SAFEDEPS_OSV_PAGE_LIMIT}" ]]; then
+      safedeps_provider_log "ERROR" "OSV answer did not end within ${SAFEDEPS_OSV_PAGE_LIMIT} pages ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+    http_status=$(curl -fsS \
+      --max-time 15 \
+      -H 'Content-Type: application/json' \
+      -o "${response_file}" \
+      -w '%{http_code}' \
+      -d "${payload}" \
+      "${SAFEDEPS_OSV_API_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
+    # The next page's query is this query with the token OSV gave. A page
+    # that ended the answer gives none, and the loop ends.
+    if [[ "${http_status}" != "200" ]] || ! safedeps_osv_answer "${response_file}" > "${page_file}" \
+      || ! cat "${page_file}" >> "${pages_file}" \
+      || ! payload=$(jq -c --argjson query "${payload}" "${SAFEDEPS_OSV_JQ}"'osv_page_token as $t | if $t == null then empty else $query + {page_token: $t} end' "${page_file}"); then
+      safedeps_provider_log "ERROR" "OSV live query failed ecosystem=${osv_ecosystem} package=${package_name} version=${version} status=${http_status:-none} page=${page}"
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+  done
 
-  if [[ "${http_status}" == "200" ]] && answer=$(safedeps_osv_answer "${response_file}") && safedeps_cache_store "${response_file}" "${cache_path}"; then
-    safedeps_provider_log "INFO" "OSV live query ok ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-    printf '%s\n' "${answer}"
-    return
-  fi
-
-  rm -f "${response_file}"
-  if [[ -f "${cache_path}" ]]; then
-    safedeps_provider_log "ERROR" "OSV live query failed; stale cache refused ecosystem=${osv_ecosystem} package=${package_name} version=${version} status=${http_status:-none}"
-  else
-    safedeps_provider_log "ERROR" "OSV live query failed; cache miss ecosystem=${osv_ecosystem} package=${package_name} version=${version} status=${http_status:-none}"
-  fi
-  return 1
+  local rc=0
+  jq -c -s '{vulns: (map(.vulns // []) | add // [])}' "${pages_file}" || rc=1
+  rm -rf "${temp_dir}"
+  [[ "${rc}" -eq 0 ]] || return 1
+  safedeps_provider_log "INFO" "OSV live query ok ecosystem=${osv_ecosystem} package=${package_name} version=${version} pages=${page}"
 }
 
 # A Go install names an import path, and OSV keys Go advisories by module
@@ -372,22 +383,41 @@ safedeps_osv_query_for_check() {
   fi
 }
 
+# The whole OSV answer of every package of a closure, asked of OSV by this run
+# in one querybatch, page by page, as safedeps_osv_query asks one package.
+# querybatch names an advisory by its id and `modified` only, and a KEV listing
+# is found by the CVE aliases of the record, so every advisory that answers is
+# read whole (safedeps_osv_vuln_detail) and the record stands in the answer in
+# place of the name. A result that is not an answer, a page token that is not
+# one, an answer that has not ended within SAFEDEPS_OSV_PAGE_LIMIT pages, an
+# advisory named without an id and a record that cannot be read are no answer,
+# and the batch fails closed: no package's answer is printed without every
+# other. Prints a JSON array, by closure order, of
+# {index, ecosystem, package, version, direct, osv: {vulns: [record...]}}.
 safedeps_osv_query_batch() {
   local ecosystem="$1"
   local closure_file="$2"
   local osv_ecosystem
   local temp_dir
-  local all_items_file
-  local miss_items_file
+  local rows_file
+  local items_file
+  local next_file
   local payload_file
   local response_file
   local closure_rows_file
+  local ids_file
+  local records_file
   local http_status
   local index=0
+  local page=0
+  local pending
+  local result_count
   local package_name
   local version
   local direct
-  local answer
+  local id
+  local modified
+  local record
 
   safedeps_require_json_tools || return 1
   safedeps_providers_init
@@ -395,13 +425,16 @@ safedeps_osv_query_batch() {
 
   osv_ecosystem=$(safedeps_osv_ecosystem "${ecosystem}")
   temp_dir=$(safedeps_provider_mktemp_dir) || return 1
-  all_items_file="${temp_dir}/items.jsonl"
-  miss_items_file="${temp_dir}/misses.jsonl"
+  rows_file="${temp_dir}/items.jsonl"
+  items_file="${temp_dir}/items.json"
+  next_file="${temp_dir}/next.json"
   payload_file="${temp_dir}/payload.json"
   response_file="${temp_dir}/response.json"
   closure_rows_file="${temp_dir}/closure.tsv"
-  : > "${all_items_file}"
-  : > "${miss_items_file}"
+  ids_file="${temp_dir}/ids.tsv"
+  records_file="${temp_dir}/records.jsonl"
+  : > "${rows_file}"
+  : > "${records_file}"
 
   if ! jq -r '.[] | [.package, (.version | tostring), ((.direct // false) | tostring)] | @tsv' "${closure_file}" > "${closure_rows_file}"; then
     rm -rf "${temp_dir}"
@@ -410,56 +443,57 @@ safedeps_osv_query_batch() {
 
   while IFS=$'\t' read -r package_name version direct; do
     [[ -n "${package_name}" && -n "${version}" ]] || continue
-    local cache_key
-    local cache_path
-    cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}") || {
-      rm -rf "${temp_dir}"
-      return 1
-    }
-    cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
-
-    if answer=$(safedeps_osv_cache_hit "${cache_path}" "${osv_ecosystem}" "${package_name}" "${version}"); then
-      safedeps_provider_log "INFO" "OSV batch cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-      if ! jq -c \
+    if ! jq -cn \
         --argjson index "${index}" \
         --arg ecosystem "${ecosystem}" \
         --arg package "${package_name}" \
         --arg version "${version}" \
         --argjson direct "${direct}" \
-        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:.}' <<< "${answer}" >> "${all_items_file}"; then
-        safedeps_provider_log "ERROR" "OSV cache unreadable ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
-        rm -rf "${temp_dir}"
-        return 1
-      fi
-    elif ! jq -cn \
-        --argjson index "${index}" \
-        --arg ecosystem "${ecosystem}" \
-        --arg package "${package_name}" \
-        --arg version "${version}" \
-        --argjson direct "${direct}" \
-        --arg cache_path "${cache_path}" \
-        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, cache_path:$cache_path}' >> "${miss_items_file}"; then
+        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, vulns:[], page_token:null, ended:false, pages:0}' >> "${rows_file}"; then
       rm -rf "${temp_dir}"
       return 1
     fi
     index=$((index + 1))
   done < "${closure_rows_file}"
 
-  if [[ -s "${miss_items_file}" ]]; then
+  if ! jq -c -s '.' "${rows_file}" > "${items_file}"; then
+    rm -rf "${temp_dir}"
+    return 1
+  fi
+
+  if [[ "${index}" -gt 0 ]]; then
     safedeps_require_http_client || {
-      safedeps_provider_log "ERROR" "OSV batch unavailable; cache miss ecosystem=${osv_ecosystem}"
+      safedeps_provider_log "ERROR" "OSV batch unavailable; no answer ecosystem=${osv_ecosystem}"
       rm -rf "${temp_dir}"
       return 1
     }
+  fi
 
-    if ! jq -cn --arg ecosystem "${osv_ecosystem}" --slurpfile misses "${miss_items_file}" '
+  # Every page: the queries whose answer has not ended, each with the token its
+  # last page gave, until every answer has ended.
+  while :; do
+    if ! pending=$(jq '[.[] | select(.ended | not)] | length' "${items_file}"); then
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+    [[ "${pending}" -gt 0 ]] || break
+    page=$((page + 1))
+    if [[ "${page}" -gt "${SAFEDEPS_OSV_PAGE_LIMIT}" ]]; then
+      safedeps_provider_log "ERROR" "OSV batch answer did not end within ${SAFEDEPS_OSV_PAGE_LIMIT} pages ecosystem=${osv_ecosystem} queries=${pending}"
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+
+    if ! jq -c --arg ecosystem "${osv_ecosystem}" '
       {
         queries: [
-          $misses[]
+          .[]
+          | select(.ended | not)
           | {version: .version, package: {name: .package, ecosystem: $ecosystem}}
+            + (if .page_token == null then {} else {page_token: .page_token} end)
         ]
       }
-    ' > "${payload_file}"; then
+    ' "${items_file}" > "${payload_file}"; then
       safedeps_provider_log "ERROR" "OSV batch query not written ecosystem=${osv_ecosystem}"
       rm -rf "${temp_dir}"
       return 1
@@ -474,67 +508,90 @@ safedeps_osv_query_batch() {
       "${SAFEDEPS_OSV_BATCH_API_URL}" 2>/dev/null) || http_status="${http_status:-none} exit $?"
 
     if [[ "${http_status}" != "200" ]] || ! jq -e '.results | type == "array"' "${response_file}" >/dev/null 2>&1; then
-      safedeps_provider_log "ERROR" "OSV batch query failed status=${http_status:-none}"
+      safedeps_provider_log "ERROR" "OSV batch query failed status=${http_status:-none} page=${page}"
       rm -rf "${temp_dir}"
       return 1
     fi
 
-    local miss_count
-    local result_count
-    if ! miss_count=$(jq -s 'length' "${miss_items_file}") || ! result_count=$(jq '.results | length' "${response_file}") \
-      || [[ "${miss_count}" != "${result_count}" ]]; then
-      safedeps_provider_log "ERROR" "OSV batch result count mismatch misses=${miss_count:-none} results=${result_count:-none}"
+    if ! result_count=$(jq -s 'map(.results | length) | add' "${response_file}") || [[ "${result_count}" != "${pending}" ]]; then
+      safedeps_provider_log "ERROR" "OSV batch result count mismatch queries=${pending} results=${result_count:-none}"
       rm -rf "${temp_dir}"
       return 1
     fi
 
-    local miss_i=0
-    while IFS= read -r miss_item; do
-      local cache_path
-      local response_item_file
-      if ! cache_path=$(jq -r '.cache_path' <<< "${miss_item}") \
-        || ! response_item_file=$(safedeps_cache_response_temp "${cache_path}"); then
-        rm -rf "${temp_dir}"
-        return 1
-      fi
-      if ! jq -c --argjson i "${miss_i}" '.results[$i]' "${response_file}" > "${response_item_file}" \
-        || ! answer=$(safedeps_osv_answer "${response_item_file}"); then
-        safedeps_provider_log "ERROR" "OSV batch result is not an answer ecosystem=${osv_ecosystem} index=${miss_i}"
-        rm -f "${response_item_file}"
-        rm -rf "${temp_dir}"
-        return 1
-      fi
-      if ! safedeps_cache_store "${response_item_file}" "${cache_path}" || ! jq -c --argjson miss "${miss_item}" \
-        '. as $osv | $miss | del(.cache_path) | . + {osv: $osv}' <<< "${answer}" >> "${all_items_file}"; then
-        rm -f "${response_item_file}"
-        rm -rf "${temp_dir}"
-        return 1
-      fi
-      safedeps_provider_log "INFO" "OSV batch live query ok ecosystem=${osv_ecosystem} package=$(jq -r '.package' <<< "${miss_item}") version=$(jq -r '.version' <<< "${miss_item}")"
-      miss_i=$((miss_i + 1))
-    done < "${miss_items_file}"
+    # OSV keeps the order of the queries, so the k-th result answers the k-th
+    # package still asked. A result that is not an answer, or a token that is
+    # not one, stops the batch.
+    if ! jq -c --slurpfile response "${response_file}" "${SAFEDEPS_OSV_JQ}"'
+        if ($response | length) != 1 then error("not one answer") else . end
+        | ($response[0].results) as $results
+        | [.[] | select(.ended | not) | .index] as $asked
+        | reduce range(0; $asked | length) as $k (.;
+            ($results[$k]) as $r
+            | if ($r | osv_answer) then . else error("not an OSV answer") end
+            | ($r | osv_page_token) as $token
+            | .[$asked[$k]] |= (.vulns += ($r.vulns // []) | .page_token = $token | .ended = ($token == null) | .pages += 1))
+      ' "${items_file}" > "${next_file}" || ! mv -f "${next_file}" "${items_file}"; then
+      safedeps_provider_log "ERROR" "OSV batch result is not an answer ecosystem=${osv_ecosystem} page=${page}"
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+  done
+
+  # Every advisory that answered, read whole once: the first time its id is
+  # named, under the `modified` given there (the core reads the same one).
+  if ! jq -r '
+      [.[].vulns[]
+       | [(.id | if type == "string" and length > 0 then . else error("an advisory without an id") end),
+          ((.modified // "") | if type == "string" then . else error("a modified that is not a string") end)]]
+      | unique_by(.[0]) | .[] | @tsv' "${items_file}" > "${ids_file}"; then
+    safedeps_provider_log "ERROR" "OSV batch answer names an advisory it does not identify ecosystem=${osv_ecosystem}"
+    rm -rf "${temp_dir}"
+    return 1
   fi
+  while IFS=$'\t' read -r id modified; do
+    if ! record=$(safedeps_osv_vuln_detail "${id}" "${modified}") \
+      || ! printf '%s\n' "${record}" >> "${records_file}"; then
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+  done < "${ids_file}"
 
   local rc=0
-  jq -s 'sort_by(.index)' "${all_items_file}" || rc=1
+  local answer_file="${temp_dir}/answer.json"
+  jq -c --slurpfile records "${records_file}" '
+    ($records | map({key: .id, value: .}) | from_entries) as $record
+    | map({index, ecosystem, package, version, direct,
+           osv: {vulns: ([.vulns[] | $record[.id] // error("an advisory with no record")] | unique_by(.id))}})
+    | sort_by(.index)' "${items_file}" > "${answer_file}" || rc=1
+  # One line per package OSV answered, with the pages its answer took.
+  if [[ "${rc}" -eq 0 ]]; then
+    local item_pages
+    while IFS=$'\t' read -r package_name version item_pages; do
+      safedeps_provider_log "INFO" "OSV batch live query ok ecosystem=${osv_ecosystem} package=${package_name} version=${version} pages=${item_pages}"
+    done < <(jq -r '.[] | [.package, .version, (.pages | tostring)] | @tsv' "${items_file}" 2>/dev/null)
+    cat "${answer_file}" || rc=1
+  fi
   rm -rf "${temp_dir}"
-  return "${rc}"
+  [[ "${rc}" -eq 0 ]] || return 1
 }
 
 # One OSV advisory record, by id: GET <OSV API>/v1/vulns/<id>. querybatch names
 # the advisories that affect a version and nothing else (its records carry `id`
 # and `modified` only), so a reader that needs the fixed versions, the aliases
-# or `withdrawn` asks for the record. The URL is the query URL with its last
-# segment, `query`, replaced by `vulns/<id>`, so a moved OSV source moves this
-# read with it and the moved-source notice covers it. A query URL that does not
-# end in /query has no record URL, and that is a failed read.
+# or `withdrawn` asks for the record. The URL is the batch URL with its last
+# segment, `querybatch`, replaced by `vulns/<id>`: the record comes from the
+# source whose answer named it, a moved OSV source moves this read with it, and
+# the moved-source notice covers it. A batch URL that does not end in
+# /querybatch has no record URL, and that is a failed read.
 #
-# The record is cached under cache/osv-vuln by id and MODIFIED (the batch's
-# `modified`). With a MODIFIED the cached record is the one OSV last changed
-# and stays good until OSV changes it; without one the provider TTL applies.
+# OSV changes a record's `modified` whenever it changes the record, so the id
+# and the MODIFIED the answer gave name one record. A record read under that
+# pair is kept in cache/osv-vuln and read again under the same pair. Without a
+# MODIFIED nothing names one record, so the record is asked of OSV and not kept.
 # Prints the record; returns 1 when there is no record to print.
 safedeps_osv_vuln_answer() {
-  jq -ce --arg id "$2" 'select(type == "object" and .id == $id)' "$1" 2>/dev/null
+  jq -ces --arg id "$2" "${SAFEDEPS_OSV_JQ}"'select(length == 1 and (.[0] | osv_record($id))) | .[0]' "$1" 2>/dev/null
 }
 
 safedeps_osv_vuln_detail() {
@@ -544,19 +601,17 @@ safedeps_osv_vuln_detail() {
 
   safedeps_require_json_tools || return 1
   safedeps_providers_init
-  if [[ "${SAFEDEPS_OSV_API_URL}" != */query ]]; then
-    safedeps_provider_log "ERROR" "OSV record URL cannot be derived from ${SAFEDEPS_OSV_API_URL} id=${id}"
+  if [[ "${SAFEDEPS_OSV_BATCH_API_URL}" != */querybatch ]]; then
+    safedeps_provider_log "ERROR" "OSV record URL cannot be derived from ${SAFEDEPS_OSV_BATCH_API_URL} id=${id}"
     return 1
   fi
-  base="${SAFEDEPS_OSV_API_URL%/query}"
+  base="${SAFEDEPS_OSV_BATCH_API_URL%/querybatch}"
   cache_key=$(safedeps_cache_key "osv-vuln" "${id}" "${modified}" "") || return 1
   cache_path="${SAFEDEPS_CACHE_DIR}/osv-vuln/${cache_key}.json"
 
-  if [[ -n "${modified}" && -f "${cache_path}" ]] || safedeps_cache_is_fresh "${cache_path}"; then
-    if answer=$(safedeps_osv_vuln_answer "${cache_path}" "${id}"); then
-      printf '%s\n' "${answer}"
-      return 0
-    fi
+  if [[ -n "${modified}" ]] && answer=$(safedeps_osv_vuln_answer "${cache_path}" "${id}"); then
+    printf '%s\n' "${answer}"
+    return 0
   fi
 
   safedeps_require_http_client || return 1
@@ -564,7 +619,7 @@ safedeps_osv_vuln_detail() {
   http_status=$(curl -fsS --max-time 15 -o "${response_file}" -w '%{http_code}' \
     "${base}/vulns/$(safedeps_json_uri_escape "${id}")" 2>/dev/null) || http_status="${http_status:-none} exit $?"
   if [[ "${http_status}" == "200" ]] && answer=$(safedeps_osv_vuln_answer "${response_file}" "${id}") \
-    && safedeps_cache_store "${response_file}" "${cache_path}"; then
+    && if [[ -n "${modified}" ]]; then safedeps_cache_store "${response_file}" "${cache_path}"; else rm -f "${response_file}"; fi; then
     printf '%s\n' "${answer}"
     return 0
   fi
@@ -782,6 +837,7 @@ safedeps_providers_query() {
   local catalog_file
   local kev_file
   local ghsa_file
+  local observed_at
 
   safedeps_require_json_tools || return 1
   queried_at=$(safedeps_now_iso)
@@ -828,7 +884,7 @@ safedeps_providers_query() {
         version: $version,
         queried_at: $queried_at,
         status: status_blocked,
-        reason: "OSV primary provider unavailable and no fresh cache",
+        reason: "OSV primary provider did not answer",
         vulnerabilities: [],
         kev: {queried_at: $queried_at, status: "not_queried", exploited: false, matches: []},
         advisories: [],
@@ -841,6 +897,10 @@ safedeps_providers_query() {
     rm -rf "${temp_dir}"
     return 1
   fi
+  # When this run held OSV's whole answer. The record says the answer was asked
+  # live and when it was in hand, so no reader takes it for an answer kept from
+  # an earlier run.
+  observed_at=$(safedeps_now_iso)
 
   if ! safedeps_kev_refresh_catalog "${catalog_file}" \
     || ! safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_file}" > "${kev_file}"; then
@@ -856,6 +916,7 @@ safedeps_providers_query() {
     --arg package "${package_name}" \
     --arg version "${version}" \
     --arg queried_at "${queried_at}" \
+    --arg observed_at "${observed_at}" \
     --slurpfile osv "${osv_file}" \
     --slurpfile kev "${kev_file}" \
     --slurpfile ghsa "${ghsa_file}" "${SAFEDEPS_STATUS_JQ}"'
@@ -872,7 +933,7 @@ safedeps_providers_query() {
           kev: $kev_result,
           advisories: ($ghsa_result.advisories // []),
           provider_status: {
-            osv: {status: "ok", canonical: true},
+            osv: {status: "ok", canonical: true, answered: "live", observed_at: $observed_at},
             kev: {status: ($kev_result.status // "ok"), overlay: true},
             ghsa: {status: ($ghsa_result.status // "ok"), enrichment: true}
           }
@@ -890,6 +951,7 @@ safedeps_providers_query_batch() {
   local osv_items_file
   local results_file
   local catalog_file
+  local observed_at
 
   safedeps_require_json_tools || return 1
   queried_at=$(safedeps_now_iso)
@@ -905,6 +967,7 @@ safedeps_providers_query_batch() {
     rm -rf "${temp_dir}"
     return 1
   fi
+  observed_at=$(safedeps_now_iso)
   if [[ -s "${osv_items_file}" ]] && ! safedeps_kev_refresh_catalog "${catalog_file}"; then
     safedeps_provider_log "ERROR" "KEV overlay failed ecosystem=${ecosystem}"
     rm -rf "${temp_dir}"
@@ -919,12 +982,12 @@ safedeps_providers_query_batch() {
     if ! jq -c '.osv' <<< "${item}" > "${osv_file}" \
       || ! kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}" "${catalog_file}") \
       || ! status=$(jq -r --argjson kev "${kev_json}" "${SAFEDEPS_STATUS_JQ}"'status_of($kev.exploited; .osv.vulns // [])' <<< "${item}") \
-      || ! jq -cn \
-      --argjson item "${item}" \
+      || ! jq -c \
       --arg queried_at "${queried_at}" \
+      --arg observed_at "${observed_at}" \
       --arg status "${status}" \
       --argjson kev "${kev_json}" \
-      '{
+      '. as $item | {
         index: $item.index,
         ecosystem: $item.ecosystem,
         package: $item.package,
@@ -935,11 +998,11 @@ safedeps_providers_query_batch() {
         vulnerabilities: ($item.osv.vulns // []),
         kev: $kev,
         provider_status: {
-          osv: {status: "ok", canonical: true, batch: true},
+          osv: {status: "ok", canonical: true, batch: true, answered: "live", observed_at: $observed_at},
           kev: {status: ($kev.status // "ok"), overlay: true},
           ghsa: {status: "skipped", enrichment: true, reason: "closure batch omits GHSA enrichment"}
         }
-      }' >> "${results_file}"; then
+      }' <<< "${item}" >> "${results_file}"; then
       rm -rf "${temp_dir}"
       return 1
     fi

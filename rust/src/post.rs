@@ -27,6 +27,15 @@ mod call;
 mod heuristics;
 mod run;
 
+/// The one deadline of a post run, counted from its start (`main`'s
+/// `started`). Every request a judgment waits on (the OSV batch, its pages and
+/// records, the KEV catalog) and the native inspection end by it, each cut to
+/// the time left, and a step it cut is unanswered: a rollback. What is left
+/// after it, before the 30 seconds the runtime gives the hook, is the room the
+/// answer takes, the rollback or the confirm. The runtime's kill is never the
+/// answer: past it the install stands unjudged.
+pub(crate) const LIMIT: std::time::Duration = std::time::Duration::from_secs(25);
+
 /// A measurement entry, fed one JSON request. It calls the same operations
 /// the hook uses; the reference side calls their bash functions.
 pub fn probe(input: &[u8]) -> i32 {

@@ -8,8 +8,10 @@ fixture exercises the closure backstop. --bin-count adds a recorded empty
 install that classifies new text bin files; --rotate-bytes exercises archive
 creation. --rebuild uses one approved synthetic package whose harmless
 lifecycle script leaves a receipt inside its own fixture directory.
-Warm-cache and cold-loopback results are CPU/local-provider measurements,
-not a claim about the canonical providers' network latency.
+OSV is asked on the loopback provider in both modes: no OSV answer is kept.
+--cache warm plants a fresh KEV catalog, and cold-loopback downloads it.
+Both are CPU/local-provider measurements, not a claim about the canonical
+providers' network latency.
 """
 import argparse
 from collections import Counter
@@ -74,7 +76,7 @@ def seed(d,n,l):
     if d.exists():shutil.rmtree(d)
     project=d/'project';home=d/'state';cache=home/'cache'
     project.mkdir(parents=True)
-    for sub in ['osv','kev']:(cache/sub).mkdir(parents=True)
+    (cache/'kev').mkdir(parents=True)
     ledger=home/'approved-specs';ledger.mkdir()
     packages={'':dict(name='cost-fixture',dependencies={spec(i):'1.0.0' for i in range(n)})}
     packages.update({'node_modules/'+spec(i):dict(version='1.0.0') for i in range(n)})
@@ -86,9 +88,6 @@ def seed(d,n,l):
                    version='1.0.0',version_range='1.0.0',approved_at='2001-01-01T00:00:00Z',
                    expires_at='2099-01-01T00:00:00Z',approved_by='synthetic-fixture',evidence={}))
     if a.cache=='warm':
-        for i in range(n):
-            key=hashlib.sha256(('osv\nnpm\n%s\n1.0.0'%spec(i)).encode()).hexdigest()
-            write_json(cache/'osv'/(key+'.json'),dict(vulns=[]))
         write_json(cache/'kev/known_exploited_vulnerabilities.json',dict(vulnerabilities=[dict(cveID='CVE-2026-9999')]))
     if a.rotate_bytes:
         line=b'[2001-02-03T04:05:06Z] INFO synthetic rotation fixture\n'
@@ -154,7 +153,7 @@ try:
                         # Do not carry truth-source, cache, or ledger settings
                         # from the operator's own installation into a fixture.
                         env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
-                        env.update(SAFEDEPS_HOME=str(home),SAFEDEPS_OSV_BATCH_API_URL=endpoint+'/osv',
+                        env.update(SAFEDEPS_HOME=str(home),SAFEDEPS_OSV_BATCH_API_URL=endpoint+'/osv/v1/querybatch',
                                    SAFEDEPS_KEV_CATALOG_URL=endpoint+'/kev',LC_ALL='C')
                         if a.rebuild:
                             user=home.parent/'user-home';user.mkdir(exist_ok=True)
@@ -181,8 +180,9 @@ try:
                         invocations=[json.loads(line) for line in count_log.read_text().splitlines()]
                         calls=Counter(call['program'] for call in invocations)
                         npm_commands=Counter(call['verb'] for call in invocations if call['program']=='npm')
-                        expected_requests=[] if a.cache=='warm' or n==0 else [dict(path='/osv',queries=n),dict(path='/kev')]
-                        provider_line='OSV batch cache hit' if a.cache=='warm' else 'OSV batch live query ok'
+                        osv_request=dict(path='/osv/v1/querybatch',queries=n)
+                        expected_requests=[] if n==0 else [osv_request] if a.cache=='warm' else [osv_request,dict(path='/kev')]
+                        provider_line='OSV batch live query ok'
                         passed=(result.returncode==0 and expected and requests==expected_requests
                                 and log.count(provider_line)==n and 'verification failed' not in out
                                 and 'ledger closure check could not run' not in out)

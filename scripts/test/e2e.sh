@@ -695,15 +695,19 @@ EOF
 hook_response_parse "${effect_clean_post_file}" quiet || fail "post hook passes approved full closure"
 pass "post hook passes approved full closure"
 
-# The effect gate reads a cached OSV answer by the rule the CLI reads it by: a
-# fresh file that holds no answer is a miss, the batch asks again, and a batch
-# that cannot be asked rolls the install back. An empty file once read as no
-# advisories here. Each row has a state root of its own, so what it plants
-# reaches no other row. A curl in front of the real one answers the batch with
-# OSV_STUB_BODY and a KEV download with KEV_STUB_BODY where a row sets those, for
-# an answer no provider fixture gives, and prints 200 either way. With
-# CURL_STUB_EXIT set it then exits with that status: a body cut short is 18, and
-# curl has already printed the code.
+# The effect gate asks OSV for every install, page by page, and reads the
+# record of every advisory OSV names: an answer an earlier run left is never
+# read. Each row plants a file where the CLI and the core once kept the OSV
+# answer for fixture-parent@1.0.0 (cache/osv/, fresh under a 24-hour TTL), so a
+# read of it would change the verdict: a vulnerable install would stay, a clean
+# one roll back, and the down row keep the install. A fresh no finding there
+# once kept an install of a package OSV had since named, with OSV up or down.
+# Each row has a state root of its own, so what it plants reaches no other row.
+# A curl in front of the real one answers the batch with OSV_STUB_BODY and a KEV
+# download with KEV_STUB_BODY where a row sets those, for an answer no provider
+# fixture gives, and prints 200 either way. With CURL_STUB_EXIT set it then
+# exits with that status: a body cut short is 18, and curl has already printed
+# the code.
 osv_stub_bin="${tmp_root}/osv-stub-bin"
 mkdir -p "${osv_stub_bin}"
 cat > "${osv_stub_bin}/curl" <<STUB
@@ -731,10 +735,10 @@ osv_cache_install() {
   printf '{"dependencies":{}}\n' > "${dir}/project/package.json"
   export SAFEDEPS_HOME="${dir}/home" SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=86400
   ./bin/safedeps --json check npm fixture-parent@1.0.0 >/dev/null
+  [[ ! -e "${SAFEDEPS_HOME}/cache/osv" ]] || fail "${name}: the check kept an OSV answer: $(ls "${SAFEDEPS_HOME}/cache/osv")"
   osv_cache_project="${dir}/project"
   key=$(bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv npm fixture-parent 1.0.0')
   osv_cache_path="${SAFEDEPS_HOME}/cache/osv/${key}.json"
-  [[ -s "${osv_cache_path}" ]] || fail "the check left the answer the row replaces"
   osv_cache_pre=$(
     pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}","turn_id":"turn-e2e","model":"codex-test"}
@@ -752,76 +756,137 @@ EOF
   }
 }
 EOF
+  mkdir -p "${SAFEDEPS_HOME}/cache/osv"
   if [[ "${body}" == unreadable ]]; then
+    printf '{}' > "${osv_cache_path}"
     chmod 000 "${osv_cache_path}"
   else
     printf '%s' "${body}" > "${osv_cache_path}"
   fi
   printf '%s\n' "${state}" > "${state_file}"
+  local started
+  started=$(python3 -c 'import time; print(int(time.time() * 1000))')
   osv_cache_post=$(
     PATH="${osv_stub_bin}:${PATH}" OSV_STUB_BODY="${live}" SAFEDEPS_OSV_BATCH_API_URL="${url}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}"}
 EOF
   )
+  osv_cache_post_ms=$(( $(python3 -c 'import time; print(int(time.time() * 1000))') - started ))
   printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 }
 osv_cache_rolled_back() {
   ! grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" 2>/dev/null \
     || fail "$1: the install is rolled back"
 }
+# The planted file is as it was planted: the gate neither read it into an
+# answer nor wrote one there.
+osv_cache_untouched() {
+  local name="$1" body="$2"
+  if [[ "${body}" == unreadable ]]; then
+    [[ ! -r "${osv_cache_path}" ]] || fail "${name}: the unreadable file was replaced"
+  else
+    [[ "$(cat "${osv_cache_path}")" == "${body}" ]] || fail "${name}: the planted file now holds $(cat "${osv_cache_path}")"
+  fi
+}
 osv_cache_homes=("${SAFEDEPS_HOME}" "${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-}")
 osv_batch_url="${SAFEDEPS_OSV_BATCH_API_URL}"
 osv_body_number=0
-for body in '' 'null' '{"vulns":false}' unreadable; do
+for body in '' '{}' '{"vulns":[]}' 'null' '{"vulns":false}' unreadable; do
   osv_body_number=$((osv_body_number + 1))
   osv_row="vulnerable-${osv_body_number}"
   osv_cache_install "${osv_row}" "${body}" '{"vulnerable":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
   grep -q 'npm closure contains vulnerable package(s): fixture-parent@1.0.0' < "${osv_cache_post}" \
-    || fail "a cached file of '${body}' is asked again and the advisory counts: $(cat "${osv_cache_post}")"
+    || fail "an earlier answer of '${body}' is not read and the advisory counts: $(cat "${osv_cache_post}")"
   osv_cache_rolled_back "${osv_row}"
-  jq -e '.vulns | length > 0' "${osv_cache_path}" >/dev/null || fail "${osv_row}: the answer replaces the file"
-  grep -q 'WARN OSV cache unreadable; asking again ecosystem=npm package=fixture-parent version=1.0.0' "${SAFEDEPS_HOME}/advisory.log" \
-    || fail "${osv_row}: the record says the file was not read"
+  osv_cache_untouched "${osv_row}" "${body}"
+  grep -q 'INFO OSV batch live query ok ecosystem=npm package=fixture-parent version=1.0.0 pages=1' "${SAFEDEPS_HOME}/advisory.log" \
+    || fail "${osv_row}: the record says OSV was asked"
   osv_row="down-${osv_body_number}"
   osv_cache_install "${osv_row}" "${body}" '{"vulnerable":[]}' 'http://127.0.0.1:9/'
   grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
-    || fail "a cached file of '${body}' with OSV down fails closed: $(cat "${osv_cache_post}")"
+    || fail "an earlier answer of '${body}' with OSV down fails closed: $(cat "${osv_cache_post}")"
   osv_cache_rolled_back "${osv_row}"
+  osv_cache_untouched "${osv_row}" "${body}"
   grep -q 'ERROR OSV batch query failed' "${SAFEDEPS_HOME}/advisory.log" || fail "${osv_row}: the record says the batch failed"
   osv_row="clean-${osv_body_number}"
   osv_cache_install "${osv_row}" "${body}" '{"vulnerable":[]}' "${osv_batch_url}"
-  hook_response_parse "${osv_cache_post}" quiet || fail "a cached file of '${body}' is replaced and a clean install stays: $(cat "${osv_cache_post}")"
+  hook_response_parse "${osv_cache_post}" quiet || fail "an earlier answer of '${body}' is not read and a clean install stays: $(cat "${osv_cache_post}")"
   grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" || fail "${osv_row}: a clean install stays"
-  jq -es 'length == 1 and (.[0] | type == "object")' "${osv_cache_path}" >/dev/null || fail "${osv_row}: the answer replaces the file"
+  osv_cache_untouched "${osv_row}" "${body}"
 done
-osv_cache_install hit '{}' '{"vulnerable":[]}' 'http://127.0.0.1:9/'
-hook_response_parse "${osv_cache_post}" quiet || fail "a cached answer stays a hit with OSV down: $(cat "${osv_cache_post}")"
 osv_body_number=0
-for live in '{"results":[null]}' '{"results":[false]}' '{"results":[[]]}' '{"results":[{"vulns":false}]}'; do
+for live in '{"results":[null,{}]}' '{"results":[false,{}]}' '{"results":[[],{}]}' '{"results":[{"vulns":false},{}]}'; do
   osv_body_number=$((osv_body_number + 1))
   osv_row="live-${osv_body_number}"
   osv_cache_install "${osv_row}" '' '{"vulnerable":[]}' "${osv_batch_url}" "${live}"
   grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
     || fail "a batch answer of '${live}' is a failed batch: $(cat "${osv_cache_post}")"
   osv_cache_rolled_back "${osv_row}"
-  grep -q 'ERROR OSV batch result is not an answer ecosystem=npm index=0' "${SAFEDEPS_HOME}/advisory.log" || fail "${osv_row}: the record says the batch gave no answer"
+  grep -q 'ERROR OSV batch result is not an answer ecosystem=npm page=1' "${SAFEDEPS_HOME}/advisory.log" || fail "${osv_row}: the record says the batch gave no answer"
 done
-osv_cache_install live-whole '' '{"vulnerable":[]}' "${osv_batch_url}" '{"results":[{}]}'
+osv_cache_install live-whole '' '{"vulnerable":[]}' "${osv_batch_url}" '{"results":[{},{}]}'
 hook_response_parse "${osv_cache_post}" quiet || fail "a whole batch answer from the stub stays: $(cat "${osv_cache_post}")"
 export CURL_STUB_EXIT=18
-osv_cache_install live-cut-short '' '{"vulnerable":[]}' "${osv_batch_url}" '{"results":[{}]}'
+osv_cache_install live-cut-short '' '{"vulnerable":[]}' "${osv_batch_url}" '{"results":[{},{}]}'
 unset CURL_STUB_EXIT
 grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
   || fail "a batch answer whose curl printed 200 and failed is a failed batch: $(cat "${osv_cache_post}")"
 osv_cache_rolled_back live-cut-short
 grep -q 'ERROR OSV batch query failed status=200 exit 18' "${SAFEDEPS_HOME}/advisory.log" || fail "live-cut-short: the record says both"
+
+# An answer in pages is read to its end, and every advisory's record is read:
+# the fixture answers fixture-parent@1.0.0 over two pages, names an advisory
+# whose record alone carries the CVE KEV lists, names one with no record, or
+# never ends. Each must count, and the last three roll back.
+osv_cache_install paged-vulnerable '' '{"vulnerable":["fixture-parent@1.0.0"],"paged":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
+grep -q 'npm closure contains vulnerable package(s): fixture-parent@1.0.0' < "${osv_cache_post}" \
+  || fail "an advisory on the second page counts: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back paged-vulnerable
+grep -q 'INFO OSV batch live query ok ecosystem=npm package=fixture-parent version=1.0.0 pages=2' "${SAFEDEPS_HOME}/advisory.log" || fail "paged-vulnerable: the record says two pages were read"
+osv_cache_install paged-clean '' '{"vulnerable":[],"paged":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
+hook_response_parse "${osv_cache_post}" quiet || fail "an answer that ends clean on its second page stays: $(cat "${osv_cache_post}")"
+grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" || fail "paged-clean: a clean install stays"
+osv_cache_install kev-alias '' '{"vulnerable":[],"kev_alias":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
+grep -q 'npm closure contains KEV-blocked package(s): fixture-parent@1.0.0' < "${osv_cache_post}" \
+  || fail "a KEV listing only the record's alias names blocks: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back kev-alias
+osv_cache_install record-missing '' '{"vulnerable":[],"record_missing":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "an advisory with no record is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back record-missing
+grep -q 'ERROR OSV record read failed id=GHSA-fixt-gone-0000 status=404' "${SAFEDEPS_HOME}/advisory.log" || fail "record-missing: the record says which record"
+osv_cache_install endless '' '{"vulnerable":[],"endless":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "an answer that never ends is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back endless
+grep -q 'ERROR OSV batch answer did not end within 20 pages ecosystem=npm' "${SAFEDEPS_HOME}/advisory.log" || fail "endless: the record says why"
+osv_cache_install bad-token '' '{"vulnerable":[],"bad_token":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "a page token that is not one is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back bad-token
+
+# One deadline for the whole post run (post::LIMIT, 25 seconds from its
+# start): every request ends by it, and what is left before the runtime's 30
+# seconds is the room the rollback takes. The first page answers after 15
+# seconds with a token and the second is held, so the second gets the time
+# left, not the 20 seconds a page may take alone. Asked for 20 it would end
+# past 30 seconds, where the runtime kills the hook and the install stands
+# unjudged; the kill is never the answer.
+osv_cache_install deadline '' '{"vulnerable":[],"paged":["fixture-parent@1.0.0"],"hold_first_ms":15000,"hold_next_ms":60000}' "${osv_batch_url}"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "a page the deadline cut is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back deadline
+grep -q 'ERROR OSV batch query failed status=000 exit 28 page=2' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "deadline: the record says the second page ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
+(( osv_cache_post_ms < 30000 )) || fail "deadline: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
+(( osv_cache_post_ms >= 23000 )) || fail "deadline: the post hook answered in ${osv_cache_post_ms}ms, before the deadline it was given"
 export SAFEDEPS_HOME="${osv_cache_homes[0]}"
 if [[ -n "${osv_cache_homes[1]}" ]]; then
   export SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${osv_cache_homes[1]}"
 else
   unset SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS
 fi
-pass "the effect gate reads a cached file with no OSV answer as a miss"
+pass "the effect gate asks OSV whole and reads no answer an earlier run left"
 
 # The effect gate reads the KEV catalog by the rule the CLI reads it by: a file
 # that holds no catalog is a miss, it is downloaded again, and with no catalog to
@@ -864,7 +929,6 @@ EOF
   [[ "${age}" == fresh || "${body}" == absent ]] || touch -t 202601010000 "${kev_catalog_path}"
   if [[ -n "${listed}" ]]; then
     printf '%s\n' '{"vulnerable":[],"kev":["fixture-parent@1.0.0"]}' > "${state_file}"
-    rm -f "${SAFEDEPS_HOME}"/cache/osv/*.json
   fi
   kev_catalog_post=$(
     PATH="${osv_stub_bin}:${PATH}" KEV_STUB_BODY="${kev_catalog_live:-}" SAFEDEPS_KEV_CATALOG_URL="${url}" post_hook <<EOF
@@ -1199,6 +1263,26 @@ grep -q 'it keeps an install only where every problem is an unapproved or vulner
   || fail "the rollback says the override does not cover a catalog that cannot be read"
 [[ "$(accept_entries)" == "${accept_before}" ]] || fail "a rollback for no KEV catalog writes no accepted-risk entry"
 pass "SAFEDEPS_ACCEPT_RISK keeps nothing when the KEV catalog cannot be read"
+
+# An OSV answer that is not whole is no risk a person accepted either: here
+# OSV names an advisory whose record it does not have, so nobody can say what
+# the advisory is or whether KEV lists it, and the override keeps nothing.
+accept_project "${tmp_root}/accept-no-record"
+accept_before=$(accept_entries)
+norecord_pre=$(accept_payload accept-no-record "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci" "${tmp_root}/accept-no-record" | pre_hook)
+[[ "$(hook_response_read decision "${norecord_pre}")" == allow ]] || fail "npm ci with the override runs"
+payload=$(accept_payload accept-no-record "$(hook_response_read required-rewrite "${norecord_pre}")" "${tmp_root}/accept-no-record")
+accept_lock "${tmp_root}/accept-no-record" "${accept_extra}"',
+    "node_modules/fixture-record-missing": {"version": "1.0.0"}'
+norecord_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+grep -q 'suspicious dependency change detected. A rollback ran.' < "${norecord_post}" || fail "an advisory with no record rolls back under the override: $(cat "${norecord_post}")"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${norecord_post}" || fail "the rollback says OSV gave no whole answer"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${norecord_post}" \
+  || fail "the rollback says the override does not cover an answer that is not whole"
+grep -q 'fixture-record-missing' "${tmp_root}/accept-no-record/package-lock.json" && fail "the lockfile with the unanswered package is restored"
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a rollback for an unread record writes no accepted-risk entry"
+grep -q 'ERROR OSV record read failed id=GHSA-fixt-gone-0000 status=404' "${SAFEDEPS_HOME}/advisory.log" || fail "the record says which record could not be read"
+pass "SAFEDEPS_ACCEPT_RISK keeps nothing when an advisory's OSV record cannot be read"
 
 # On Codex the pre-guard cannot withhold install scripts, so the override does
 # not lift the ledger check for a spec; the post-install override still holds.

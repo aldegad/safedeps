@@ -3,18 +3,36 @@
 
 The hooks run through a native-only test adapter and the independent report
 oracle. The named fixed assertions also appear in e2e. Synthetic projects use empty initial closures; the
-pull fixture then writes an unapproved package with a warm advisory cache.
+pull fixture then writes an unapproved package, judged against a loopback
+OSV that names no advisory and a warm KEV catalog.
 Copies alone receive a source mutation. A build error, missed fixture, or
 oracle error is not an assertion control. This is not the full e2e suite.
 """
 import argparse
-import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+
+
+class NoAdvisory(BaseHTTPRequestHandler):
+    """OSV querybatch on loopback, answering no advisory for any package. No
+    OSV answer is kept between runs, so the pull fixture's judgment asks this
+    instead of a planted file, and nothing reaches a public provider."""
+    def log_message(self,*args):pass
+    def do_POST(self):
+        body=json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
+        data=json.dumps(dict(results=[{} for _ in body.get('queries',[])])).encode()
+        self.send_response(200);self.send_header('Content-Type','application/json')
+        self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+
+osv=ThreadingHTTPServer(('127.0.0.1',0),NoAdvisory)
+threading.Thread(target=osv.serve_forever,daemon=True).start()
+osv_url='http://127.0.0.1:%d/v1/querybatch'%osv.server_port
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--archive',required=True)
@@ -82,9 +100,7 @@ def execute(argv,stem,env=None):
 
 def write_unapproved(path,home):
     path.write_text(json.dumps(dict(lockfileVersion=3,packages={'node_modules/fixture-unapproved':dict(version='1.0.0')}))+'\n')
-    for sub in ['osv','kev']:(home/'cache'/sub).mkdir(parents=True,exist_ok=True)
-    key=hashlib.sha256(b'osv\nnpm\nfixture-unapproved\n1.0.0').hexdigest()
-    (home/'cache/osv'/(key+'.json')).write_text('{"vulns":[]}\n')
+    (home/'cache/kev').mkdir(parents=True,exist_ok=True)
     (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}\n')
 
 def build_copy(stem,edits):
@@ -222,7 +238,8 @@ grep -qF "post-verify BACKSTOP traced: $BOX/project/" "$SAFEDEPS_HOME/advisory.l
     path=box/'run.sh';path.write_text(script)
     env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
     env.update(ROOT_DIR=str(root),BOX=str(box),PRE_CORE=str(pre),POST_CORE=str(post or core),
-               SAFEDEPS_HOME=str(home),HOME=str(box/'home'),NPM_CONFIG_USERCONFIG='/dev/null',LC_ALL='C')
+               SAFEDEPS_HOME=str(home),HOME=str(box/'home'),NPM_CONFIG_USERCONFIG='/dev/null',LC_ALL='C',
+               SAFEDEPS_OSV_BATCH_API_URL=osv_url)
     rc=execute(['bash',str(path)],stem,env)
     log=(run/(stem+'.log')).read_text()
     # Preserve bytes and names before any subsequent run; generated times

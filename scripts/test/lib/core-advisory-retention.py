@@ -2,7 +2,7 @@
 """The CLI rotation contract, exercised through real native pre/post calls."""
 from collections import Counter
 import gzip
-import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -10,12 +10,38 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 
 CORE = sys.argv[1]
 TRACE = re.compile(rb"^\[[^]]*\] INFO ")
 
 
+class Batch(BaseHTTPRequestHandler):
+    """OSV querybatch on loopback: no advisory for any package."""
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        data = json.dumps({"results": [{} for _ in body.get("queries", [])]}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
 def main():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Batch)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        run(f"http://127.0.0.1:{server.server_address[1]}/v1/querybatch")
+    finally:
+        server.shutdown()
+
+
+def run(batch_url):
     with tempfile.TemporaryDirectory(prefix="safedeps-native-retention.") as temp:
         root = Path(temp)
         state, project = root / "state", root / "project"
@@ -27,7 +53,7 @@ def main():
                    SAFEDEPS_ADVISORY_LOG=str(root / "ignored.log"),
                    SAFEDEPS_ADVISORY_LOG_MAX_BYTES="999999999",
                    SAFEDEPS_ADVISORY_LOG_KEEP="3",
-                   SAFEDEPS_OSV_BATCH_API_URL="http://127.0.0.1:1/no-network",
+                   SAFEDEPS_OSV_BATCH_API_URL=batch_url,
                    SAFEDEPS_KEV_CATALOG_URL="http://127.0.0.1:1/no-network")
         log = state / "advisory.log"
         # Fixed evidence from the existing Bash battery, not native output.
@@ -46,17 +72,15 @@ def main():
                 "name": "retention-fixture", "version": "1.0.0", "lockfileVersion": 3,
                 "packages": {"": {"name": "retention-fixture", "version": "1.0.0"}, **packages}}))
 
-        # No install runs: the disk and provider caches are synthetic fixtures.
-        # Native post generates the INFO channel from these cache hits.
-        (state / "cache/osv").mkdir(parents=True)
-        (state / "cache/kev").mkdir()
+        # No install runs: the lockfile and the KEV catalog are synthetic
+        # fixtures, and OSV is the loopback batch above. Native post writes one
+        # INFO line per package OSV answered.
+        (state / "cache/kev").mkdir(parents=True)
         (state / "cache/kev/known_exploited_vulnerabilities.json").write_text('{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}')
         packages = {}
         for index in range(40):
             name = f"retention-fixture-{index}"
             packages[f"node_modules/{name}"] = {"version": "1.0.0"}
-            key = hashlib.sha256(f"osv\nnpm\n{name}\n1.0.0".encode()).hexdigest()
-            (state / f"cache/osv/{key}.json").write_text('{"vulns":[]}')
         lock(packages)
         # An unfinished manager command records the scanner's denial. An
         # ordinary unapproved install denies without writing that log line.
@@ -70,7 +94,7 @@ def main():
         assert before.startswith(evidence), before
         assert len(before) > 1000, len(before)
         assert not list(state.glob("advisory.log.*.gz"))
-        print("ok - native pre/post append evidence and 40 INFO cache hits below the configured bound")
+        print("ok - native pre/post append evidence and 40 INFO live answers below the configured bound")
 
         # As in the CLI battery, the threshold and keep count are explicit
         # inputs. Older archives establish exactly which generations must go.

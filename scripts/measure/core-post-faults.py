@@ -12,6 +12,7 @@ overwrite fixture keeps a writable parent and checks that removal continues.
 """
 import argparse
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -19,8 +20,25 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from native_fixture_facts import tree_facts
+
+
+class NoAdvisory(BaseHTTPRequestHandler):
+    """OSV querybatch on loopback, answering no advisory for any package. No
+    OSV answer is kept between runs, so a fixture that judges a closure asks
+    this instead of a planted file, and nothing reaches a public provider."""
+    def log_message(self,*args):pass
+    def do_POST(self):
+        body=json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
+        data=json.dumps(dict(results=[{} for _ in body.get('queries',[])])).encode()
+        self.send_response(200);self.send_header('Content-Type','application/json')
+        self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+
+osv=ThreadingHTTPServer(('127.0.0.1',0),NoAdvisory)
+threading.Thread(target=osv.serve_forever,daemon=True).start()
+osv_url='http://127.0.0.1:%d/v1/querybatch'%osv.server_port
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core',required=True)
@@ -148,9 +166,7 @@ def seed(d,kind):
         (snapshot/'pre_meta.json').write_text('{"record":2,"snapshot_id":"pre"}\n')
         bad=dict(lockfileVersion=3,packages={'node_modules/fixture-unapproved':dict(version='1.0.0')})
         (project/'package-lock.json').write_text(json.dumps(bad)+'\n')
-        for sub in ['osv','kev']:(home/'cache'/sub).mkdir(parents=True)
-        key=hashlib.sha256(b'osv\nnpm\nfixture-unapproved\n1.0.0').hexdigest()
-        (home/'cache/osv'/(key+'.json')).write_text('{"vulns":[]}\n')
+        (home/'cache/kev').mkdir(parents=True)
         (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}\n')
         if kind.startswith('trace-'):
             lock=project/'package-lock.json'
@@ -179,9 +195,7 @@ def seed(d,kind):
         approval=dict(hash='sha256:'+key,ecosystem='npm',package=name,version='1.0.0',version_range='1.0.0',
                       approved_at='2001-01-01T00:00:00Z',expires_at='2099-01-01T00:00:00Z',approved_by='fixture',evidence={})
         (ledger/('sha256-'+key+'.json')).write_text(json.dumps(approval)+'\n')
-        for sub in ['osv','kev']:(home/'cache'/sub).mkdir(parents=True)
-        key=hashlib.sha256(('osv\nnpm\n'+name+'\n1.0.0').encode()).hexdigest()
-        (home/'cache/osv'/(key+'.json')).write_text('{"vulns":[]}\n')
+        (home/'cache/kev').mkdir(parents=True)
         (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[{"cveID":"CVE-2026-9999"}]}\n')
         binaries=d/'bin';binaries.mkdir();npm=binaries/'npm'
         npm.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"registry":"http://127.0.0.1:9/elsewhere/","replace-registry-host":"npmjs"}\'\n')
@@ -212,7 +226,8 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
         if a.only and kind not in a.only.split(','):continue
         for side in [a.side]:
             home,project=seed(d,kind)
-            env=dict(os.environ,ROOT=str(root),CORE=core,BOX=str(d),SAFEDEPS_HOME=str(home),LC_ALL='C',FAULT=kind,SIDE=side)
+            env=dict(os.environ,ROOT=str(root),CORE=core,BOX=str(d),SAFEDEPS_HOME=str(home),LC_ALL='C',FAULT=kind,SIDE=side,
+                     SAFEDEPS_OSV_BATCH_API_URL=osv_url)
             if kind=='trace-deadline':env['SAFEDEPS_BACKSTOP_WALK_SECONDS']='1'
             if (d/'bin').is_dir():env['PATH']=str(d/'bin')+os.pathsep+env['PATH']
             try:

@@ -4,9 +4,10 @@
 # A provider answer that a writer could not finish, or that names no status of
 # the list in lib/providers/providers.sh, approves nothing: the result is
 # provider_unavailable, the exit is 4, advisory.log has a line, and --json has a
-# report. A cached OSV file or a local KEV catalog that holds no answer is no
-# cache: it is asked for again, and a failed request is the same
-# provider_unavailable. Nothing here may
+# report. OSV is asked on every check, page by page, with the record of every
+# advisory it names, and an answer an earlier run left is never read. A local
+# KEV catalog that holds no catalog is no cache: it is asked for again. A failed
+# request is the same provider_unavailable. Nothing here may
 # depend on what a status is called: every row asserts the whole answer, because
 # a jq compile error also exits 3 and 5.
 #
@@ -568,12 +569,14 @@ kev_recheck_counts_nothing() {
 }
 row "re-check with no KEV catalog to read counts nothing clean and revokes nothing" kev_recheck_counts_nothing
 
-# The cache rows. A fresh cache file with no OSV answer in it is no cache,
-# whatever it holds: the query is asked again, its answer replaces the file, and
-# if it cannot be asked the check fails closed. An empty file once read as no
-# advisories, the same as OSV's own `{}`. Go asks every module prefix, so the
-# file planted there is the module's, and the other prefixes hold answers: with
-# no answer to read a failed query would fail the row before the file mattered.
+# An answer of an earlier run is not an answer. Every check asks OSV, and a
+# file left where the CLI once kept an OSV answer (cache/osv/, still fresh, any
+# body) is never read: an advisory published since is not in it. A fresh no
+# finding there once approved a package OSV had since named, and approved
+# anything while OSV was down. The file is planted under the old name, so a
+# read of it would change the verdict: the vulnerable package would pass, the
+# clean one fail, and the down row approve. Go asks every module prefix, so a
+# file is planted for each.
 osv_cache_file() {
   local ecosystem="$1" spec="$2" key
   key=$(SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv "$(safedeps_osv_ecosystem "$1")" "${2%@*}" "${2##*@}"' cache-key "${ecosystem}" "${spec}")
@@ -583,8 +586,8 @@ plant_osv() {
   local ecosystem="$1" spec="$2" body="$3" name="${2%@*}" version="${2##*@}"
   mkdir -p "${home}/cache/osv"
   if [[ "${ecosystem}" == go ]]; then
-    printf '{}' > "$(osv_cache_file go "${spec}")"
-    printf '{}' > "$(osv_cache_file go "${name%/*}@${version}")"
+    printf '%s' "${body}" > "$(osv_cache_file go "${spec}")"
+    printf '%s' "${body}" > "$(osv_cache_file go "${name%/*}@${version}")"
     planted=$(osv_cache_file go "${name%/*/*}@${version}")
   else
     planted=$(osv_cache_file "${ecosystem}" "${spec}")
@@ -596,9 +599,19 @@ plant_osv() {
     printf '%s' "${body}" > "${planted}"
   fi
 }
+# The planted file is as it was planted: nothing read it into an answer, and
+# nothing wrote an answer there.
+planted_untouched() {
+  local body="$1"
+  if [[ "${body}" == unreadable ]]; then
+    [[ ! -r "${planted}" ]] || no "the unreadable file was replaced"
+  else
+    [[ "$(cat "${planted}")" == "${body}" ]] || no "the planted file now holds: $(cat "${planted}")"
+  fi
+}
 osv_down=(SAFEDEPS_OSV_API_URL="${closed_port}" SAFEDEPS_OSV_BATCH_API_URL="${closed_port}")
 
-cache_asked_again() {
+earlier_answer_vulnerable() {
   local ecosystem="$1" spec="$2" body="$3"
   fresh_home
   plant_osv "${ecosystem}" "${spec}" "${body}"
@@ -606,102 +619,116 @@ cache_asked_again() {
   [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
   jq -e '.result == "cve_unpatched" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
   no_approval
-  jq -e 'length > 0' <<< "$(jq '.vulns' "${planted}")" >/dev/null || no "the file does not hold the answer"
+  planted_untouched "${body}"
 }
-cache_replaced() {
+earlier_answer_clean() {
   local ecosystem="$1" spec="$2" body="$3"
   fresh_home
   plant_osv "${ecosystem}" "${spec}" "${body}"
   check_in "${ecosystem}" "${spec}"
-  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
-  jq -e '.result == "clean" and .approved == true' <<< "${json}" >/dev/null || no "the report: ${json}"
-  jq -es 'length == 1 and (.[0] | type == "object")' "${planted}" >/dev/null || no "the file was not replaced"
+  passed_clean
+  planted_untouched "${body}"
 }
-cache_and_query_failed() {
+earlier_answer_down() {
   local ecosystem="$1" spec="$2" body="$3"
   fresh_home
   plant_osv "${ecosystem}" "${spec}" "${body}"
   check_in "${ecosystem}" "${spec}" "${osv_down[@]}"
   unavailable
+  planted_untouched "${body}"
 }
-for body in '' ' ' 'null' 'false' '[]' '1' '"x"' 'not json' '{}{}' 'null {}' '{"vulns":false}' '{"vulns":""}' '{"vulns":{}}' '{"vulns":1}' unreadable; do
+for body in '' '{}' '{"vulns":[]}' '{"vulns":null}' '{"vulns":[{"id":"CVE-2026-1002"}]}' unreadable; do
   for case in 'npm fixture-unpatched@1.0.0 fixture-clean@1.0.0' \
     'pypi fixture-unpatched@1.0.0 fixture-clean@1.0.0' \
     'go example.com/mod/cmd/tool@v1.0.0 example.com/other/cmd/tool@v1.0.0'; do
     read -r ecosystem vulnerable clean <<< "${case}"
-    row "${ecosystem}: a cache file of '${body}' is asked again and the provider's advisory counts" cache_asked_again "${ecosystem}" "${vulnerable}" "${body}"
-    row "${ecosystem}: a cache file of '${body}' is replaced and a clean package still passes" cache_replaced "${ecosystem}" "${clean}" "${body}"
-    row "${ecosystem}: a cache file of '${body}' with OSV down approves nothing" cache_and_query_failed "${ecosystem}" "${clean}" "${body}"
+    row "${ecosystem}: an earlier answer of '${body}' is not read and the provider's advisory counts" earlier_answer_vulnerable "${ecosystem}" "${vulnerable}" "${body}"
+    row "${ecosystem}: an earlier answer of '${body}' is not read and a clean package passes" earlier_answer_clean "${ecosystem}" "${clean}" "${body}"
+    row "${ecosystem}: an earlier answer of '${body}' with OSV down approves nothing" earlier_answer_down "${ecosystem}" "${clean}" "${body}"
   done
 done
 
-# What OSV writes stays a cache hit, and the provider is not asked.
-cache_answers() {
-  local ecosystem="$1" spec="$2" body="$3"
+# A check keeps no OSV answer: nothing is written where the next run could read
+# it. The record of an advisory OSV named is kept under its id and `modified`,
+# the pair that names one record, so a later record of the same advisory is
+# another file.
+no_answer_kept() {
+  local ecosystem="$1"
   fresh_home
-  plant_osv "${ecosystem}" "${spec}" "${body}"
-  check_in "${ecosystem}" "${spec}" "${osv_down[@]}"
-  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
-  jq -e '.result == "clean" and .approved == true' <<< "${json}" >/dev/null || no "the report: ${json}"
+  check_in "${ecosystem}" fixture-unpatched@1.0.0
+  [[ "${rc}" == 2 ]] || no "the vulnerable check exits ${rc}: ${json}"
+  check_in "${ecosystem}" fixture-clean@1.0.0
+  passed_clean
+  [[ ! -e "${home}/cache/osv" ]] || no "an answer was kept: $(find "${home}/cache/osv" -type f)"
 }
-cached_advisory() {
-  local ecosystem="$1" spec="$2"
+row "npm: a check keeps no OSV answer" no_answer_kept npm
+row "non-npm: a check keeps no OSV answer" no_answer_kept pypi
+record_kept_by_pair() {
+  local key
   fresh_home
-  plant_osv "${ecosystem}" "${spec}" '{"vulns":[{"id":"CVE-2026-1002"}]}'
-  check_in "${ecosystem}" "${spec}" "${osv_down[@]}"
+  check_in npm fixture-unpatched@1.0.0
   [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
-  jq -e '.result == "cve_unpatched" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  key=$(SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv-vuln CVE-2026-1002 2026-01-01T00:00:00Z ""')
+  jq -e '.id == "CVE-2026-1002" and .modified == "2026-01-01T00:00:00Z"' "${home}/cache/osv-vuln/${key}.json" >/dev/null \
+    || no "the record is not kept under its id and modified: $(ls "${home}/cache/osv-vuln")"
 }
-for ecosystem in npm pypi; do
-  for body in '{}' '{"vulns":[]}' '{"vulns":null}'; do
-    row "${ecosystem}: a cached answer of '${body}' is a hit with OSV down" cache_answers "${ecosystem}" fixture-clean@1.0.0 "${body}"
-  done
-  row "${ecosystem}: a cached advisory is a hit with OSV down" cached_advisory "${ecosystem}" fixture-clean@1.0.0
-done
+row "npm: an advisory's record is kept under its id and modified" record_kept_by_pair
 
-# The answer judged is the one the rule read. A cached advisory replaced after
-# that read still counts: an empty file there once read as no advisories. npm
-# asks about a vulnerable direct package a second time, and that second read
-# meets the replacement by the rule, so its answer is 2 or 4 and approves nothing.
-advisory_stands() {
-  [[ "${rc}" == 2 || "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
-  no_approval
-}
-osv_swapped() {
-  local ecosystem="$1" body="$2" file
-  fresh_home
-  plant_osv "${ecosystem}" fixture-clean@1.0.0 '{"vulns":[{"id":"CVE-2026-1002"}]}'
-  file=$(osv_cache_file "${ecosystem}" fixture-clean@1.0.0)
-  check_in "${ecosystem}" fixture-clean@1.0.0 "${osv_down[@]}" PATH="${swap_bin}:${PATH}" SWAP_AFTER="${file}" SWAP_FILE="${file}" SWAP_BODY="${body}"
-  advisory_stands
-  swap_fired "${file}" "${body}"
-}
-# And an answer just stored is the one the rule read, not what stands there next.
-osv_live_swapped() {
-  local ecosystem="$1" body="$2" file
-  fresh_home
-  mkdir -p "${home}/cache/osv"
-  file=$(osv_cache_file "${ecosystem}" fixture-unpatched@1.0.0)
-  check_in "${ecosystem}" fixture-unpatched@1.0.0 PATH="${swap_bin}:${PATH}" SWAP_AFTER="${file}" SWAP_FILE="${file}" SWAP_BODY="${body}"
-  advisory_stands
-  swap_fired "${file}" "${body}"
-}
-for body in '' 'null' '{}' '{"vulns":[]}'; do
-  for ecosystem in npm pypi; do
-    row "${ecosystem}: a cached advisory replaced by '${body}' after its read still counts" osv_swapped "${ecosystem}" "${body}"
-    row "${ecosystem}: an answer replaced by '${body}' once stored still counts" osv_live_swapped "${ecosystem}" "${body}"
-  done
-done
-
-cache_is_a_directory() {
+# A directory where the old cache file went is nothing the check reads.
+old_name_is_a_directory() {
   local ecosystem="$1" spec="$2"
   fresh_home
   mkdir -p "$(osv_cache_file "${ecosystem}" "${spec}")"
   check_in "${ecosystem}" "${spec}"
-  unavailable
+  passed_clean
 }
-row "npm: a directory where the cache file goes approves nothing" cache_is_a_directory npm fixture-clean@1.0.0
-row "non-npm: a directory where the cache file goes approves nothing" cache_is_a_directory pypi fixture-clean@1.0.0
+row "npm: a directory where the old cache file went changes nothing" old_name_is_a_directory npm fixture-clean@1.0.0
+row "non-npm: a directory where the old cache file went changes nothing" old_name_is_a_directory pypi fixture-clean@1.0.0
+
+# An answer in pages is read to its end, by the token OSV gives each query.
+# A page token that is not one, and an answer that has not ended within the
+# page limit, are no answer.
+paged_advisory_counts() {
+  local ecosystem="$1"
+  fresh_home
+  check_in "${ecosystem}" fixture-paged@1.0.0
+  [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "cve_unpatched" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+  grep -q "pages=2" "${home}/advisory.log" || no "advisory.log does not say two pages were read"
+}
+row "npm: an advisory on the second page of a batch answer counts" paged_advisory_counts npm
+row "non-npm: an advisory on the second page of an answer counts" paged_advisory_counts pypi
+paged_no_answer() {
+  local ecosystem="$1" spec="$2" line="$3"
+  fresh_home
+  check_in "${ecosystem}" "${spec}"
+  unavailable
+  grep -q "${line}" "${home}/advisory.log" || no "advisory.log has no '${line}' line"
+}
+row "npm: a batch page token that is not a string approves nothing" paged_no_answer npm fixture-bad-token@1.0.0 'OSV batch result is not an answer'
+row "non-npm: a page token that is not a string approves nothing" paged_no_answer pypi fixture-bad-token@1.0.0 'OSV live query failed'
+row "npm: a batch answer that has not ended within the page limit approves nothing" paged_no_answer npm fixture-endless@1.0.0 'OSV batch answer did not end within 20 pages'
+row "non-npm: an answer that has not ended within the page limit approves nothing" paged_no_answer pypi fixture-endless@1.0.0 'OSV answer did not end within 20 pages'
+
+# querybatch names an advisory by its id and `modified`; the record says the
+# rest. A KEV listing found only by the record's alias blocks, and a record
+# that cannot be read, or that is another advisory's, is no answer.
+record_alias_on_kev() {
+  fresh_home
+  check_in npm fixture-kev-alias@1.0.0
+  hard_blocked
+}
+row "npm: a KEV listing named only by the record's alias blocks" record_alias_on_kev
+row "npm: an advisory whose record OSV does not have approves nothing" paged_no_answer npm fixture-record-missing@1.0.0 'OSV record read failed id=GHSA-fixt-gone-0000 status=404'
+row "npm: an advisory whose record is another advisory's approves nothing" paged_no_answer npm fixture-record-other@1.0.0 'OSV record read failed id=GHSA-fixt-othr-0000 status=200'
+record_url_not_derived() {
+  fresh_home
+  check_in npm fixture-unpatched@1.0.0 SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL}?mirror=1"
+  unavailable
+  grep -q 'OSV record URL cannot be derived from' "${home}/advisory.log" || no "advisory.log does not say why"
+}
+row "npm: a batch URL with no record URL beside it approves nothing an advisory named" record_url_not_derived
 
 # A query that returned something other than an answer is a failed query, by the
 # rule that reads the cache: what is stored and what is read are one thing.
@@ -727,7 +754,7 @@ row "npm: a patch candidate's unknown status approves nothing" candidate_status 
 row "non-npm: a patch candidate's unknown status is not a vulnerable candidate" candidate_status pypi "${writer_one}" ' 1.0.1 '
 
 direct_query_failed() {
-  check_with npm fixture-vuln@1.0.0 SAFEDEPS_OSV_API_URL="${closed_port}" SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=-1
+  check_with npm fixture-vuln@1.0.0 SAFEDEPS_OSV_API_URL="${closed_port}"
   unavailable
 }
 row "npm: a failed direct advisory query is provider_unavailable, not cve_unpatched" direct_query_failed
@@ -1096,17 +1123,22 @@ function_fails() {
 # The validator's two injections: both left a report of clean, one approval and
 # one `check approve` line.
 row "npm: an OSV batch payload that jq printed and failed on is not sent" fails_as unavailable npm fixture-clean@1.0.0 'queries: ['
-row "npm: an OSV batch item that jq printed and failed on is not read as an answer" fails_as unavailable npm fixture-clean@1.0.0 '.results[$i]'
+row "npm: an OSV batch page that jq merged and failed on is not read as an answer" fails_as unavailable npm fixture-clean@1.0.0 '($r | osv_page_token) as $token'
 row "the OSV batch returns when jq prints the payload and fails" function_fails jq 'queries: [' safedeps_osv_query_batch npm "${one_package}"
-row "the OSV batch returns when jq prints an item and fails" function_fails jq '.results[$i]' safedeps_osv_query_batch npm "${one_package}"
+row "the OSV batch returns when jq merges a page and fails" function_fails jq '($r | osv_page_token) as $token' safedeps_osv_query_batch npm "${one_package}"
+row "the OSV batch returns when jq reads the advisories it named and fails" function_fails jq 'unique_by(.[0])' safedeps_osv_query_batch npm "${one_package}"
 
 # What a provider answered.
 row "non-npm: an OSV query that jq printed and failed on is not sent" fails_as unavailable pypi fixture-clean@1.0.0 '{version: $version, package: {name: $package, ecosystem: $ecosystem}}'
-row "npm: the count of OSV batch misses is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 $'-s length\nmisses.jsonl'
+row "npm: the count of OSV batch queries still asked is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '[.[] | select(.ended | not)] | length'
 row "npm: the count of OSV batch results is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '.results | length'
-row "npm: the cache path of an OSV batch miss is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '-r .cache_path'
+row "npm: the advisories an OSV batch named are read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 'unique_by(.[0])'
+row "npm: an OSV record that jq printed and failed on is no record" fails_as unavailable npm fixture-unpatched@1.0.0 'select(length == 1 and (.[0] | osv_record($id)))'
+row "non-npm: the next page's query that jq printed and failed on is not sent" fails_as unavailable pypi fixture-clean@1.0.0 'if $t == null then empty else $query + {page_token: $t} end'
+row "non-npm: the pages of an OSV answer that jq joined and failed on are no answer" fails_as unavailable pypi fixture-clean@1.0.0 'map(.vulns // []) | add // []'
 row "npm: a curl that printed 200 and failed is not an OSV batch answer" fails_as unavailable npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/querybatch
 row "non-npm: a curl that printed 200 and failed is not an OSV answer" fails_as unavailable pypi fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/query
+row "npm: a curl that printed 200 and failed is not an OSV record" fails_as unavailable npm fixture-unpatched@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/vulns/
 # The one read of a catalog is its copy, and the copy answers by its exit status.
 kev_copy_failed() {
   fresh_home
@@ -1134,8 +1166,7 @@ row "a curl that printed 200 and failed is a skipped GHSA cross-check, and only 
 cache_file="${tmp_root}/fresh-cache-file"
 : > "${cache_file}"
 row "a cache file's age is read from a clock that answered" function_fails date '+%s' safedeps_cache_is_fresh "${cache_file}"
-row "an OSV cache key that shasum printed and failed on is no cache path" function_fails "${hash_tool}" "${hash_match}" safedeps_osv_query_batch npm "${one_package}"
-row "an OSV single-query cache key that shasum printed and failed on is no cache path" function_fails "${hash_tool}" "${hash_match}" safedeps_osv_query pypi fixture-clean 1.0.0
+row "an OSV record cache key that shasum printed and failed on is no record" function_fails "${hash_tool}" "${hash_match}" safedeps_osv_vuln_detail CVE-2026-1002 2026-01-01T00:00:00Z
 
 # What the ledger reads and writes.
 row "the ledger hash returns when shasum prints and fails" function_fails "${hash_tool}" "${hash_match}" safedeps_ledger_hash npm fixture-clean 1.0.0

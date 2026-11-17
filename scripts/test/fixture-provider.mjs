@@ -31,12 +31,17 @@ function state() {
   return JSON.parse(fs.readFileSync(stateFile, 'utf8'));
 }
 
-function osvVuln(id, fixed) {
+// Every record the fixture has, by id. OSV changes a record's `modified` when
+// it changes the record; these never change.
+const MODIFIED = '2026-01-01T00:00:00Z';
+const RECORDS = new Map();
+function osvVuln(id, fixed, aliases = [id]) {
   const events = [{ introduced: '0' }];
   if (fixed) events.push({ fixed });
-  return {
+  const record = {
     id,
-    aliases: [id],
+    modified: MODIFIED,
+    aliases,
     affected: [
       {
         package: { ecosystem: 'npm', name: 'fixture' },
@@ -44,11 +49,53 @@ function osvVuln(id, fixed) {
       }
     ]
   };
+  RECORDS.set(id, record);
+  return record;
 }
+// Every record an answer below names is there from the start, so a record can
+// be read before any query has named it.
+for (const [id, fixed] of [['CVE-2026-9999', null], ['CVE-2026-1000', null], ['CVE-2026-1001', '1.0.1'],
+  ['CVE-2026-1002', null], ['CVE-2026-1003', '1.0.1'], ['CVE-2026-1004', '1.0.5']]) {
+  osvVuln(id, fixed);
+}
+// A record whose alias is on the KEV catalog while its id is not: only the
+// record says it is listed.
+const kevAlias = osvVuln('GHSA-fixt-kev0-alas', null, ['CVE-2026-9999']);
+// Named by querybatch, with no record behind it, or with another record.
+const recordMissing = { id: 'GHSA-fixt-gone-0000', modified: MODIFIED };
+const recordOther = { id: 'GHSA-fixt-othr-0000', modified: MODIFIED };
 
-function osvResponse(packageName, version) {
+// The answer to one query. A package named for it below, or listed under the
+// state key of the same name, answers in pages as OSV does (`paged`: a first
+// page with next_page_token and the rest asked again with that token), with a
+// token that is not one (`bad_token`), with no end (`endless`), or names an
+// advisory whose record carries the KEV-listed CVE (`kev_alias`) or that has
+// no record (`record_missing`).
+function osvResponse(packageName, version, pageToken) {
   const key = `${packageName}@${version}`;
   const current = state();
+  const listed = (name) => Array.isArray(current[name]) && current[name].includes(key);
+  if (packageName === 'fixture-bad-token' || listed('bad_token')) {
+    return { vulns: [], next_page_token: 7 };
+  }
+  if (packageName === 'fixture-endless' || listed('endless')) {
+    return { vulns: [], next_page_token: 'again' };
+  }
+  if (packageName === 'fixture-kev-alias' || listed('kev_alias')) {
+    return { vulns: [kevAlias] };
+  }
+  if (packageName === 'fixture-record-missing' || listed('record_missing')) {
+    return { vulns: [recordMissing] };
+  }
+  if (packageName === 'fixture-record-other') {
+    return { vulns: [recordOther] };
+  }
+  if ((packageName === 'fixture-paged' || listed('paged')) && pageToken !== 'page-2') {
+    return { vulns: [], next_page_token: 'page-2' };
+  }
+  if (packageName === 'fixture-paged') {
+    return { vulns: [osvVuln('CVE-2026-1002', null)] };
+  }
   if (current.kev?.includes(key)) {
     return { vulns: [osvVuln('CVE-2026-9999', null)] };
   }
@@ -79,22 +126,51 @@ function osvResponse(packageName, version) {
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === 'POST' && req.url === '/osv/v1/query') {
+  // A query string moves no route: a mirror's URL may carry one.
+  const path = req.url.split('?')[0];
+  if (req.method === 'POST' && path === '/osv/v1/query') {
     const body = await readJson(req);
     const packageName = body.package?.name || '';
     const version = body.version || '';
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify(osvResponse(packageName, version)));
+    res.end(JSON.stringify(osvResponse(packageName, version, body.page_token)));
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/osv/v1/querybatch') {
+  if (req.method === 'POST' && path === '/osv/v1/querybatch') {
     const body = await readJson(req);
     const queries = Array.isArray(body.queries) ? body.queries : [];
+    // A batch is held before it answers: a first page by hold_first_ms, a
+    // page asked with a token by hold_next_ms.
+    const held = state()[queries.some((query) => query.page_token) ? 'hold_next_ms' : 'hold_first_ms'];
+    if (Number(held) > 0) await new Promise((resolve) => setTimeout(resolve, Number(held)));
     res.setHeader('content-type', 'application/json');
+    // querybatch names an advisory by its id and `modified` only; the
+    // record is read from /v1/vulns/<id>.
     res.end(JSON.stringify({
-      results: queries.map((query) => osvResponse(query.package?.name || '', query.version || ''))
+      results: queries.map((query) => {
+        const answer = osvResponse(query.package?.name || '', query.version || '', query.page_token);
+        if (!Array.isArray(answer.vulns)) return answer;
+        return { ...answer, vulns: answer.vulns.map((vuln) => ({ id: vuln.id, modified: vuln.modified })) };
+      })
     }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/osv/v1/vulns/')) {
+    const id = decodeURIComponent(req.url.slice('/osv/v1/vulns/'.length));
+    res.setHeader('content-type', 'application/json');
+    if (id === recordOther.id) {
+      res.end(JSON.stringify(RECORDS.get('CVE-2026-1002') || osvVuln('CVE-2026-1002', null)));
+      return;
+    }
+    const record = RECORDS.get(id);
+    if (!record) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ code: 5, message: 'Bug not found.' }));
+      return;
+    }
+    res.end(JSON.stringify(record));
     return;
   }
 

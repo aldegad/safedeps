@@ -1,7 +1,7 @@
 //! One closure over npm's two records, one ledger index, and one OSV batch.
 use super::{closure, jv, providers::{Providers, Status, Unanswered}, report::cat, sh, snapshot::Store, trace};
 use crate::{json::Value, ledger, os, state};
-use std::io::Write;
+use std::{io::Write, time::Instant};
 
 /// What an install kept under `SAFEDEPS_ACCEPT_RISK` accepted: the problems
 /// as the gate states them, and each package with the reason it was named.
@@ -12,7 +12,10 @@ use std::io::Write;
 #[derive(Default)]
 pub struct Accepted { pub problems: Vec<Vec<u8>>, pub packages: Vec<Value> }
 
-pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mut Accepted>) {
+/// `until` is the deadline of the whole post run (post::LIMIT): every request
+/// the OSV answer and the KEV catalog wait on ends by it, and one it cut is an
+/// unanswered provider, a rollback no override keeps.
+pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mut Accepted>, until: Instant) {
     let lockfiles: Vec<_> = trace::RECORDS.iter().filter(|rel| sh::is_file(&store.project.join(rel))).collect();
     if lockfiles.is_empty() { return }
     if sh::is_dir(&store.project.join("node_modules")) && !sh::is_file(&store.project.join(trace::RECORDS[1])) {
@@ -77,7 +80,7 @@ pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mu
             None => reasons.push(problem),
         }
     }
-    let results = match Providers::new(&store.home).batch(&all) {
+    let results = match Providers::new(&store.home, until).batch(&all) {
         Ok(results) => results,
         Err(Unanswered::Osv) => { reasons.push(b"npm closure OSV batch verification failed; fail-closed".to_vec()); return }
         Err(Unanswered::Kev) => { reasons.push(b"npm closure KEV catalog could not be read; fail-closed".to_vec()); return }

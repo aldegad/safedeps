@@ -51,7 +51,7 @@ fn rollback(call: &mut Call, journal: &Journal, trace: &mut Install, report: &mu
     Ok(message)
 }
 
-fn backstop(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W>, i32> {
+fn backstop(call: &mut Call, journal: &Journal, input: &[u8], until: Instant) -> Result<Option<W>, i32> {
     if !trace::RECORDS.iter().any(|rel| sh::is_file(&call.store.project.join(rel))) {
         state::log_advisory(&call.store.home, &cat(&[b"post-verify UNVERIFIED: ", call.record.subject(), b" and no package-lock.json or node_modules/.package-lock.json in ", sh::bytes(&call.store.project), " — nothing to closure-check.".as_bytes()]));
         trace::drop_baseline(&call.store.home, &call.entry);
@@ -59,7 +59,7 @@ fn backstop(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W
     }
     if !call.backstop_trace() { return Ok(None) }
     let mut reasons = Vec::new();
-    effect::check(&call.store, &mut reasons, None);
+    effect::check(&call.store, &mut reasons, None, until);
     if reasons.is_empty() {
         state::log_advisory(&call.store.home, &cat(&[b"post-verify BACKSTOP clean: ", call.record.subject(), b"; the npm closure in ", sh::bytes(&call.store.project), b" passed the command-independent npm closure check."]));
         return Ok(None)
@@ -149,7 +149,11 @@ fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<
 }
 
 fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant) -> Result<Option<W>, i32> {
-    if call.record != Record::Install { return backstop(call, journal, input) }
+    // One deadline for the run, fixed at its start: the provider requests and
+    // the native inspection end by it, so what is left is the room the answer
+    // takes, a rollback included, before the runtime ends the hook.
+    let until = post_started + super::LIMIT;
+    if call.record != Record::Install { return backstop(call, journal, input, until) }
     let mut trace = Install::settle(&call.store.project, &call.store.home, &call.current, &call.command);
     if runner_left_npm_untouched(call, &trace) { call.store.remove(); return Ok(None) }
     call.store.stage();
@@ -160,7 +164,7 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
     let accept = accept_risk(call);
     let mut accepted = effect::Accepted::default();
     npm.collect(&call.store, &mut reasons);
-    effect::check(&call.store, &mut reasons, accept.as_ref().map(|_| &mut accepted));
+    effect::check(&call.store, &mut reasons, accept.as_ref().map(|_| &mut accepted), until);
     heuristics::scripts(&call.store, &npm.nodes, &mut reasons)?;
     heuristics::lockfile(&call.store, &mut reasons);
     npm.record(&call.store, &call.current, &trace, &mut report);
