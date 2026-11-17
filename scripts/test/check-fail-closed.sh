@@ -854,11 +854,30 @@ recheck_unknown_status() {
   [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
   rc=0
   json=$(env PATH="${stub_bin}:${PATH}" STUB_MATCH="${writer_one}" STUB_STATUS=weird SAFEDEPS_HOME="${home}" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
-  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
-  jq -e '.checked == 1 and .still_clean == 0 and .revoked == []' <<< "${json}" >/dev/null || no "the report: ${json}"
-  grep -q 're-check skipped' "${home}/advisory.log" || no "advisory.log has no skipped line"
+  recheck_unanswered
 }
-row "re-check does not count an unknown status as clean, and records the skip" recheck_unknown_status
+# What re-check says of an entry no provider answered: neither still clean nor
+# revoked, an error of the run (exit 1), and the entry stays.
+recheck_unanswered() {
+  [[ "${rc}" == 1 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 0 and .revoked == []
+    and (.errors | map(.kind) == ["provider_unavailable"])
+    and (.errors[0] | .ecosystem == "pypi" and .package == "fixture-clean" and .version == "1.0.0")' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  grep -q 're-check unanswered ecosystem=pypi package=fixture-clean version=1.0.0' "${home}/advisory.log" || no "advisory.log has no unanswered line"
+  [[ -n "$(find "${home}/approved-specs" -name '*.json' -type f)" ]] || no "the entry was removed"
+  jq -e '(.revoked_at // "") == ""' "$(find "${home}/approved-specs" -name '*.json' -type f | head -1)" >/dev/null || no "the entry was revoked"
+}
+row "re-check does not count an unknown status as clean, and reports it as an error" recheck_unknown_status
+recheck_provider_down() {
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  rc=0
+  json=$(env "${osv_down[@]}" SAFEDEPS_HOME="${home}" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
+  recheck_unanswered
+}
+row "re-check with OSV down is an error of the run, not a skip" recheck_provider_down
 
 plant_entry() {
   local filter="$1" file

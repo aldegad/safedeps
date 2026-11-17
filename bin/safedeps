@@ -1229,11 +1229,17 @@ sf_recheck_provenance_index() {
 # providers again, a vulnerable or KEV-listed one revoked. Prints the report
 # (`recheck_report`) and returns 0, or 1 when the report carries errors[].
 #
-# One entry that cannot be read or revoked is a row of errors[], and the run
-# goes on to the next: a revoke that failed, a file that is not one ledger
-# entry, a field that is not a string. The report is printed whatever errors
-# it holds, and only then does the stage say it failed. Before, one such entry
-# ended the run under errexit with no report at all.
+# One entry that cannot be read, answered or revoked is a row of errors[], and
+# the run goes on to the next: a revoke that failed, a file that is not one
+# ledger entry, a field that is not a string, a spec the providers gave no
+# answer for. The report is printed whatever errors it holds, and only then
+# does the stage say it failed. Before, one such entry ended the run under
+# errexit with no report at all.
+#
+# A spec with no answer is neither still clean nor revoked, and errors[] is the
+# one place that says so: `provider_unavailable`, one row per entry, beside a
+# `re-check unanswered` line in advisory.log. It used to be skipped with a
+# warning only, and an answer kept from an earlier run made it still clean.
 #
 # A spec several contexts approved is asked once, and the answer applies to
 # each of its entries; the counts stay per entry.
@@ -1328,11 +1334,10 @@ sf_recheck_stage() {
   while IFS= read -r -d '' eco && IFS= read -r -d '' pkg && IFS= read -r -d '' ver && IFS= read -r -d '' members; do
     count=$(jq 'length' <<< "${members}")
     sf_info "re-checking ${eco} ${pkg}@${ver} (${count} entr$([[ "${count}" -eq 1 ]] && printf 'y' || printf 'ies'))"
-    if ! pj=$(safedeps_providers_query "${eco}" "${pkg}" "${ver}" 2>/dev/null); then
-      sf_warn "  no provider response — skipped"
-      continue
+    s=""
+    if pj=$(safedeps_providers_query "${eco}" "${pkg}" "${ver}" 2>/dev/null); then
+      s=$(sf_provider_status "${pj}")
     fi
-    s=$(sf_provider_status "${pj}")
     case "${s}" in
       "${SAFEDEPS_STATUS_CLEAN}")
         still_clean=$(( still_clean + count ))
@@ -1361,8 +1366,12 @@ sf_recheck_stage() {
         done < <(jq -r '.[] | .[0] + "\u001f" + .[1]' <<< "${members}")
         ;;
       *)
-        sf_warn "  no readable provider status — skipped"
-        sf_advisory_log "re-check skipped ecosystem=${eco} package=${pkg} version=${ver}"
+        sf_err "  no provider answer — neither still clean nor revoked"
+        sf_advisory_log "re-check unanswered ecosystem=${eco} package=${pkg} version=${ver} entries=${count}"
+        while IFS=$'\x1f' read -r ctx_hash file; do
+          errors_arr=$(jq -c --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" --arg file "${file}" \
+            '. + [{kind:"provider_unavailable", ecosystem:$ecosystem, package:$package, version:$version, file:$file}]' <<< "${errors_arr}")
+        done < <(jq -r '.[] | .[0] + "\u001f" + .[1]' <<< "${members}")
         ;;
     esac
   done < "${groups}"
@@ -1427,7 +1436,7 @@ cmd_recheck() {
   [[ "${nv}" -gt 0 ]] && sf_warn "revoked ${nv} for new CVE match"
   [[ "${kv}" -gt 0 ]] && sf_err  "revoked ${kv} for KEV match"
   [[ "${fg}" -gt 0 ]] && sf_warn "flagged ${fg} ledger entries with no approval provenance"
-  [[ "${er}" -gt 0 ]] && sf_err "${er} ledger entries could not be read or revoked (see --json errors)"
+  [[ "${er}" -gt 0 ]] && sf_err "${er} ledger entries could not be read, answered or revoked (see --json errors)"
   return "${rc}"
 }
 
@@ -1537,8 +1546,10 @@ safedeps re-check [--json]
 
   Re-query providers for every active approved spec, each spec once.
   Auto-revoke entries that newly match a CVE or KEV.
-  An entry that cannot be read or revoked is a row of `errors`, and the run
-  goes on: the report is printed, then the command exits 1.
+  An entry that cannot be read, answered or revoked is a row of `errors`,
+  and the run goes on: the report is printed, then the command exits 1. An
+  entry the providers gave no answer for (`provider_unavailable`) is neither
+  still clean nor revoked. Every answer is asked of the providers by this run.
   It holds the watch lock (~/.safedeps/watch/lock); a second run exits 75.
 EOF
       ;;
