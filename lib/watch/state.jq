@@ -32,14 +32,21 @@ def ev_claimed: "claimed";
 def ev_dispatched: "dispatched";
 def ev_unknown: "unknown";
 
-# Remediation states a consumer records on a finding.
-def remediation_states: ["dispatched", "blocked", "fix_failed", "awaiting_deploy", "fixed_pending_rescan"];
+# Remediation states a consumer records on a finding. report_acknowledged is
+# the owner's judgment of a finding that only reports (see set_remediation); it
+# records a decision, not a repair.
+def remediation_states: ["dispatched", "blocked", "fix_failed", "awaiting_deploy", "fixed_pending_rescan", "report_acknowledged"];
+# A worker is on it: the finding does not wait for the owner.
+def remediation_in_progress: ["dispatched", "awaiting_deploy", "fixed_pending_rescan"];
+# Finding states that report and that nobody can fix by a repair here: no fixed
+# version, or a runtime whose next step is an install decision.
+def report_only_states: [st_no_fix, rt_update_available, rt_pre_announced];
 
 def is_closed: .state == st_closed;
 
 def empty_state:
   {schema: watch_schema, generation: 0, scan_generation: 0, last_scan: null,
-   last_success_at: null, population: null, roots: {}, findings: {}, unmeasured: [],
+   last_full_scan: null, last_success_at: null, population: null, roots: {}, findings: {}, unmeasured: [],
    runtime: null, ledger: null, diff: {new: [], closed: [], changed: []}, errors: [],
    events: [], error_streaks: {}, summary: null};
 
@@ -53,6 +60,18 @@ def is_watch_state:
 def scope_of: (.root + "|" + .scope);
 
 def day_of($ts): ($ts // "" | .[0:10]);
+
+# What a finding reports, without when it was seen: the facts an owner's
+# report_acknowledged judgment is made on. Each is a field the producer already
+# writes (lib/watch/lockfiles.sh, lib/watch/scan.sh): the state, the fixed
+# versions as a set, the advisory and its record ids, its URL and date, the
+# reason, the vendor's latest and the KEV answer. first_seen, last_seen and
+# the other times a scan stamps are not in it, so a scan that only saw the
+# finding again leaves it as it was.
+def report_fact:
+  {state, fixed: ((.fixed // []) | unique), advisory: (.advisory // null), ids: ((.ids // []) | unique),
+   advisory_url: (.advisory_url // null), advisory_date: (.advisory_date // null),
+   reason: (.reason // null), latest: (.latest // null), kev: (.kev // null)};
 
 # ---- scan merge --------------------------------------------------------------
 # $prior: the last complete document (or empty_state). $m: what this run
@@ -161,6 +180,9 @@ def merge_scan($prior; $m):
   + {schema: watch_schema,
      scan_generation: (($prior.scan_generation // 0) + 1),
      last_scan: $m.scan,
+     # The last full scan, which a root scan does not replace: its times, its
+     # errors and the runtime that ran it. Null until the first full scan.
+     last_full_scan: (if $kind == "full" then ($m.scan + {errors: $m.errors}) else ($prior.last_full_scan // null) end),
      last_success_at: (if ($m.errors | length) == 0 and $kind == "full" then $now else ($prior.last_success_at // null) end),
      population: (if $kind == "full" then ($m.population | del(.roots) + {count: ($m.population.roots | length), excluded: $m.excluded_count, roots: $m.population.roots}) else $prior.population end),
      roots: $roots,
@@ -228,8 +250,40 @@ def ack_event($id; $consumer; $outcome; $task; $now):
   else .events |= map(if .id == $id then . + {status: $outcome, task: $task, acked_at: $now} else . end)
   end;
 
+# report_acknowledged is taken only for a live finding that only reports, and
+# only with the owner's judgment in words. It keeps the report it was made on
+# (seen), so a scan that changes the report puts the finding back in
+# awaiting_owner. The check and the snapshot are one reading of the document
+# the caller holds under the lock.
 def set_remediation($key; $state; $detail; $task; $now):
-  if .findings[$key] == null then error("no such finding: " + $key)
-  elif (remediation_states | index($state)) == null then error("not a remediation state: " + $state)
-  else .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now}
-  end;
+  .findings[$key] as $f
+  | if $f == null then error("no such finding: " + $key)
+    elif (remediation_states | index($state)) == null then error("not a remediation state: " + $state)
+    elif $state != "report_acknowledged" then .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now}
+    elif ($f | is_closed) then error("report_acknowledged needs a live finding; this one is closed: " + $key)
+    elif (report_only_states | index($f.state)) == null then
+      error("report_acknowledged is for a finding that only reports (" + (report_only_states | join(", ")) + "), not " + ($f.state | tostring) + ": " + $key)
+    elif (($detail // "") | test("\\S") | not) then error("report_acknowledged needs --detail: the owner's judgment, in words")
+    else .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now, seen: ($f | report_fact)}
+    end;
+
+# The live findings that wait for the owner's judgment, with why: unassigned
+# (no remediation), blocked or fix_failed (work that stopped),
+# acknowledged_other_state (a report_acknowledged made on another report), or
+# unrecognized_remediation (a value this definition does not know). A finding a
+# worker is on and a report_acknowledged that still holds do not wait.
+def awaiting_owner:
+  [.findings | to_entries[]
+   | .value as $f
+   | select($f | is_closed | not)
+   | ($f.remediation.state? // null) as $r
+   | (if $r == null then "unassigned"
+      elif $r == "blocked" or $r == "fix_failed" then $r
+      elif $r == "report_acknowledged" then
+        (if $f.remediation.seen == ($f | report_fact) then null else "acknowledged_other_state" end)
+      elif (remediation_in_progress | index($r)) != null then null
+      else "unrecognized_remediation" end) as $why
+   | select($why != null)
+   | {key, state: $f.state, root: $f.root, ecosystem: $f.ecosystem, package: $f.package, version: $f.version,
+      fixed: $f.fixed, remediation: $f.remediation, why: $why}]
+  | sort_by(.key);

@@ -113,12 +113,18 @@ watch_main() {
     status)
       local doc
       doc=$(safedeps_watch_read_state) || { jq -nc '{command:"watch status", error:"state_unreadable"}'; return 3; }
-      jq -c --arg now "${now}" --arg runs "$(safedeps_watch_dir)/runs" --arg last_receipt "$(ls -1 "$(safedeps_watch_dir)/runs" 2>/dev/null | grep '\.json$' | LC_ALL=C sort | tail -1)" '
+      # One reading of one generation. last_full_scan and awaiting_owner are
+      # state.jq's definitions; a reader takes them by name.
+      safedeps_watch_jq -c --arg now "${now}" --arg runs "$(safedeps_watch_dir)/runs" --arg last_receipt "$(ls -1 "$(safedeps_watch_dir)/runs" 2>/dev/null | grep '\.json$' | LC_ALL=C sort | tail -1)" 'include "state";
+        def hours_since($ts): if $ts == null then null else ((($now | fromdateiso8601) - ($ts | fromdateiso8601)) / 3600 | floor) end;
         {command: "watch status", generation, scan_generation, last_scan, last_success_at,
-         age_hours: (if .last_scan == null then null else ((($now | fromdateiso8601) - (.last_scan.finished_at | fromdateiso8601)) / 3600 | floor) end),
-         success_age_hours: (if .last_success_at == null then null else ((($now | fromdateiso8601) - (.last_success_at | fromdateiso8601)) / 3600 | floor) end),
+         age_hours: hours_since(.last_scan.finished_at),
+         success_age_hours: hours_since(.last_success_at),
+         last_full_scan: (.last_full_scan // null),
+         full_age_hours: hours_since(.last_full_scan.finished_at),
          population: (.population | if . == null then null else {state, count, excluded, generated_at, reason} end),
-         summary, errors, last_receipt: (if $last_receipt == "" then null else ($runs + "/" + $last_receipt) end)}' <<< "${doc}"
+         summary, errors, awaiting_owner: awaiting_owner,
+         last_receipt: (if $last_receipt == "" then null else ($runs + "/" + $last_receipt) end)}' <<< "${doc}"
       ;;
     claim)
       [[ -n "${consumer}" && "${limit}" =~ ^[0-9]+$ ]] || { watch_say "usage: safedeps watch claim --consumer ID [--limit N]"; return 4; }

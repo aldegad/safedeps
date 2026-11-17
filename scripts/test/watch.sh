@@ -685,6 +685,136 @@ row_consumers() {
 }
 row "two consumers: a claimed event is held by its consumer until it acks it, unknown is kept and never retried, a dispatched event is acked once; remediation states are a closed set" row_consumers
 
+# ---- what waits for the owner, and the last full scan --------------------------------------
+# aw KEY: the why of KEY in the last `watch status` (out), as a JSON array.
+aw() { jq -c --arg k "$1" '[.awaiting_owner[] | select(.key == $k) | .why]' <<< "${out}"; }
+ack_all_unknown() { # CONSUMER: claim every pending event and ack each --unknown
+  local e
+  sd watch claim --consumer "$1" --limit 50
+  [[ "${rc}" == 0 ]] || no "claim exited ${rc}"
+  for e in $(jq -r '.claimed[].id' <<< "${out}"); do
+    sd watch ack --event "${e}" --consumer "$1" --unknown
+    [[ "${rc}" == 0 ]] || no "ack --unknown exited ${rc}"
+  done
+}
+
+row_report_only_npm() {
+  new_world; register a
+  npm_lock "${d}/p/a" lone@1.0.0 left@1.0.0
+  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lone-lone-lone '' lone '')] | .osv[\"left@1.0.0\"] = [$(osv_record GHSA-left-left-left '' left 1.0.1)]"
+  scan_ok
+  local lone left g events
+  lone=$(npm_findings | jq -r '.[] | select(.package == "lone") | .key')
+  left=$(npm_findings | jq -r '.[] | select(.package == "left") | .key')
+  # The day's send failed: every event was acked unknown. Both findings still wait.
+  ack_all_unknown routine
+  scan_ok
+  sd watch status
+  [[ "$(aw "${lone}")" == '["unassigned"]' && "$(aw "${left}")" == '["unassigned"]' ]] || no "after unknown acks: lone $(aw "${lone}"), left $(aw "${left}")"
+  # A finding that can be fixed, and a judgment without words, are refused.
+  g=$(gen)
+  sd watch remediation --finding "${left}" --state report_acknowledged --detail "seen"
+  [[ "${rc}" != 0 && "$(gen)" == "${g}" ]] || no "report_acknowledged on an open finding: rc ${rc}, generation $(gen)"
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "   "
+  [[ "${rc}" != 0 && "$(gen)" == "${g}" ]] || no "report_acknowledged with a blank detail: rc ${rc}, generation $(gen)"
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "upstream fix awaited"
+  [[ "${rc}" == 0 ]] || no "report_acknowledged exited ${rc}: $(head -c 300 "${d}/stderr")"
+  events=$(jq -c '[.events[] | {id, status}]' "${home}/watch/state.json")
+  scan_ok
+  sd watch status
+  [[ "$(aw "${lone}")" == '[]' && "$(aw "${left}")" == '["unassigned"]' ]] || no "after the judgment and a scan: lone $(aw "${lone}"), left $(aw "${left}")"
+  [[ "$(jq -c '[.events[] | {id, status}]' "${home}/watch/state.json")" == "${events}" ]] || no "the events moved: $(jq -c '[.events[] | {id, status}]' "${home}/watch/state.json")"
+  # A fixed version is published: the judgment was made on another report.
+  # OSV moves `modified` when it changes a record.
+  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lone-lone-lone '' lone 1.0.2)] | .osv[\"lone@1.0.0\"][0].modified = \"2026-11-10T00:00:00Z\""
+  scan_ok
+  sd watch status
+  [[ "$(aw "${lone}")" == '["acknowledged_other_state"]' ]] || no "no_fix -> open: lone $(aw "${lone}")"
+  st --arg k "${lone}" '[.events[] | select(.finding == $k and .from == "no_fix_available" and .to == "open" and .status == "pending")] | length == 1' "one no_fix -> open event" '.events'
+}
+row "awaiting_owner: a no-fix finding acked --unknown still waits; report_acknowledged takes it out, is refused on an open finding or a blank detail, and holds until a fix is published" row_report_only_npm
+
+row_report_only_runtime() {
+  new_world; register older pre
+  printf 'java=21.0.10-tem\n' > "${d}/p/older/.sdkmanrc"
+  printf 'temurin-17.0.18\n' > "${d}/p/pre/.java-version"
+  release() { jq -nc --arg n "$1" --argjson maj "$2" --argjson sec "$3" '{release_name: $n, timestamp: "2026-10-22T00:00:00Z", release_link: "https://example.invalid/r", version_data: {major: $maj, minor: 0, security: $sec, build: 7, openjdk_version: "\($maj).0.\($sec)+7-LTS"}}'; }
+  fx ".adoptium = {\"21\": $(release jdk-21.0.14+7 21 14), \"17\": $(release jdk-17.0.18+7 17 18)}
+      | .openjdk = [{date: \"2026-10-20\", affected: \"21.0.13, 17.0.18\"}]"
+  scan_ok
+  local older pre k pending
+  older=$(jq -r --arg r "${d}/p/older" '.findings[] | select(.root == $r and .ecosystem == "runtime") | .key' "${home}/watch/state.json")
+  pre=$(jq -r --arg r "${d}/p/pre" '.findings[] | select(.root == $r and .ecosystem == "runtime") | .key' "${home}/watch/state.json")
+  st --arg o "${older}" --arg p "${pre}" '.findings[$o].state == "update_available" and .findings[$p].state == "pre_announced" and .findings[$p].fixed == []' "the two runtime findings" '.findings'
+  ack_all_unknown routine
+  scan_ok
+  sd watch status
+  [[ "$(aw "${older}")" == '["unassigned"]' && "$(aw "${pre}")" == '["unassigned"]' ]] || no "after unknown acks: older $(aw "${older}"), pre $(aw "${pre}")"
+  for k in "${older}" "${pre}"; do
+    sd watch remediation --finding "${k}" --state report_acknowledged --detail "the owner installs the update on 2026-11-25"
+    [[ "${rc}" == 0 ]] || no "report_acknowledged exited ${rc}: $(head -c 300 "${d}/stderr")"
+  done
+  # A newer advisory names 17.0.18 again: pre stays pre_announced with fixed []
+  # and a new date, so it waits again. Older's report did not move: it does not.
+  fx '.openjdk += [{date: "2026-11-10", affected: "17.0.18"}]'
+  scan_ok
+  sd watch status
+  [[ "$(aw "${pre}")" == '["acknowledged_other_state"]' && "$(aw "${older}")" == '[]' ]] || no "a new advisory: pre $(aw "${pre}"), older $(aw "${older}")"
+  # The vendor ships 21.0.15: older's fixed moves and its state does not. It
+  # waits again, and no event is raised.
+  pending=$(jq --arg k "${older}" '[.events[] | select(.finding == $k and .status == "pending")] | length' "${home}/watch/state.json")
+  fx ".adoptium[\"21\"] = $(release jdk-21.0.15+7 21 15)"
+  scan_ok
+  sd watch status
+  [[ "$(aw "${older}")" == '["acknowledged_other_state"]' ]] || no "a newer build: older $(aw "${older}")"
+  st --arg k "${older}" --arg n "${pending}" '.findings[$k].state == "update_available" and ([.events[] | select(.finding == $k and .status == "pending")] | length) == ($n | tonumber)' "no event for a moved fixed" '.findings'
+}
+row "awaiting_owner on runtimes: report_acknowledged holds while the report holds; a new advisory date on pre_announced and a newer build on update_available put each back, without an event" row_report_only_runtime
+
+row_report_ack_lock() {
+  new_world; register a
+  npm_lock "${d}/p/a" lone@1.0.0
+  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lock-lock-lock '' lone '')]"
+  scan_ok
+  local lone first g
+  lone=$(npm_findings | jq -r '.[0].key')
+  bg_scan first after_lock
+  first=${bg_pid}
+  wait_for "${d}/first.pause"
+  g=$(gen)
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "seen"
+  [[ "${rc}" == 75 && "$(gen)" == "${g}" ]] || no "report_acknowledged during a scan: rc ${rc}, generation $(gen)"
+  rm -f "${d}/first.pause"
+  wait "${first}" || no "the paused scan exited $?: $(head -c 300 "${d}/first.err")"
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "seen"
+  [[ "${rc}" == 0 ]] || no "the retry exited ${rc}"
+  scan_ok
+  sd watch status
+  [[ "$(aw "${lone}")" == '[]' ]] || no "the next scan dropped the judgment: $(aw "${lone}")"
+}
+row "report_acknowledged while a scan holds the lock exits 75 and changes nothing; the retry is kept by the next scan" row_report_ack_lock
+
+row_last_full_scan() {
+  new_world; register a
+  npm_lock "${d}/p/a" right@2.0.0
+  scan_ok
+  st '.last_full_scan == (.last_scan + {errors: .errors})' "the first full scan"
+  touch "${d}/pop.fail"
+  scan
+  [[ "${rc}" == 1 ]] || no "a full scan on a stale population exited ${rc}"
+  local full
+  full=$(jq -c '.last_scan | {run_id, finished_at}' "${home}/watch/state.json")
+  rm -f "${d}/pop.fail"
+  scan_ok --root "${d}/p/a"
+  sd watch status
+  jq -e --argjson f "${full}" '.last_scan.kind == "root" and (.errors | length) == 0
+      and .last_full_scan.kind == "full" and .last_full_scan.run_id == $f.run_id and .last_full_scan.finished_at == $f.finished_at
+      and ([.last_full_scan.errors[] | select(.kind == "population_stale")] | length) == 1
+      and (.full_age_hours | type) == "number" and (.last_full_scan.runtime | type) == "object"' <<< "${out}" > /dev/null \
+    || no "status after a root scan: $(jq -c '{last_scan: .last_scan.kind, errors, last_full_scan, full_age_hours}' <<< "${out}")"
+}
+row "last_full_scan: a root scan after a full scan with errors keeps the full scan's run, time and errors; last_scan is the root scan" row_last_full_scan
+
 if (( failures > 0 )); then
   printf '# %d row(s) did not pass\n' "${failures}" >&2
   exit 1
