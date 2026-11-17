@@ -10,7 +10,7 @@
 
 > Safedeps 는 install 순간에 여러 라이브 truth 를 동시에 조회해 결정하지 않는다. provider evidence 로 안전한 dependency closure 를 *먼저* 승인하고, 그다음 post-install hook 이 실제 lockfile closure 를 권위로 삼는다. 미승인이거나 새로 취약해진 effect 는 reorg 가 롤백한다.
 
-승인은 install **전**에 canonical advisory evidence 로, enforcement 는 install **후**에 디스크에 실제로 깔린 것으로 한다. npm 은 전체 closure(direct + transitive)를 OSV `/v1/querybatch` 로 검사하며 `pkg@version` 당 24시간 캐시를 둔다. 다른 ecosystem 의 closure 해석은 후속 작업이다.
+승인은 install **전**에 canonical advisory evidence 로, enforcement 는 install **후**에 디스크에 실제로 깔린 것으로 한다. npm 은 전체 closure(direct + transitive)를 OSV `/v1/querybatch` 로 검사한다. OSV 에는 check 마다, effect gate 실행마다 질의하며, 이전 실행의 OSV 응답은 읽지도 쓰지도 않는다. 다른 ecosystem 의 closure 해석은 후속 작업이다.
 
 ---
 
@@ -721,24 +721,60 @@ rebuild 검사가 읽는 lockfile 필드가 각각 무엇을 보증하고 무엇
 
 ```
 OSV.dev — 응답 무 / timeout
-  • 1차: 로컬 provider cache (24h TTL) 사용
-  • cache miss → fail-closed (block; "OSV 응답 없음, 재시도")
-  • install-time CLI bypass flag 는 없다; OSV 또는 cache 가 응답할 때 재시도한다
+  • OSV 에는 check 마다, effect gate 실행마다 질의한다
+  • 이전 실행의 OSV 응답은 읽지도 쓰지도 않는다
+  • `cache/osv/` 는 더 이상 쓰지도 읽지도 않는다. 이전 버전이 남긴 파일은
+    디스크에 그대로 남고 무시된다
+  • 응답이 오지 않거나 timeout 이 나면 응답 없음이다. check 는
+    `provider_unavailable`(exit 4)로 답하고 아무것도 승인하지 않는다
+  • 응답 없음이면 effect gate 는 install 을 rollback 하고,
+    `SAFEDEPS_ACCEPT_RISK` 로도 유지할 수 없다
+  • install-time CLI bypass flag 는 없다; OSV 가 응답할 때 재시도한다
+  • effect gate 의 deadline 은 하나다: 시작부터 25초이고, backstop,
+    native inspection, 모든 provider 요청(OSV page, record, KEV catalog)이
+    함께 쓴다
+  • 각 요청은 남은 시간을 받되 자신의 cap 을 넘지 않는다. 남은 시간이
+    100 ms 미만이면 요청을 시작하지 않는다
+  • deadline 에 잘린 OSV 요청(page 또는 record)은 응답 없음이므로
+    install 은 rollback 된다
+  • deadline 에 잘린 KEV download 는 실패한 download 다. 실패한 KEV
+    download 가 모두 그렇듯, local catalog 가 오래된 것이든 아니든 답하고
+    `advisory.log` 에 한 줄이 남는다. 읽을 local catalog 가 없을 때만
+    응답 없음이고, install 은 rollback 된다
+  • hook 은 runtime 의 30초 kill 전에 답하며, runtime 의 kill 은 응답으로
+    세지 않는다
 
 OSV.dev — 읽을 수 없는 응답
   • provider 목록에 없는 status, 빈 status, provider 자체 코드의 단계 실패는
-    깨끗한 응답이 아니라 miss 다
-  • check 는 `provider_unavailable`(exit 4)로 답하고, 아무것도 승인하지 않으며,
-    `advisory.log` 에 기록을 남긴다
+    깨끗한 응답이 아니라 응답 없음이다
+  • check 는 `provider_unavailable`(exit 4)로 답하고, 아무것도 승인하지
+    않으며, `advisory.log` 에 기록을 남긴다. effect gate 는 install 을
+    rollback 한다
   • 직접 패키지의 npm 질의도 같다
   • 응답은 객체 하나이고, `vulns` 가 있으면 그것은 목록이다. CLI 와 core 는
     같은 규칙으로 읽는다. OSV 는 아는 것이 없는 패키지에 `{}` 로 답하고, 그 밖의
     어떤 것도 advisory 없음으로 읽지 않는다
   • 그 밖의 것을 돌려준 질의는 실패한 질의다
-  • 그 밖의 것을 담은 fresh cache 파일(빈 파일, 이 사용자가 읽을 수 없는 파일)은
-    cache miss 이고 `advisory.log` 에 한 줄을 남긴다. 질의를 다시 하고 그 응답이
-    파일을 대체한다. 그 질의가 실패하면 check 는 `provider_unavailable` 로 답하고
-    effect gate 는 rollback 한다
+  • 응답은 전체 응답이어야 한다. OSV 는 응답을 page 로 나눈다
+  • CLI 와 core 는 각 질의의 `next_page_token` 으로 `/v1/querybatch` 에
+    다시 질의하며, 모든 질의가 끝날 때까지 계속한다. `/v1/query` 도 같고,
+    최대 20 page 다
+  • 문자열이 아닌 `next_page_token`, 또는 20 page 뒤에도 끝나지 않은 응답은
+    응답 없음이다
+  • batch 는 각 advisory 를 `id` 와 `modified` 로만 가리킨다
+  • 응답이 가리킨 모든 advisory 는 전체 record 로 읽는다. record URL 은
+    batch URL 의 `/querybatch` 를 `/vulns/<id>` 로 바꾼 것이다
+  • 그래서 옮긴 batch URL(mirror)은 record 를 가져오는 곳도 옮긴다
+  • batch URL 이 `/querybatch` 로 끝나지 않으면 record URL 을 만들 수 없고,
+    그 응답은 응답 없음이다
+  • CISA KEV 는 record 의 alias 로 판정한다. record 의 `aliases` 만
+    가리키는 CVE 가 KEV 에 올라 있으면 install 을 막는다
+  • record 는 `cache/osv-vuln/` 에 보관하되, 응답이 준 (`id`, `modified`)
+    쌍 아래에만 보관한다
+  • 그 쌍으로 보관한 record 는 같은 쌍으로 다시 읽는다. OSV 가 바꾼
+    advisory 는 `modified` 가 새로우므로 key 도 새롭다
+  • `modified` 없이 가리킨 record 는 매번 질의하고 보관하지 않는다
+  • 읽을 수 없는 record, 또는 다른 advisory 의 record 는 응답 없음이다
 
 CISA KEV — 응답 무
   • KEV 는 하루 1회 download 하는 정적 catalog; 로컬 cache 만 사용
@@ -810,7 +846,8 @@ GHSA / NVD — 응답 무
 │               Cargo.lock, go.sum, Gemfile.lock, meta.json }
 ├── confirmed_${dir_hash}      ← 프로젝트별 기준점: 마지막으로 검증된 설치가 남긴 상태
 ├── cache/
-│   ├── osv/                   ← OSV query 응답 (24h TTL)
+│   ├── osv/                   ← 더 이상 쓰지도 읽지도 않음; 이전 버전이 남긴 파일은 무시
+│   ├── osv-vuln/              ← OSV advisory record, (`id`, `modified`) 쌍으로 보관
 │   └── kev/                   ← CISA KEV daily catalog
 ├── locks/                     ← atomic state (TOCTOU 방지)
 ├── watch/                     ← daily watch
@@ -829,7 +866,7 @@ GHSA / NVD — 응답 무
 
 - `approved-specs/` 는 ledger SSoT, spec 당 atomic JSON write.
 - `snapshots/` 는 v1 설계 + Python/Rust/Go/Ruby lockfile 추가.
-- `cache/osv/`, `cache/kev/` 는 provider 응답을 TTL 로 보관.
+- `cache/osv-vuln/` 는 OSV advisory record 를 응답이 준 (`id`, `modified`) 쌍으로 보관. `cache/kev/` 는 CISA KEV daily catalog 를 24h freshness rule 로 보관. `cache/osv/` 는 더 이상 쓰지도 읽지도 않으며, 이전 버전이 남긴 파일은 무시.
 - `advisory.log` 는 모든 approve/block 결정의 audit trail.
 - `accepted-risk.jsonl`은 `SAFEDEPS_ACCEPT_RISK`에 의해 유지된 모든 설치의 타임스탬프, 도구 사용 ID, 프로젝트, 명령어, 사유 및 수용된 문제를 저장하는 감사 기록이다.
 - `watch/` 는 daily watch 를 담는다: lock, config, 그리고 publish 된 단 하나의 state 인 `state.json`; [The daily watch](#the-daily-watch) 참고.
@@ -842,7 +879,7 @@ GHSA / NVD — 응답 무
 
 **state 는 통째로 publish 되는 document 하나다.** `~/.safedeps/watch/state.json` 은 generation, 마지막 scan, population, root, finding, diff, unmeasured row, error, event, delivery record 를 담는다. scan 은 lock 을 잡은 뒤에만 이전 state 를 읽는다. scan 은 결과를 그 document 에 merge 하고 atomic 하게 publish 한다: 같은 directory 의 임시 file 을 validate 하고 sync 한 뒤 이전 file 위로 rename 하고, 그다음 directory 를 sync 한다. rename 전에 멈춘 run 은 이전 generation 을 온전히 남긴다. 각 run 은 `~/.safedeps/watch/runs/` 에 receipt 도 남긴다. `safedeps watch status` 는 lock 없이 마지막으로 publish 된 state 를 읽는다: 마지막 scan 과 마지막 성공이 얼마나 지났는지다. `last_full_scan` 과 그 나이, 그리고 `awaiting_owner` 도 준다. `last_full_scan` 은 마지막 full scan 이고, 그 error 와 그것을 돌린 runtime 을 담는다. root scan 은 이것을 바꾸지 않고, 첫 full scan 전에는 null 이다. `awaiting_owner` 는 owner 의 판단을 기다리는 살아 있는 finding 과, owner 가 아직 끝내지 않은 `awaiting_deploy` 기록을 가진 local 에서 닫힌 finding 을 각각의 이유와 `closed_reason` 과 함께 나열한다. 둘 다 `lib/watch/state.jq` 한 곳에서 정의되고, 그 호출이 읽은 한 generation 에서 나온다. consumer 는 이름으로 읽는다.
 
-**run 의 순서는 하나다.** 순서는 이렇다: lock, 이전 state, ledger re-check, population, 분류, lockfile, runtime stage, publish. ledger re-check 는 이전에 daily job 이 하던 일이고, 그 report 는 scan report 의 `ledger` field 다. 읽을 수 없거나 revoke 할 수 없는 ledger entry 는 re-check 의 `errors` list 의 row 다. re-check 는 나머지 entry 로 계속 진행하고, 전체 report 를 출력한 뒤 exit 1 로 끝난다. scan 은 그런 row 를 자신의 error 로 싣는다. `safedeps watch scan --root DIR` 는 root 하나를 다시 측정하고, 다른 모든 root 의 state 와 전달되지 않은 모든 event 를 유지한다. ledger re-check 는 돌리지 않고, population 을 갱신하지 않으며, host 의 JDK 도 읽지 않는다.
+**run 의 순서는 하나다.** 순서는 이렇다: lock, 이전 state, ledger re-check, population, 분류, lockfile, runtime stage, publish. ledger re-check 는 이전에 daily job 이 하던 일이고, 그 report 는 scan report 의 `ledger` field 다. 읽을 수 없거나 revoke 할 수 없는 ledger entry 는 re-check 의 `errors` list 의 row 다. provider 가 응답을 주지 않은 ledger entry 도 그런 row 이고, kind 는 `provider_unavailable` 이다. 그 entry 는 still clean 도 revoked 도 아니며, ledger 에 남는다. re-check 는 나머지 entry 로 계속 진행하고, 전체 report 를 출력한 뒤 exit 1 로 끝난다. scan 은 그런 row 를 kind 앞에 `ledger_` 를 붙여 자신의 error 로 싣는다. 그래서 응답을 받지 못한 entry 는 `ledger_provider_unavailable` 이 된다. `safedeps watch scan --root DIR` 는 root 하나를 다시 측정하고, 다른 모든 root 의 state 와 전달되지 않은 모든 event 를 유지한다. ledger re-check 는 돌리지 않고, population 을 갱신하지 않으며, host 의 JDK 도 읽지 않는다.
 
 **fresh 가 아닌 population 은 결코 전체 집계가 아니다.** population 은 project root 의 목록이다. scan 은 설정된 command 를 실행해 이를 갱신한다: 절대 경로와 argument, 그리고 기본 120 s 인 timeout. 그 command 는 한 줄에 `name<TAB>path` 하나를 출력한다. 그 command 가 이번 run 에서 exit 0 으로 끝났으면 population 은 `fresh` 다. command 가 실패했거나 설정되지 않아 마지막 목록을 썼으면 `stale` 이고, `generated_at` 과 reason 이 붙는다. 이때 그 뒤에 등록된 project 는 빠져 있을 수 있다. 목록이 아예 없으면 `missing` 이고, 이때 project stage 전체가 unmeasured 다. fresh 가 아닌 population 은 그 run 의 error 이자 unmeasured row 다: `population_stale` 또는 `population_missing`.
 
@@ -950,7 +987,7 @@ tail -f ~/.safedeps/advisory.log     # advisory-gate 결정 (approve / block)
 tail -f ~/.safedeps/reorg.log        # reorg event
 ls -lt ~/.safedeps/approved-specs/   # 현재 approved specs
 jq '.evidence' ~/.safedeps/approved-specs/sha256-abc123.json   # 특정 spec 의 evidence
-rm -rf ~/.safedeps/cache/osv/        # OSV cache 비우기 (강제 re-query)
+rm -rf ~/.safedeps/cache/osv-vuln/   # 보관된 OSV record 비우기 (선택 사항: OSV 에는 매 실행마다 질의한다)
 tail -f ~/.safedeps/recheck.log      # wrapper run 당 한 줄, runtime_version 포함
 safedeps watch status                # 마지막 scan, 마지막 full scan, 마지막 성공; awaiting_owner
 jq '.summary.line' ~/.safedeps/watch/state.json   # 마지막으로 publish 된 summary line
@@ -1104,7 +1141,7 @@ CLI 인 `bin/safedeps` 는 Bash 이고, `lib/providers/providers.sh`, `lib/ledge
 | 프로젝트 승인 식별 | `lib/npm/closure.sh`, `rust/src/ledger/context.rs` | CLI 로 승인하고, 맞는 프로젝트와 다른 프로젝트에서 native pre 훅으로 받아들이거나 거부하는 e2e 행: Yarn resolutions 행, npm overrides 행, materialized-candidate 행 | 모든 canonical-JSON 입력을 비교하는 행은 없다 |
 | npm lock closure 와 기록 | `lib/npm/closure.sh`, `rust/src/post/closure.rs`, `rust/src/post/trace.rs` | 같은 승인 행과 `post hook reorgs unapproved transitive package`. 공개 호스트는 `ask::fetch::public_registry_rule_matches_cli` 가 따로 붙든다 | 모든 lockfile 버전이나 모든 새 기록 필드가 두 파서를 다 거친 것은 아니다 |
 | 요청 endpoint 기본값 | `lib/truth-sources.sh`, `lib/providers/providers.sh`, `rust/src/state.rs`, `rust/src/post/providers.rs` | `post::providers::provider_endpoints_match_cli`, 그리고 알림에는 `state::truth_sources_match_cli`. native 요청과 알림은 이제 같은 상수를 읽는다 | 이 값들 너머의 주장은 없다 |
-| provider 캐시 식별 | `lib/providers/providers.sh`, `rust/src/post/providers.rs` | `post::providers::provider_cache_constants_match_cli`: TTL 86400, 환경 변수 이름, 캐시 경로, KEV 파일 이름, 그리고 scoped, 대소문자가 섞인, 공백, 줄바꿈, 탭 입력에 대해 CLI 의 해시와 native npm OSV 캐시 경로 | npm batch 만 native 이므로, CLI 의 ecosystem 별칭이나 GHSA 동작에 native 대응이 있다고 주장하지 않는다 |
+| provider 캐시 식별 | `lib/providers/providers.sh`, `rust/src/post/providers.rs` | `post::providers::provider_cache_constants_match_cli`: TTL 86400(KEV catalog 와 GHSA 에 여전히 사용), 환경 변수 이름, 캐시 경로(`osv-vuln`, `kev`, `ghsa`), KEV 파일 이름, OSV record 파일 이름, page 한도 20, CLI 가 `cache/osv/` 경로를 쓰지 않는다는 것, 그리고 세 개의 (`id`, `modified`) 쌍에 대해 CLI 의 해시와 native OSV record 경로. 그중 한 쌍은 줄바꿈과 탭을 담는다 | npm batch 만 native 이므로, CLI 의 ecosystem 별칭이나 GHSA 동작에 native 대응이 있다고 주장하지 않는다 |
 | provider JSON 과 상태 프로토콜 | `lib/providers/providers.sh`, `rust/src/post/providers.rs` | clean-approval fixture 서비스를 양 끝에서 읽는다는 것뿐 | 모든 필드, CVE 패턴의 경계, vulnerable 과 hard-block 상태, 요청 timeout 을 묶는 행은 없다. KEV hard-block 행은 CLI 행이다 |
 | advisory 기록의 경로, 틀, 접두어 | `lib/providers/providers.sh`, `rust/src/post/providers.rs`, `rust/src/state.rs` | e2e 의 옮겨진 출처 행과 advisory-log 보존 행 | 모든 provider 메시지 접두어를 다른 구현과 맞춰 고정하는 행은 없다. provider 의 괄호 친 시각과 레벨, pre 훅의 시각과 탭은 서로 다른 형식이다 |
 | 회전 기본값과 이름 | `lib/advisory-log-rotate.sh`, `rust/src/state/log.rs` | `state::log::rotation_constants_match_cli`: 기본값 넷, 환경 변수 이름, lock 이름, 시각을 붙인 archive 접미어와 prune 접미어 | 잘못된 숫자 입력은 재지 않았다. bash 산술과 `u64` 파싱이 같다고 주장하지 않는다 |

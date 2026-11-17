@@ -45,7 +45,7 @@ safedeps check <ecosystem> <pkg>@<range> --json
 | `cve_unpatched` | Do not install. Surface the CVEs, propose an alternative package. |
 | `closure_vulnerable` | Do not install. A dependency the install would bring in has an advisory; `closure_vulnerabilities` names it. Propose an alternative. |
 | `kev_hard_block` | Do not install. Recommend an alternative — actively exploited in the wild. |
-| `provider_unavailable` | Do not install. OSV was unreachable with no fresh cache, its answer could not be read, or no CISA KEV catalog could be read. Retry later or tell the human. |
+| `provider_unavailable` | Do not install. OSV did not answer, its answer or one of its advisory records could not be read or was not whole, or no CISA KEV catalog could be read. No OSV answer from an earlier run is used. Retry later or tell the human. |
 | `error` | Read `error`. Fix the spec (e.g. an unpublished version) and retry. `ledger_write_failed` means the approval could not be written, and `check_did_not_finish` means the check stopped before it could answer. In both, nothing is approved: tell the human. |
 
 Install only after approval. If the approved version differs from your argument, the hook blocks again — re-narrow and retry.
@@ -208,7 +208,7 @@ safedeps version
 
 - `ledger`: `command`, `count`, and `specs`, each with `hash`, `ecosystem`, `package`, `version`, `version_range`, `approved_at`, `expires_at`, `approved_by`, `expired` and `revoked`.
 - `revoke`: `command`, `revoked`, `reason`, and `spec`, the ledger entry after revocation.
-- `re-check`: `command`, `checked`, `still_clean`, and the lists `newly_vulnerable`, `kev_hit`, `revoked`, `suspected_forgery` and `errors`. Each `errors` row has a `kind`: `ledger_entry_unreadable` with `file`, or `revoke_failed` with `ecosystem`, `package`, `version` and `file`. A report with errors exits 1 after it is printed.
+- `re-check`: `command`, `checked`, `still_clean`, and the lists `newly_vulnerable`, `kev_hit`, `revoked`, `suspected_forgery` and `errors`. Each `errors` row has a `kind`: `ledger_entry_unreadable` with `file`, or `revoke_failed` or `provider_unavailable` with `ecosystem`, `package`, `version` and `file`. A `provider_unavailable` row is a ledger entry the providers gave no answer for: it is neither still clean nor revoked, and it stays in the ledger. A report with errors exits 1 after it is printed.
 
 Any of the three answers `command` and `error: "ledger_unlisted"` with exit 4 when the ledger's files could not be listed. That is no reading of the ledger, not an empty one.
 

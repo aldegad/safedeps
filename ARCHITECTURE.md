@@ -10,7 +10,7 @@
 
 > Safedeps does not decide at install time from several live truths at once. It approves one dependency closure from provider evidence *first*; then the post-install hook treats the installed lockfile closure as the authority, and reorg rolls back any unapproved or newly-vulnerable effect.
 
-Approval happens **before** the install, against canonical advisory evidence. Enforcement happens **after** the install, against what actually landed on disk. For npm, the full closure (direct + transitive) is checked through OSV `/v1/querybatch` with a 24-hour per-`pkg@version` cache. Closure resolution for the other ecosystems is future work.
+Approval happens **before** the install, against canonical advisory evidence. Enforcement happens **after** the install, against what actually landed on disk. For npm, the full closure (direct + transitive) is checked through OSV `/v1/querybatch`. OSV is asked on every check and on every effect-gate run, and no OSV answer from an earlier run is read or written. Closure resolution for the other ecosystems is future work.
 
 ---
 
@@ -721,24 +721,60 @@ What this does not cover is stated rather than claimed. The oracle checks each l
 
 ```
 OSV.dev — no response / timeout
-  • first: use the local provider cache (24h TTL)
-  • cache miss → fail-closed (block; "no OSV response, retry")
-  • no install-time CLI bypass flag exists; retry when OSV or the cache can answer
+  • OSV is asked on every check and on every effect-gate run
+  • no OSV answer from an earlier run is read or written
+  • `cache/osv/` is no longer written or read; files an earlier version left
+    there stay on disk and are ignored
+  • no response or a timeout is no answer: the check reports
+    `provider_unavailable` (exit 4) and approves nothing
+  • on no answer the effect gate rolls the install back, and
+    `SAFEDEPS_ACCEPT_RISK` cannot keep it
+  • no install-time CLI bypass flag exists; retry when OSV can answer
+  • the effect gate has one deadline: 25 seconds from its start, shared by
+    the backstop, the native inspection and every provider request (OSV
+    pages, records, KEV catalog)
+  • each request gets the time left, at most its own cap; a request with
+    under 100 ms left is not started
+  • an OSV request (page or record) the deadline cut is no answer, so the
+    install rolls back
+  • a KEV download the deadline cut is a failed download; as for any failed
+    KEV download, a local catalog answers, stale or not, with a line in
+    `advisory.log`; only with no local catalog to read is it no answer,
+    and the install rolls back
+  • the hook answers before the runtime's 30-second kill, and the runtime's
+    kill is never counted as an answer
 
 OSV.dev — an answer that cannot be read
   • a status outside the provider's list, no status, or a failed step of the
-    provider's own code is a miss, not a clean answer
+    provider's own code is no answer, not a clean answer
   • the check reports `provider_unavailable` (exit 4), approves nothing, and
-    writes the record to `advisory.log`
+    writes a line to `advisory.log`; the effect gate rolls the install back
   • the same holds for the npm query of the direct package
   • an answer is one object whose `vulns`, when it has one, is a list, and
     the CLI and the core read it by the same rule; OSV answers `{}` for a
     package it has nothing on, and nothing else reads as no advisories
   • a query that returns anything else is a failed query
-  • a fresh cache file that holds anything else (an empty file, a file this
-    user cannot read) is a cache miss with a line in `advisory.log`: the query
-    is asked again and its answer replaces the file; if that query fails,
-    the check reports `provider_unavailable` and the effect gate rolls back
+  • an answer is the whole answer; OSV pages its answers
+  • the CLI and the core ask `/v1/querybatch` again with each query's
+    `next_page_token` until every query has ended, and `/v1/query` the same
+    way, at most 20 pages
+  • a `next_page_token` that is not a string, or an answer that has not
+    ended after 20 pages, is no answer
+  • the batch names each advisory by `id` and `modified` only
+  • every advisory an answer names is read as its full record from the batch
+    URL with `/querybatch` replaced by `/vulns/<id>`
+  • so a moved batch URL (a mirror) also moves where records come from
+  • a batch URL that does not end in `/querybatch` gives no record URL, and
+    the answer is no answer
+  • CISA KEV is judged on the record's aliases: a KEV listing of a CVE that
+    only the record's `aliases` name blocks the install
+  • a record is kept in `cache/osv-vuln/` only under the pair (`id`,
+    `modified`) the answer gave
+  • a record kept under that pair is read again under the same pair; an
+    advisory OSV has changed has a new `modified`, so a new key
+  • a record named with no `modified` is asked every time and not kept
+  • a record that cannot be read, or that is another advisory's record, is
+    no answer
 
 CISA KEV — no response
   • KEV is a static catalog downloaded once a day; only the local cache is used
@@ -816,7 +852,8 @@ Design principle: **no silent fallback.** When the canonical truth (OSV) cannot 
 │               Cargo.lock, go.sum, Gemfile.lock, meta.json }
 ├── confirmed_${dir_hash}      ← per-project baseline: the state the last verified install left
 ├── cache/
-│   ├── osv/                   ← OSV query responses (24h TTL)
+│   ├── osv/                   ← no longer written or read; files from an earlier version are ignored
+│   ├── osv-vuln/              ← OSV advisory records, kept under the pair (`id`, `modified`)
 │   └── kev/                   ← CISA KEV daily catalog
 ├── locks/                     ← atomic state (TOCTOU guard)
 ├── watch/                     ← the daily watch
@@ -835,7 +872,7 @@ Design principle: **no silent fallback.** When the canonical truth (OSV) cannot 
 
 - `approved-specs/` is the ledger SSoT, one atomic JSON write per spec.
 - `snapshots/` keeps the v1 design plus the Python/Rust/Go/Ruby lockfiles.
-- `cache/osv/` and `cache/kev/` hold provider responses under TTL.
+- `cache/osv-vuln/` holds OSV advisory records, each under the pair (`id`, `modified`) the answer gave. `cache/kev/` holds the CISA KEV daily catalog under its 24h freshness rule. `cache/osv/` is no longer written or read, and files an earlier version left there are ignored.
 - `advisory.log` is the audit trail of every approve/block decision.
 - `accepted-risk.jsonl` is the audit record of every install kept by `SAFEDEPS_ACCEPT_RISK`, storing timestamps, tool use IDs, projects, commands, reasons, and accepted problems.
 - `watch/` holds the daily watch: its lock, its config and the one published state, `state.json`; see [The daily watch](#the-daily-watch).
@@ -848,7 +885,7 @@ Design principle: **no silent fallback.** When the canonical truth (OSV) cannot 
 
 **The state is one document, published whole.** `~/.safedeps/watch/state.json` holds the generation, the last scan, the population, the roots, the findings, the diff, the unmeasured rows, the errors, the events and the delivery records. A scan reads the previous state only after it holds the lock. It merges its result into that document and publishes it atomically: a temporary file in the same directory, validated, synced, renamed over the old one, then the directory synced. A run that stops before the rename leaves the previous generation whole. Each run also leaves a receipt in `~/.safedeps/watch/runs/`. `safedeps watch status` reads the last published state without the lock: the age of the last scan and of the last success. It also gives `last_full_scan` and its age, and `awaiting_owner`. `last_full_scan` is the last full scan with its errors and the runtime that ran it. A root scan does not replace it, and it is null until the first full scan. `awaiting_owner` lists the live findings that wait for the owner's judgment and the locally closed findings whose `awaiting_deploy` record the owner has not resolved, each with why and `closed_reason`. Both are defined once, in `lib/watch/state.jq`, and come from the one generation the call read. A consumer reads them by name.
 
-**A run has one order.** The order is: lock, previous state, ledger re-check, population, classification, lockfiles, runtime stage, publish. The ledger re-check is what the daily job did before, and its report is the scan report's `ledger` field. A ledger entry that cannot be read or revoked is a row of the re-check's `errors` list. The re-check goes on with the other entries and exits 1 after printing the full report. The scan carries such rows as its own errors. `safedeps watch scan --root DIR` measures one root again and keeps every other root's state and every undelivered event. It runs no ledger re-check, does not refresh the population and does not read the host's JDKs.
+**A run has one order.** The order is: lock, previous state, ledger re-check, population, classification, lockfiles, runtime stage, publish. The ledger re-check is what the daily job did before, and its report is the scan report's `ledger` field. A ledger entry that cannot be read or revoked is a row of the re-check's `errors` list. A ledger entry the providers gave no answer for is also such a row, with the kind `provider_unavailable`. It is neither still clean nor revoked, and it stays in the ledger. The re-check goes on with the other entries and exits 1 after printing the full report. The scan carries such rows as its own errors, with the kind prefixed `ledger_`, so an unanswered entry is `ledger_provider_unavailable`. `safedeps watch scan --root DIR` measures one root again and keeps every other root's state and every undelivered event. It runs no ledger re-check, does not refresh the population and does not read the host's JDKs.
 
 **A population that is not fresh is never a full count.** The population is the list of project roots. The scan refreshes it by running a configured command: an absolute path plus arguments, with a timeout that defaults to 120 s. The command prints one `name<TAB>path` a line. The population is `fresh` when that command exited 0 in this run. It is `stale`, with `generated_at` and a reason, when the command failed or is not configured and the last list was used. Projects registered since may then be missing. It is `missing` when there is no list at all, and then the whole project stage is unmeasured. A population that is not fresh is an error of the run and an unmeasured row: `population_stale` or `population_missing`.
 
@@ -956,7 +993,7 @@ tail -f ~/.safedeps/advisory.log     # advisory-gate decisions (approve / block)
 tail -f ~/.safedeps/reorg.log        # reorg events
 ls -lt ~/.safedeps/approved-specs/   # current approved specs
 jq '.evidence' ~/.safedeps/approved-specs/sha256-abc123.json   # one spec's evidence
-rm -rf ~/.safedeps/cache/osv/        # clear the OSV cache (force re-query)
+rm -rf ~/.safedeps/cache/osv-vuln/   # clear kept OSV records (optional: OSV is asked on every run)
 tail -f ~/.safedeps/recheck.log      # one line per wrapper run, with runtime_version
 safedeps watch status                # last scan, last full scan, last success; awaiting_owner
 jq '.summary.line' ~/.safedeps/watch/state.json   # the last published summary line
@@ -1110,7 +1147,7 @@ The CLI, `bin/safedeps`, is Bash and sources `lib/providers/providers.sh`, `lib/
 | Project approval identity | `lib/npm/closure.sh`, `rust/src/ledger/context.rs` | e2e rows that approve with the CLI and accept or reject through the native pre hook in the matching project and in another one: the Yarn resolutions row, the npm overrides row and the materialized-candidate row | No row compares every canonical-JSON input |
 | npm lock closure and records | `lib/npm/closure.sh`, `rust/src/post/closure.rs`, `rust/src/post/trace.rs` | the same approval rows, and `post hook reorgs unapproved transitive package`. The public hosts are held separately by `ask::fetch::public_registry_rule_matches_cli` | Not every lockfile version or every new-record field through both parsers |
 | Request endpoint defaults | `lib/truth-sources.sh`, `lib/providers/providers.sh`, `rust/src/state.rs`, `rust/src/post/providers.rs` | `post::providers::provider_endpoints_match_cli`, and `state::truth_sources_match_cli` for the notice. The native requests and the notice now read the same constants | No claim beyond these values |
-| Provider cache identity | `lib/providers/providers.sh`, `rust/src/post/providers.rs` | `post::providers::provider_cache_constants_match_cli`: a TTL of 86400, the environment names, the cache paths, the KEV file name, and the CLI's hash against the native npm OSV cache path for scoped, mixed-case, space, newline and tab inputs | Only the npm batch is native, so it does not claim the CLI's ecosystem aliases or GHSA behavior have a native counterpart |
+| Provider cache identity | `lib/providers/providers.sh`, `rust/src/post/providers.rs` | `post::providers::provider_cache_constants_match_cli`: a TTL of 86400 (still used for the KEV catalog and GHSA), the environment names, the cache paths (`osv-vuln`, `kev`, `ghsa`), the KEV file name, the OSV record file name, the page limit of 20, that the CLI writes no `cache/osv/` path, and the CLI's hash against the native OSV record path for three (`id`, `modified`) pairs, one of them holding a newline and a tab | Only the npm batch is native, so it does not claim the CLI's ecosystem aliases or GHSA behavior have a native counterpart |
 | Provider JSON and status protocol | `lib/providers/providers.sh`, `rust/src/post/providers.rs` | Only that the clean-approval fixture service is read at both ends | No row binds all fields, the CVE pattern's boundaries, the vulnerable and hard-block statuses or the request timeouts. The KEV hard-block row is a CLI row |
 | Advisory record path, framing, prefixes | `lib/providers/providers.sh`, `rust/src/post/providers.rs`, `rust/src/state.rs` | the moved-source rows in e2e, and the advisory-log retention rows | No row pins every provider message prefix against the other implementation. The provider's bracketed time and level and the pre hook's time and tab are different formats |
 | Rotation defaults and names | `lib/advisory-log-rotate.sh`, `rust/src/state/log.rs` | `state::log::rotation_constants_match_cli`: the four defaults, the environment names, the lock name, the timestamped archive suffix and the prune suffix | Malformed numeric input was not measured: bash arithmetic and a `u64` parse are not claimed equivalent |
