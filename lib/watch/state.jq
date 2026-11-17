@@ -34,8 +34,11 @@ def ev_unknown: "unknown";
 
 # Remediation states a consumer records on a finding. report_acknowledged is
 # the owner's judgment of a finding that only reports (see set_remediation); it
-# records a decision, not a repair.
-def remediation_states: ["dispatched", "blocked", "fix_failed", "awaiting_deploy", "fixed_pending_rescan", "report_acknowledged"];
+# records a decision, not a repair. A deployment judgment is separate from
+# the scan's local closure and replaces the existing deployment record.
+def rm_awaiting_deploy: "awaiting_deploy";
+def rm_deploy_resolved: "deploy_resolved";
+def remediation_states: ["dispatched", "blocked", "fix_failed", rm_awaiting_deploy, "fixed_pending_rescan", "report_acknowledged", rm_deploy_resolved];
 # A worker is on it: the finding does not wait for the owner.
 def remediation_in_progress: ["dispatched", "fixed_pending_rescan"];
 # Finding states that report and that nobody can fix by a repair here: no fixed
@@ -272,13 +275,41 @@ def ack_event($id; $consumer; $outcome; $task; $now):
 # report as it is now, for the owner to judge. A scan that changes the report
 # later puts the finding back in awaiting_owner. The check and the record are
 # one reading of the document the caller holds under the lock. $expect is the
-# empty string when it was not given; no other state takes one.
+# empty string when it was not given. deploy_resolved also binds a judgment
+# to these facts, and to the task of the deployment record it replaces.
+def deploy_refusal($key; $reason; $f):
+  error("deploy remediation refused, nothing written: " + $reason + ": " + $key
+        + "; current: " + (if $f == null then null else
+          ($f | {state, closed_reason: (.closed_reason // null),
+                 remediation: (.remediation | {state, task, at}), report_fact: report_fact}) end | tojson));
+
 def set_remediation($key; $state; $detail; $task; $expect; $now):
   .findings[$key] as $f
-  | if $f == null then error("no such finding: " + $key)
+  | if $f == null then
+      (if $state == rm_deploy_resolved then deploy_refusal($key; "no such finding"; $f)
+       else error("no such finding: " + $key) end)
     elif (remediation_states | index($state)) == null then error("not a remediation state: " + $state)
+    elif $state == rm_deploy_resolved then
+      ($f | report_fact) as $fact
+      | ($expect | try fromjson catch null) as $e
+      | if ($f | is_closed | not) then deploy_refusal($key; "deploy_resolved needs a closed finding"; $f)
+        elif $f.remediation.state != rm_awaiting_deploy then
+          deploy_refusal($key; "deploy_resolved needs the current awaiting_deploy record"; $f)
+        elif $f.remediation.task == null or $f.remediation.task != $task then
+          deploy_refusal($key; "--task must match the record; link the task/plan first: re-record awaiting_deploy --task"; $f)
+        elif (($detail // "") | test("\\S") | not) then
+          deploy_refusal($key; "deploy_resolved needs --detail: deployed or not needed, with the linked evidence"; $f)
+        elif ($e | is_report_fact | not) then
+          deploy_refusal($key; "deploy_resolved needs --expect: the complete report_fact you judged"; $f)
+        elif ($e | report_fact) != $fact then
+          deploy_refusal($key; "the report is not the one you judged; judge the current report and linked evidence again"; $f)
+        else .findings[$key].remediation =
+          {state: $state, detail: $detail, task: $task, at: $now, seen: $fact, resolves: $f.remediation}
+        end
+    elif ($f | is_closed) and $f.remediation.state == rm_awaiting_deploy and $state != rm_awaiting_deploy then
+      deploy_refusal($key; "a closed awaiting_deploy record can only be linked again or ended with deploy_resolved"; $f)
     elif $state != "report_acknowledged" then
-      (if $expect != "" then error("--expect goes with --state report_acknowledged only")
+      (if $expect != "" then error("--expect goes with --state report_acknowledged or deploy_resolved only")
        else (.scan_generation // 0) as $sg
          | .findings[$key].remediation = ({state: $state, detail: $detail, task: $task, at: $now}
              + (if $state == "fixed_pending_rescan" then {scan_generation: $sg} else {} end)) end)
@@ -299,29 +330,31 @@ def set_remediation($key; $state; $detail; $task; $expect; $now):
         end
     end;
 
-# The live findings that wait for the owner's judgment, with why: unassigned
+# Findings that wait for the owner's judgment, with why: unassigned
 # (no remediation), blocked or fix_failed (work that stopped),
 # acknowledged_other_state (a report_acknowledged made on another report),
 # rescan_still_live (a measurement after fixed_pending_rescan still saw it),
 # rescan_order_unknown (an old record without a scan boundary), awaiting_deploy
-# (a nonfailure needing deployment ownership), or unrecognized_remediation.
+# (a nonfailure needing deployment ownership, including locally closed
+# findings), or unrecognized_remediation. Only deploy_resolved ends a closed
+# deployment wait; event delivery and the scan's local closure do not.
 # The same lock orders scans and remediation writes. A record captures the
 # document's scan_generation; only seeing this finding advances its own
 # last_seen_scan_generation. Neither wall time nor an unrelated scan proves
 # that the finding was measured after the record. Legacy records cannot prove
 # this order: the owner records the boundary again before a new scan.
 # Each row carries the finding's report_fact, which the owner hands back with
-# report_acknowledged.
+# report_acknowledged or deploy_resolved.
 def awaiting_owner:
   [.findings | to_entries[]
    | .value as $f
-   | select($f | is_closed | not)
+   | select(($f | is_closed | not) or $f.remediation.state == rm_awaiting_deploy)
    | ($f.remediation.state? // null) as $r
    | (if $r == null then "unassigned"
       elif $r == "blocked" or $r == "fix_failed" then $r
       elif $r == "report_acknowledged" then
         (if $f.remediation.seen == ($f | report_fact) then null else "acknowledged_other_state" end)
-      elif $r == "awaiting_deploy" then "awaiting_deploy"
+      elif $r == rm_awaiting_deploy then rm_awaiting_deploy
       elif $r == "fixed_pending_rescan" then
         (if ($f.remediation.scan_generation | type) != "number" then "rescan_order_unknown"
          elif ($f.last_seen_scan_generation // 0) > $f.remediation.scan_generation then "rescan_still_live"
@@ -329,6 +362,6 @@ def awaiting_owner:
       elif (remediation_in_progress | index($r)) != null then null
       else "unrecognized_remediation" end) as $why
    | select($why != null)
-   | {key, state: $f.state, root: $f.root, ecosystem: $f.ecosystem, package: $f.package, version: $f.version,
+   | {key, state: $f.state, closed_reason: ($f.closed_reason // null), root: $f.root, ecosystem: $f.ecosystem, package: $f.package, version: $f.version,
       fixed: $f.fixed, report_fact: ($f | report_fact), remediation: $f.remediation, why: $why}]
   | sort_by(.key);

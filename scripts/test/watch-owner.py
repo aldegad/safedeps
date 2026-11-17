@@ -7,10 +7,13 @@ Optional --routine checks the executable blocks of the external Procedure.
 """
 import argparse
 import contextlib
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import signal
+import re
 import subprocess
 import tempfile
 import sys
@@ -19,7 +22,9 @@ import time
 p = argparse.ArgumentParser()
 p.add_argument('repo', nargs='?', default=str(Path(__file__).resolve().parents[2]))
 p.add_argument('--routine')
-p.add_argument('--only', default='kev,order,deploy,pin')
+p.add_argument('--prompt')
+p.add_argument('--followup')
+p.add_argument('--only', default='kev,order,deploy,lifecycle,pin,consumers')
 a = p.parse_args()
 repo = Path(a.repo).resolve()
 # Reuse kernel identity and conservative reaping; this namespace belongs only
@@ -33,6 +38,14 @@ for receipt in owners.sweep():
         raise RuntimeError('watch owner fixture sweep: ' + str(receipt))
 results = []
 T0, T1 = '2026-11-18T00:00:00Z', '2026-11-18T00:00:01Z'
+inputs = {name: hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in (
+    'lib/watch/state.jq', 'lib/watch/watch.sh', 'lib/watch/scan.sh', 'lib/watch/lockfiles.sh',
+    'scripts/test/lib/native_budget_owners.py')}
+inputs['executed_helper'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+for name in ('routine', 'prompt', 'followup'):
+    if getattr(a, name):
+        inputs[name] = hashlib.sha256(Path(getattr(a, name)).read_bytes()).hexdigest()
+print('# inputs ' + json.dumps(inputs, sort_keys=True), flush=True)
 
 
 def check(name, truth, detail=''):
@@ -57,10 +70,13 @@ safedeps_watch_host_jdks() { :; }
 safedeps_watch_runtime_info() { printf '%s\n' '{"version":"fixture","stale":false}'; }
 safedeps_osv_query_batch() {
   if [[ "$WATCH_TEST_MODE" == unmeasured ]]; then return 1; fi
-  jq -c 'map(. + {osv:{vulns:(if .version == "1.0.0" then [{id:"GHSA-owner",modified:"2026-11-18T00:00:00Z"}] else [] end)}})' "$2"
+  jq -c --arg mode "$WATCH_TEST_MODE" 'map(. + {osv:{vulns:(if .version == "1.0.0" then [{id:"GHSA-owner",modified:(if $mode == "withdrawn" then "2026-11-18T00:00:01Z" else "2026-11-18T00:00:00Z" end)}] else [] end)}})' "$2"
 }
 safedeps_osv_vuln_detail() {
-  printf '%s\n' '{"id":"GHSA-owner","aliases":["CVE-2026-999999"],"affected":[]}'
+  jq -nc --arg mode "$WATCH_TEST_MODE" '{id:"GHSA-owner",aliases:["CVE-2026-999999"],
+    affected:(if $mode == "fixable" or $mode == "withdrawn" then
+      [{package:{ecosystem:"npm",name:"dep"},ranges:[{type:"SEMVER",events:[{introduced:"0"},{fixed:"2.0.0"}]}]}] else [] end)}
+    + (if $mode == "withdrawn" then {withdrawn:"2026-11-18T00:00:01Z"} else {} end)'
 }
 safedeps_kev_refresh_catalog() {
   [[ "$WATCH_TEST_MODE" != unavailable ]] || return 1
@@ -292,6 +308,197 @@ def deploy():
         check('D4 failed repair still reaches owner', w.why() == ['fix_failed'])
 
 
+def deployment(w, state='awaiting_deploy', task='fixture-task', expect=None,
+               detail='deployed: fixture environment; evidence: fixture/repair#receipt', key=None):
+    args = ['remediation', '--finding', key or w.key(), '--state', state, '--detail', detail]
+    if task is not None:
+        args += ['--task', task]
+    if expect is not None:
+        args += ['--expect', expect if isinstance(expect, str) else json.dumps(expect)]
+    return w.call(*args)
+
+
+def deploy_row(w):
+    return next((r for r in w.status()['awaiting_owner'] if r['key'] == w.key()), {})
+
+
+def closed_deployment(w, task='fixture-task'):
+    w.scan('fixable')
+    live = deploy_row(w)['report_fact']
+    record = deployment(w, task=task)
+    w.lock('2.0.0'); w.scan('fixable')
+    return live, record
+
+
+def deploy_refused(w, label, **kwargs):
+    before = w.file.read_bytes()
+    current = w.doc()['findings'].get(kwargs.get('key', w.key()))
+    result = deployment(w, state='deploy_resolved', **kwargs)
+    error = result.stderr.split('; current: ', 1)
+    try:
+        shown = json.loads(error[1]) if len(error) == 2 else False
+    except ValueError:
+        shown = False
+    expected = None if current is None else dict(state=current['state'],
+        closed_reason=current.get('closed_reason'),
+        remediation={k: (current.get('remediation') or {}).get(k) for k in ('state','task','at')},
+        report_fact=w.fact())
+    check(label, result.returncode == 1 and w.file.read_bytes() == before
+          and shown == expected, dict(exit=result.returncode, error=result.stderr))
+    # A mutant that writes must not contaminate the next refusal's input.
+    # This is fixture state only; the unchanged-byte assertion ran first.
+    w.file.write_bytes(before)
+
+
+def deploy_closure():
+    with world() as w:
+        w.scan('fixable'); deployment(w)
+        w.scan('fixable')
+        check('DL1-control live deployment row stays visible', w.why() == ['awaiting_deploy'])
+        w.lock('2.0.0'); w.scan('fixable')
+        row = deploy_row(w)
+        check('DL1 local closure retains deployment row and reason',
+              row.get('why') == 'awaiting_deploy' and row.get('state') == 'closed'
+              and row.get('closed_reason') == 'seen_fixed'
+              and row.get('remediation', {}).get('task') == 'fixture-task')
+        claimed = w.call('claim', '--consumer', 'fixture-consumer', '--limit', '50')
+        assert claimed.returncode == 0, claimed.stderr
+        events = json.loads(claimed.stdout)['claimed']
+        closed = next(e for e in events if e['to'] == 'closed:seen_fixed')
+        acked = w.call('ack', '--consumer', 'fixture-consumer', '--event', closed['id'], '--unknown')
+        before_events = w.doc()['events']
+        w.scan('fixable')
+        check('DL3 unknown ack and later scan keep row without new events', acked.returncode == 0
+              and closed['finding_record']['remediation']['state'] == 'awaiting_deploy'
+              and w.why() == ['awaiting_deploy'] and w.doc()['events'] == before_events)
+        prior = w.doc()['findings'][w.key()]['remediation']
+        fact = row.get('report_fact', {})
+        result = deployment(w, 'deploy_resolved', expect=fact)
+        rem = w.doc()['findings'][w.key()]['remediation']
+        check('DL4 owner resolves matched record with facts and whole prior record', result.returncode == 0
+              and w.why() == [] and rem.get('state') == 'deploy_resolved'
+              and rem.get('seen') == fact and rem.get('resolves') == prior)
+        result = deployment(w)
+        check('DL10 owner can reopen closed deployment wait', result.returncode == 0 and w.why() == ['awaiting_deploy'])
+
+
+def deploy_after_scan():
+    with world() as w:
+        w.scan('fixable'); deployment(w, 'dispatched')
+        w.lock('2.0.0'); w.scan('fixable')
+        before_events = w.doc()['events']
+        no_row = w.why() == []
+        result = deployment(w)
+        check('DL2 record after scan closes creates row without new event', no_row and result.returncode == 0
+              and w.why() == ['awaiting_deploy'] and w.doc()['events'] == before_events)
+
+
+def deploy_guards():
+    with world() as w:
+        w.scan('fixable'); deployment(w)
+        deploy_refused(w, 'DL5a live finding cannot resolve', expect=deploy_row(w).get('report_fact', {}))
+        deployment(w, 'dispatched')
+        w.lock('2.0.0'); w.scan('fixable')
+        deploy_refused(w, 'DL5b closed dispatched is not a deploy obligation', expect=w.fact())
+        deployment(w)
+        fact = deploy_row(w).get('report_fact', {})
+        deploy_refused(w, 'DL5c mismatched task cannot resolve', expect=fact, task='another-task')
+        deployment(w, task=None)
+        deploy_refused(w, 'DL5d missing linked task cannot resolve', expect=fact)
+        deployment(w)
+        deploy_refused(w, 'DL5e blank detail cannot resolve', expect=fact, detail=' \t\n')
+        for label, expect in [('missing', None), ('blank', ' '), ('malformed', '{'), ('shape', {})]:
+            deploy_refused(w, 'DL5f '+label+' expectation cannot resolve', expect=expect)
+        deploy_refused(w, 'DL5f omitted fact key cannot resolve', expect={k:v for k,v in fact.items() if k != 'reason'})
+        deploy_refused(w, 'DL5f extra fact key cannot resolve', expect=dict(fact, extra=True))
+        live = dict(fact, state='open')
+        deploy_refused(w, 'DL5f pre-closure expectation cannot resolve', expect=live)
+        deploy_refused(w, 'DL5-G1 unknown finding cannot resolve', key='missing', expect=fact)
+        for state in ('dispatched','blocked','fix_failed','fixed_pending_rescan','report_acknowledged'):
+            before = w.file.read_bytes()
+            result = deployment(w, state)
+            check('DL5g closed deploy protected from '+state, result.returncode == 1
+                  and w.file.read_bytes() == before and w.why() == ['awaiting_deploy']
+                  and 'current:' in result.stderr and 'awaiting_deploy' in result.stderr)
+            w.file.write_bytes(before)
+        before = w.file.read_bytes()
+        result = deployment(w, expect=fact)
+        check('DL5-scope expect forbidden for awaiting_deploy', result.returncode == 1 and w.file.read_bytes() == before)
+
+
+def deploy_rediscovery():
+    with world() as w:
+        closed_deployment(w)
+        fact = deploy_row(w).get('report_fact', {})
+        w.lock('1.0.0'); w.scan('fixable')
+        f = w.doc()['findings'][w.key()]
+        check('DL6 rediscovery clears prior deployment and returns unassigned', f['state'] == 'open'
+              and f['remediation'] is None and w.why() == ['unassigned']
+              and any(e['from'] == 'closed' and e['to'] == 'open' for e in w.doc()['events']))
+        deploy_refused(w, 'DL6 old resolution refused after rediscovery', expect=fact)
+
+
+def deploy_busy():
+    for regression in (False, True):
+        with world() as w:
+            closed_deployment(w)
+            fact = deploy_row(w).get('report_fact', {})
+            before = w.file.read_bytes()
+            with (w.watch/'lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                result = deployment(w, 'deploy_resolved', expect=fact)
+                check('DL7 busy preserves bytes '+str(regression), result.returncode == 75 and w.file.read_bytes() == before)
+            if regression:
+                w.lock('1.0.0'); w.scan('fixable')
+                deploy_refused(w, 'DL7 same command after regression refuses', expect=fact)
+            else:
+                result = deployment(w, 'deploy_resolved', expect=fact)
+                check('DL7 same command after unchanged busy succeeds', result.returncode == 0 and w.why() == [])
+
+
+def deploy_retired():
+    with world() as w:
+        w.scan('fixable'); deployment(w)
+        retire = w.call('retire', '--root', str(w.root), '--evidence', 'fixture/retire#owner')
+        assert retire.returncode == 0, retire.stderr
+        w.scan('fixable')
+        row = deploy_row(w)
+        check('DL8 retired root retains deployment row', row.get('closed_reason') == 'root_retired' and row.get('why') == 'awaiting_deploy')
+        result = deployment(w, 'deploy_resolved', expect=row.get('report_fact', {}), detail='not needed: fixture/retire#owner evidence')
+        check('DL8 owner may resolve not-needed with retire evidence', result.returncode == 0 and w.why() == [])
+
+
+def deploy_withdrawn():
+    with world() as w:
+        w.scan('fixable'); deployment(w)
+        w.scan('withdrawn')
+        row = deploy_row(w)
+        check('DL9 withdrawn advisory retains deployment row', row.get('closed_reason') == 'advisory_withdrawn' and row.get('why') == 'awaiting_deploy')
+
+
+def deploy_legacy():
+    with world() as w:
+        closed_deployment(w)
+        doc = w.doc()
+        doc['findings'][w.key()]['remediation'] = dict(state='awaiting_deploy', task=None, detail='', at=T0)
+        w.file.write_text(json.dumps(doc))
+        before = w.file.read_bytes()
+        row = deploy_row(w)
+        check('DL11 legacy closed wait read without migration', row.get('why') == 'awaiting_deploy'
+              and row.get('remediation', {}).get('task') is None and w.file.read_bytes() == before)
+        fact = row.get('report_fact', {})
+        deploy_refused(w, 'DL11 legacy wait must link task first', expect=fact)
+        linked = deployment(w)
+        result = deployment(w, 'deploy_resolved', expect=fact)
+        check('DL11 explicit link then resolution succeeds', linked.returncode == 0 and result.returncode == 0 and w.why() == [])
+
+
+def lifecycle():
+    for case in (deploy_closure, deploy_after_scan, deploy_guards, deploy_rediscovery,
+                 deploy_busy, deploy_retired, deploy_withdrawn, deploy_legacy):
+        case()
+
+
 def block(text, marker):
     return text.split('<!-- '+marker+' -->',1)[1].split('```bash',1)[1].split('```',1)[0]
 
@@ -350,6 +557,36 @@ printf '\nRESULT=%s|%s|%s|%s\n' "${state_ready:-false}" "${state_failure:-}" "${
         check('P7 deployment carried by main fire and missing owner explicit',
               '배포 대기' in text and 'remediation.task' in text and '담당 미확정' in text
               and '배포 대기가 하나라도' in text)
+
+
+def consumers():
+    # Presence checks certify wording only, not the routine's rendering or delivery.
+    for name in ('SKILL.md', 'ARCHITECTURE.md', 'ARCHITECTURE.ko.md'):
+        text = (repo/name).read_text()
+        check('DL13-static '+name, all(term in text for term in ('deploy_resolved', 'closed_reason', 'awaiting_deploy')))
+    with world() as w:
+        help_result = run([str(repo/'bin/safedeps'), 'help', 'watch'], w.env, w.base)
+        check('DL13-help actual CLI advertises owner resolution', help_result.returncode == 0
+              and all(term in help_result.stdout for term in ('deploy_resolved', 'closed_reason', '--expect REPORT_FACT')))
+    for name in ('routine', 'prompt', 'followup'):
+        if getattr(a, name):
+            text = Path(getattr(a, name)).read_text()
+            check('DL13-static '+name, all(term in text for term in ('deploy_resolved', 'closed_reason', 'awaiting_deploy')))
+    if a.prompt and a.followup:
+        check('DL13-static followup uses same body', Path(a.followup).read_text().split('\n', 1)[1] == Path(a.prompt).read_text())
+    if a.routine:
+        text = Path(a.routine).read_text()
+        selector = re.search(r"`(jq -c '\.findings \| to_entries\[\].*?' <<< \"\$state_json\")`", text)
+        with world() as w:
+            w.scan('fixable'); deployment(w, 'dispatched')
+            w.lock('2.0.0'); w.scan('fixable')
+            # Execute the Procedure's own selector against a pinned fixture;
+            # this checks collection, not dispatch-status classification or send.
+            result = run(['bash'], dict(w.env, WATCH_TEST_STATE=w.file.read_text()), w.base,
+                         'state_json="$WATCH_TEST_STATE"\n' + (selector[1] if selector else 'exit 9'))
+            rows = [json.loads(line) for line in result.stdout.splitlines()] if result.returncode == 0 else []
+            check('DL13-exec Procedure collects closed dispatched record', result.returncode == 0 and len(rows) == 1
+                  and rows[0].get('task') == 'fixture-task' and rows[0].get('closed_reason') == 'seen_fixed')
 
 
 for group in a.only.split(','):

@@ -1567,8 +1567,23 @@ safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]
                         row the owner judged, as status printed it. If the
                         finding's report is another one now, nothing is
                         written and the error prints it.
-  awaiting_deploy remains an owner row for deployment ownership and the next
-  action; it is not a failure. Record those facts in remediation detail/task.
+  remediation --finding KEY --state deploy_resolved --task T --detail TEXT
+              --expect REPORT_FACT
+                        The owner's record that an awaiting_deploy wait is
+                        over: the linked task/plan T shows the fix deployed,
+                        or no deployment needed. TEXT says which and cites
+                        it. The finding must be closed, its remediation
+                        awaiting_deploy with the same task T, and
+                        REPORT_FACT the report_fact of its awaiting_owner
+                        row as status printed it. Otherwise nothing is
+                        written and the error prints the current record.
+  A local merge is recorded as awaiting_deploy, also on a finding a scan
+  already closed. It is not a failure. Record deployment ownership and the
+  next action in remediation detail/task. The row stays in awaiting_owner,
+  with closed_reason, through a local closure, the event's ack and later
+  scans, until the owner records deploy_resolved. A local closure is not a
+  deployment, and no scan or ack records one. A scan that sees the finding
+  live again returns it unassigned, without the old remediation.
   fixed_pending_rescan records scan order under the lock. Only a subsequent
   measurement of that finding can return rescan_still_live. Legacy records
   without the boundary return rescan_order_unknown for the owner to review.
