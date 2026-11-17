@@ -37,7 +37,7 @@ def ev_unknown: "unknown";
 # records a decision, not a repair.
 def remediation_states: ["dispatched", "blocked", "fix_failed", "awaiting_deploy", "fixed_pending_rescan", "report_acknowledged"];
 # A worker is on it: the finding does not wait for the owner.
-def remediation_in_progress: ["dispatched", "awaiting_deploy", "fixed_pending_rescan"];
+def remediation_in_progress: ["dispatched", "fixed_pending_rescan"];
 # Finding states that report and that nobody can fix by a repair here: no fixed
 # version, or a runtime whose next step is an install decision.
 def report_only_states: [st_no_fix, rt_update_available, rt_pre_announced];
@@ -67,14 +67,13 @@ def day_of($ts): ($ts // "" | .[0:10]);
 # versions as a set, the advisory and its record ids, its URL and date, the
 # reason, the vendor's latest and the KEV answer. first_seen, last_seen and
 # the other times a scan stamps are not in it, so a scan that only saw the
-# finding again leaves it as it was. kev reads true or null: not listed (false)
-# and a catalog the scan could not read (null, with a kev_unavailable error of
-# that scan) are one value here, so a listing reopens a judgment and an outage
-# of the catalog does not.
+# finding again leaves it as it was. KEV preserves the producer's three answers:
+# listed (true), not listed (false), and unknown (null). An outage or recovery
+# changes the report just as a listing does; the scan's errors remain separate.
 def report_fact:
   {state, fixed: ((.fixed // []) | unique), advisory: (.advisory // null), ids: ((.ids // []) | unique),
    advisory_url: (.advisory_url // null), advisory_date: (.advisory_date // null),
-   reason: (.reason // null), latest: (.latest // null), kev: (.kev // null)};
+   reason: (.reason // null), latest: (.latest // null), kev: .kev};
 
 # The shape of a report_fact handed back by the owner (--expect): every key and
 # no other, each of the type the producers write.
@@ -93,6 +92,7 @@ def is_report_fact:
 # generation bump (publish does that).
 def merge_scan($prior; $m):
   ($m.now) as $now
+  | (($prior.scan_generation // 0) + 1) as $scan_generation
   | ($m.scope.kind) as $kind
   | ($m.scope.root // null) as $only
   # A finding is in this run's reach when the run is full, or when it is a root
@@ -129,7 +129,7 @@ def merge_scan($prior; $m):
           .[$k] = ($f + {state: st_closed, closed_reason: closed_retired, retired_evidence: $retired[$f.root],
                          closed_at: $now, previous_state: $f.state, stale_measurement: false})
         elif $current[$k] != null then
-          ($current[$k]) as $c
+          ($current[$k] + {last_seen_scan_generation: $scan_generation}) as $c
           | if $c.state == st_closed then
               (if ($f | is_closed) then .[$k] = $f
                else .[$k] = ($f + $c + {first_seen: $f.first_seen, last_seen: $now, closed_at: $now,
@@ -153,7 +153,8 @@ def merge_scan($prior; $m):
   | (reduce ($current | to_entries[]) as $e ($carried;
       if .[$e.key] != null then .
       elif $e.value.state == st_closed then .
-      else .[$e.key] = ($e.value + {first_seen: $now, last_seen: $now, stale_measurement: false, remediation: null})
+      else .[$e.key] = ($e.value + {first_seen: $now, last_seen: $now, last_seen_scan_generation: $scan_generation,
+                                   stale_measurement: false, remediation: null})
       end))
     as $findings
   # What changed between the two documents.
@@ -192,7 +193,7 @@ def merge_scan($prior; $m):
     as $streaks
   | ($prior // empty_state)
   + {schema: watch_schema,
-     scan_generation: (($prior.scan_generation // 0) + 1),
+     scan_generation: $scan_generation,
      last_scan: $m.scan,
      # The last full scan, which a root scan does not replace: its times, its
      # errors and the runtime that ran it. Null until the first full scan.
@@ -278,7 +279,9 @@ def set_remediation($key; $state; $detail; $task; $expect; $now):
     elif (remediation_states | index($state)) == null then error("not a remediation state: " + $state)
     elif $state != "report_acknowledged" then
       (if $expect != "" then error("--expect goes with --state report_acknowledged only")
-       else .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now} end)
+       else (.scan_generation // 0) as $sg
+         | .findings[$key].remediation = ({state: $state, detail: $detail, task: $task, at: $now}
+             + (if $state == "fixed_pending_rescan" then {scan_generation: $sg} else {} end)) end)
     elif ($f | is_closed) then error("report_acknowledged needs a live finding; this one is closed: " + $key)
     elif (report_only_states | index($f.state)) == null then
       error("report_acknowledged is for a finding that only reports (" + (report_only_states | join(", ")) + "), not " + ($f.state | tostring) + ": " + $key)
@@ -299,11 +302,14 @@ def set_remediation($key; $state; $detail; $task; $expect; $now):
 # The live findings that wait for the owner's judgment, with why: unassigned
 # (no remediation), blocked or fix_failed (work that stopped),
 # acknowledged_other_state (a report_acknowledged made on another report),
-# rescan_still_live (fixed_pending_rescan, and a scan that started after it was
-# written still saw the finding), or unrecognized_remediation (a value this
-# definition does not know). A finding a worker is on and a report_acknowledged
-# that still holds do not wait. A scan that did not measure the finding does
-# not move last_seen, so an unmeasured finding is not taken for one seen.
+# rescan_still_live (a measurement after fixed_pending_rescan still saw it),
+# rescan_order_unknown (an old record without a scan boundary), awaiting_deploy
+# (a nonfailure needing deployment ownership), or unrecognized_remediation.
+# The same lock orders scans and remediation writes. A record captures the
+# document's scan_generation; only seeing this finding advances its own
+# last_seen_scan_generation. Neither wall time nor an unrelated scan proves
+# that the finding was measured after the record. Legacy records cannot prove
+# this order: the owner records the boundary again before a new scan.
 # Each row carries the finding's report_fact, which the owner hands back with
 # report_acknowledged.
 def awaiting_owner:
@@ -315,7 +321,11 @@ def awaiting_owner:
       elif $r == "blocked" or $r == "fix_failed" then $r
       elif $r == "report_acknowledged" then
         (if $f.remediation.seen == ($f | report_fact) then null else "acknowledged_other_state" end)
-      elif $r == "fixed_pending_rescan" and (($f.last_seen // "") > ($f.remediation.at // "")) then "rescan_still_live"
+      elif $r == "awaiting_deploy" then "awaiting_deploy"
+      elif $r == "fixed_pending_rescan" then
+        (if ($f.remediation.scan_generation | type) != "number" then "rescan_order_unknown"
+         elif ($f.last_seen_scan_generation // 0) > $f.remediation.scan_generation then "rescan_still_live"
+         else null end)
       elif (remediation_in_progress | index($r)) != null then null
       else "unrecognized_remediation" end) as $why
    | select($why != null)

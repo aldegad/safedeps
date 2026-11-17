@@ -117,17 +117,17 @@ Rules:
 - Never read a network mount or an excluded prefix to fill a gap. It is measured only on the host that owns it.
 - As a consumer: `claim --consumer ID`, then dispatch, then `ack --event ID --consumer ID` with `--task T` or `--unknown`. Never re-send by time.
 - As a consumer, read `last_full_scan` and `awaiting_owner` from `watch status` by name. Do not rebuild either from `state.json`. An `--unknown` ack does not take a finding out of `awaiting_owner`.
-- `report_acknowledged` is the owner's judgment of a finding that only reports: `no_fix_available`, or a runtime's `update_available` or `pre_announced`. Only the owner records it, with the judgment in `--detail` and, in `--expect`, the `report_fact` of the row they judged. If the finding's report is another one by then, nothing is written. It is not a repair. A scan that changes the report later puts the finding back in `awaiting_owner`.
+- `report_acknowledged` is the owner's judgment of a finding that only reports: `no_fix_available`, or a runtime's `update_available` or `pre_announced`. Only the owner records it, with the judgment in `--detail` and, in `--expect`, the `report_fact` of the row they judged. If the finding's report is another one by then, nothing is written. It is not a repair. A scan that changes the report later puts the finding back in `awaiting_owner`. KEV true (listed), false (not listed) and null (unknown) are distinct; an outage and recovery each require a new judgment.
 
 When you are handed a watch finding to repair:
 
 - Work in a fresh worktree from the project's main branch. If main is dirty or another worker is already in that project, record `blocked` and coordinate.
 - Run `safedeps check <eco> <pkg>@<fixed>` first, then go through the normal install gates. Raise the range of a direct dependency. Add an `overrides` entry for a transitive one.
 - Run the project's tests and `safedeps watch scan --root <root>` before and after.
-- Pass: merge locally only. Push and deploy follow that project's existing authority. A deploy left to its owner is `awaiting_deploy`.
+- Pass: merge locally only. Push and deploy follow that project's existing authority. A deploy left to its owner is `awaiting_deploy`. In `--detail` and the linked task/plan, record the deployment owner, authority and next action; say explicitly which are unknown. This nonfailure row remains in `awaiting_owner` for the owner to resolve, without automatic assignment or deployment.
 - Fail: keep the branch and the logs, leave main untouched, record `fix_failed`.
 - No fixed version: the finding is `no_fix_available` and is looked at again every day. Never use a made-up version or an arbitrary downgrade. `SAFEDEPS_ACCEPT_RISK` is a person's decision and is not a repair.
-- Record progress with `safedeps watch remediation --finding KEY --state S [--detail TEXT] [--task T]`, where S is `dispatched`, `blocked`, `fix_failed`, `awaiting_deploy` or `fixed_pending_rescan`. It does not close the finding. The next scan that sees the fixed version does. After `fixed_pending_rescan`, a scan that still sees the finding puts it back in `awaiting_owner` as `rescan_still_live`. `report_acknowledged` is the owner's, not yours.
+- Record progress with `safedeps watch remediation --finding KEY --state S [--detail TEXT] [--task T]`, where S is `dispatched`, `blocked`, `fix_failed`, `awaiting_deploy` or `fixed_pending_rescan`. It does not close the finding. The next scan that sees the fixed version does. The record captures `scan_generation` under the lock. A later actual measurement of this finding advances its `last_seen_scan_generation` and puts it back in `awaiting_owner` as `rescan_still_live`. Wall time, unrelated roots and unmeasured scopes do not establish this order. A legacy record without the boundary appears as `rescan_order_unknown`; check the evidence, record the boundary again and request a new scan. `report_acknowledged` is the owner's, not yours.
 
 Options: `safedeps help watch`. How it works: [ARCHITECTURE.md, The daily watch](./ARCHITECTURE.md#the-daily-watch). Installing the agent: [`README.md`](./README.md#daily-watch-with-macos-alerts).
 

@@ -149,6 +149,11 @@ row() {
   if (( rc == 0 )); then pass "$1"; else bad "$1"; fi
 }
 
+# The owner contract uses offline provider functions and a controlled clock.
+# It does not use this battery's loopback server or operational state.
+row_owner_contract() { python3 "${ROOT_DIR}/scripts/test/watch-owner.py" "${ROOT_DIR}"; }
+row "owner report, deployment and measurement order contracts (offline)" row_owner_contract
+
 # ---- T0 clean, T1 advisory, T2 fixed: through the daily wrapper ----------------------
 row_timeline() {
   new_world; register a
@@ -716,7 +721,7 @@ row_report_only_npm() {
   [[ "$(aw "${lone}")" == '["unassigned"]' && "$(aw "${left}")" == '["unassigned"]' ]] || no "after unknown acks: lone $(aw "${lone}"), left $(aw "${left}")"
   fact=$(rf "${lone}")
   left_fact=$(rf "${left}")
-  [[ "$(jq -c '{state, fixed, kev}' <<< "${fact}")" == '{"state":"no_fix_available","fixed":[],"kev":null}' ]] || no "lone's report_fact: ${fact}"
+  [[ "$(jq -c '{state, fixed, kev}' <<< "${fact}")" == '{"state":"no_fix_available","fixed":[],"kev":false}' ]] || no "lone's report_fact: ${fact}"
   # A finding that can be fixed, a judgment without words, and one that does
   # not name the report it judged are refused.
   g=$(gen)
@@ -830,16 +835,15 @@ row_report_ack_lock() {
 }
 row "report_acknowledged while a scan holds the lock exits 75 and changes nothing; the same command again is kept by the next scan, and refused for a finding that scan listed in KEV" row_report_ack_lock
 
-# fixed_pending_rescan is the worker's word. A scan that started after it and
-# still sees the finding contradicts it, and the finding waits again;
-# awaiting_deploy does not. The scan waits for the next second: last_seen and
-# the record's time are both whole seconds.
+# fixed_pending_rescan captures the scan generation under the lock. Only a
+# later measurement of this finding contradicts it. awaiting_deploy remains
+# visible as nonfailure deployment work.
 row_rescan_still_live() {
   new_world; register a
   npm_lock "${d}/p/a" left@1.0.0 right@2.0.0
   fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-resc-resc-resc '' left 1.0.1)] | .osv[\"right@2.0.0\"] = [$(osv_record GHSA-depl-depl-depl '' right 2.0.1)]"
   scan_ok
-  local left right t0
+  local left right
   left=$(npm_findings | jq -r '.[] | select(.package == "left") | .key')
   right=$(npm_findings | jq -r '.[] | select(.package == "right") | .key')
   sd watch remediation --finding "${left}" --state fixed_pending_rescan --task kongkongi-fixture-3
@@ -847,18 +851,16 @@ row_rescan_still_live() {
   sd watch remediation --finding "${right}" --state awaiting_deploy --task kongkongi-fixture-4
   [[ "${rc}" == 0 ]] || no "awaiting_deploy exited ${rc}"
   sd watch status
-  [[ "$(aw "${left}")" == '[]' && "$(aw "${right}")" == '[]' ]] || no "before a scan: left $(aw "${left}"), right $(aw "${right}")"
-  t0=$(date -u +%s)
-  while [[ "$(date -u +%s)" == "${t0}" ]]; do sleep 0.1; done
+  [[ "$(aw "${left}")" == '[]' && "$(aw "${right}")" == '["awaiting_deploy"]' ]] || no "before a scan: left $(aw "${left}"), right $(aw "${right}")"
   scan_ok
   sd watch status
-  [[ "$(aw "${left}")" == '["rescan_still_live"]' && "$(aw "${right}")" == '[]' ]] || no "a scan that still sees both: left $(aw "${left}"), right $(aw "${right}")"
+  [[ "$(aw "${left}")" == '["rescan_still_live"]' && "$(aw "${right}")" == '["awaiting_deploy"]' ]] || no "a scan that still sees both: left $(aw "${left}"), right $(aw "${right}")"
   [[ "$(rf "${left}" | jq -c '{state, fixed}')" == '{"state":"open","fixed":["1.0.1"]}' ]] || no "left's row: $(rf "${left}")"
   npm_lock "${d}/p/a" left@1.0.1 right@2.0.0
   scan_ok
   st --arg k "${left}" '.findings[$k].state == "closed" and .findings[$k].closed_reason == "seen_fixed"' "left closed by the fixed lockfile" '.findings'
 }
-row "fixed_pending_rescan: a later scan that still sees the finding puts it back as rescan_still_live, and one that sees the fix closes it; awaiting_deploy still seen does not wait" row_rescan_still_live
+row "fixed_pending_rescan: a later scan that still sees the finding puts it back as rescan_still_live, and one that sees the fix closes it; awaiting_deploy stays visible without failure" row_rescan_still_live
 
 row_last_full_scan() {
   new_world; register a

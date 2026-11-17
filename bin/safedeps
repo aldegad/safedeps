@@ -1567,6 +1567,13 @@ safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]
                         row the owner judged, as status printed it. If the
                         finding's report is another one now, nothing is
                         written and the error prints it.
+  awaiting_deploy remains an owner row for deployment ownership and the next
+  action; it is not a failure. Record those facts in remediation detail/task.
+  fixed_pending_rescan records scan order under the lock. Only a subsequent
+  measurement of that finding can return rescan_still_live. Legacy records
+  without the boundary return rescan_order_unknown for the owner to review.
+  report_fact keeps KEV true (listed), false (not listed) and null (unknown).
+
   retire --root DIR --evidence TEXT
                         The owner's record that a root is gone for good.
 
