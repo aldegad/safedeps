@@ -44,9 +44,15 @@ fn osv_answer(v:Value)->Option<Value>{(matches!(v,Value::Obj(_))&&matches!(jv::f
 fn page_token(v:&Value)->Result<Option<W>,()>{
     match jv::field(v,"next_page_token"){Ok(Value::Null)=>Ok(None),Ok(Value::Str(t)) if !t.is_empty()=>Ok(Some(t.clone())),_=>Err(())}
 }
-/// The record GET /v1/vulns/<id> answers: an object that names that id. The
-/// CLI reads it by the same rule (osv_record).
-fn osv_record(v:Value,id:&[u8])->Option<Value>{matches!(jv::field(&v,"id"),Ok(Value::Str(s)) if s.as_slice()==id).then_some(v)}
+/// The record GET /v1/vulns/<id> answers: an object that names that id and,
+/// when the answer that named it gave a `modified`, carries that `modified`.
+/// A record another `modified` names is another version of the advisory, not
+/// the one the answer named. The CLI reads it by the same rule (osv_record).
+fn osv_record(v:Value,id:&[u8],modified:&[u8])->Option<Value>{
+    let named=matches!(jv::field(&v,"id"),Ok(Value::Str(s)) if s.as_slice()==id);
+    let current=modified.is_empty()||matches!(jv::field(&v,"modified"),Ok(Value::Str(s)) if s.as_slice()==modified);
+    (named&&current).then_some(v)
+}
 /// jq's @uri, which the CLI puts an id in its record URL with.
 fn uri(s:&[u8])->String{
     let mut out=String::new();
@@ -285,21 +291,28 @@ impl Providers{
     }
     /// One advisory record, as the CLI reads it (safedeps_osv_vuln_detail):
     /// GET the batch URL with `querybatch` replaced by `vulns/<id>`, so the
-    /// record comes from the source whose answer named it. A record kept under
-    /// the id and the `modified` the answer gave is read again under that
-    /// pair; with no `modified` nothing names one record, so it is asked and
-    /// not kept.
+    /// record comes from the source whose answer named it. A record is the one
+    /// the answer named only when it carries the id and the `modified` the
+    /// answer gave (osv_record); a record OSV serves with another `modified` is
+    /// not used and not kept, and the read fails. A record kept under that
+    /// pair is read again under it; a kept file that is not that record is no
+    /// answer, OSV is asked again, and the record it gives replaces the file.
+    /// With no `modified` nothing names one record, so it is asked and not
+    /// kept.
     fn record(&mut self,url:&str,id:&[u8],modified:&[u8])->Option<Value>{
         let path=osv_record_path(&self.cache,id,modified);
         if !modified.is_empty(){
-            if let Some(record)=jv::read_one_object(&path).and_then(|v|osv_record(v,id)){return Some(record)}
+            if let Some(record)=jv::read_one_object(&path).and_then(|v|osv_record(v,id,modified)){return Some(record)}
+            if path.exists(){
+                self.log(b"WARN",&cat(&[b"OSV record kept for id=",id,b" modified=",modified,b" is not that record; asking OSV again"]));
+            }
         }
         let Some(base)=url.strip_suffix("/querybatch")else{
             self.log(b"ERROR",&cat(&[b"OSV record URL cannot be derived from ",url.as_bytes(),b" id=",id]));return None
         };
         let Some(tmp)=sh::mktemp(&cat(&[sh::bytes(&self.cache),b"/osv-vuln/.record."]))else{return None};
         let status=Self::curl(&format!("{}/vulns/{}",base,uri(id)),&tmp,None,RECORD_SECONDS,self.until);
-        let record=if status==b"200"{jv::read_one_object(&tmp).and_then(|v|osv_record(v,id))}else{None};
+        let record=if status==b"200"{jv::read_one_object(&tmp).and_then(|v|osv_record(v,id,modified))}else{None};
         let kept=match &record{
             Some(_) if !modified.is_empty()=>fs::rename(&tmp,&path).is_ok(),
             _=>{sh::rm_f(&tmp);true},
@@ -429,16 +442,24 @@ fn osv_answers_match_cli() {
     // The record of one id: one object that names it, and nothing else.
     let record_head = "safedeps_osv_vuln_answer() {";
     let record_body = cli.split_once(record_head).unwrap().1.split_once("\n}").unwrap().0;
-    let record_script = format!("{rule}\n{record_head}{record_body}\n}}\nsafedeps_osv_vuln_answer \"$1\" GHSA-x >/dev/null");
-    let records = [(r#"{"id":"GHSA-x"}"#, true), (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, true), ("  {\"id\":\"GHSA-x\"}\n", true),
-        (r#"{"id":"GHSA-y"}"#, false), (r#"{"id":"ghsa-x"}"#, false), (r#"{"id":1}"#, false), (r#"{"id":null}"#, false), ("{}", false), ("[]", false),
-        (r#"[{"id":"GHSA-x"}]"#, false), ("null", false), ("", false), ("not json", false), (r#"{"id":"GHSA-x"} {"id":"GHSA-x"}"#, false), (r#"{"id":"GHSA-x"} null"#, false)];
-    for (body, record) in records {
+    // With a `modified` from the answer, the record must carry the same one:
+    // another, none, or one that is not a string is another version of it.
+    let record_script = format!("{rule}\n{record_head}{record_body}\n}}\nsafedeps_osv_vuln_answer \"$1\" GHSA-x \"$2\" >/dev/null");
+    let records = [(r#"{"id":"GHSA-x"}"#, "", true), (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, "", true), ("  {\"id\":\"GHSA-x\"}\n", "", true),
+        (r#"{"id":"GHSA-y"}"#, "", false), (r#"{"id":"ghsa-x"}"#, "", false), (r#"{"id":1}"#, "", false), (r#"{"id":null}"#, "", false), ("{}", "", false), ("[]", "", false),
+        (r#"[{"id":"GHSA-x"}]"#, "", false), ("null", "", false), ("", "", false), ("not json", "", false), (r#"{"id":"GHSA-x"} {"id":"GHSA-x"}"#, "", false), (r#"{"id":"GHSA-x"} null"#, "", false),
+        (r#"{"id":"GHSA-x","modified":"2026-11-17T16:00:03Z"}"#, "2026-11-17T16:00:03Z", true),
+        (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, "m", true),
+        (r#"{"id":"GHSA-x","modified":"2026-11-10T00:00:00Z"}"#, "2026-11-17T16:00:03Z", false),
+        (r#"{"id":"GHSA-x","modified":"2026-11-17T16:00:03.000Z"}"#, "2026-11-17T16:00:03Z", false),
+        (r#"{"id":"GHSA-x"}"#, "m", false), (r#"{"id":"GHSA-x","modified":null}"#, "m", false), (r#"{"id":"GHSA-x","modified":1}"#, "1", false),
+        (r#"{"id":"GHSA-x","modified":"M"}"#, "m", false), (r#"{"id":"GHSA-y","modified":"m"}"#, "m", false), (r#"{"id":"GHSA-x","modified":"n"}"#, "", true)];
+    for (body, modified, record) in records {
         fs::write(&file, body).unwrap();
-        assert_eq!(jv::read_one_object(&file).and_then(|v| osv_record(v, b"GHSA-x")).is_some(), record, "the core's record on {body:?}");
+        assert_eq!(jv::read_one_object(&file).and_then(|v| osv_record(v, b"GHSA-x", modified.as_bytes())).is_some(), record, "the core's record on {body:?} under {modified:?}");
         let cli = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .args(["-c", &record_script, "record-contract"]).arg(&file).status().unwrap();
-        assert_eq!(cli.success(), record, "the CLI's record on {body:?}");
+            .args(["-c", &record_script, "record-contract"]).arg(&file).arg(modified).status().unwrap();
+        assert_eq!(cli.success(), record, "the CLI's record on {body:?} under {modified:?}");
     }
     let _ = fs::remove_dir_all(&dir);
 }

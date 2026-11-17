@@ -722,6 +722,56 @@ record_alias_on_kev() {
 row "npm: a KEV listing named only by the record's alias blocks" record_alias_on_kev
 row "npm: an advisory whose record OSV does not have approves nothing" paged_no_answer npm fixture-record-missing@1.0.0 'OSV record read failed id=GHSA-fixt-gone-0000 status=404'
 row "npm: an advisory whose record is another advisory's approves nothing" paged_no_answer npm fixture-record-other@1.0.0 'OSV record read failed id=GHSA-fixt-othr-0000 status=200'
+# A record is the one querybatch named only when its id and its `modified`
+# both match. A record OSV serves at another `modified` is no answer: it is not
+# used and not kept. A file kept under the pair that holds another record is
+# not that record either: it is asked for again, left as it was, and a live
+# record that matches replaces it.
+stale_id=GHSA-fixt-stal-0000
+stale_current=2026-01-02T00:00:00Z
+serve_stale() {
+  jq --argjson on "$1" '.serve_stale_record = $on' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+}
+stale_key() { SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv-vuln "$1" "$2" ""' _ "${stale_id}" "${stale_current}"; }
+stale_file() { printf '%s/cache/osv-vuln/%s.json' "${home}" "$(stale_key)"; }
+stale_record_not_used() {
+  trap 'serve_stale false' EXIT
+  fresh_home
+  serve_stale true
+  check_in npm fixture-stale-record@1.0.0
+  unavailable
+  grep -q "OSV record read failed id=${stale_id} status=200" "${home}/advisory.log" || no "advisory.log does not say the record was not read"
+  [[ -z "$(find "${home}/cache/osv-vuln" -type f 2>/dev/null)" ]] || no "the record at another modified was kept: $(find "${home}/cache/osv-vuln" -type f)"
+}
+row "npm: a record OSV serves at another modified approves nothing and is not kept" stale_record_not_used
+stale_kept_then_current() {
+  trap 'serve_stale false' EXIT
+  fresh_home
+  mkdir -p "${home}/cache/osv-vuln"
+  printf '{"id":"%s","modified":"2026-01-01T00:00:00Z","aliases":["%s"]}' "${stale_id}" "${stale_id}" > "$(stale_file)"
+  cp "$(stale_file)" "${home}/kept.before"
+  serve_stale true
+  check_in npm fixture-stale-record@1.0.0
+  unavailable
+  grep -q "WARN OSV record kept for id=${stale_id} modified=${stale_current} is not that record; asking OSV again" "${home}/advisory.log" \
+    || no "advisory.log does not say the kept record is not that record: $(cat "${home}/advisory.log")"
+  grep -q "OSV record read failed id=${stale_id} status=200" "${home}/advisory.log" || no "advisory.log does not say the live record was not read"
+  cmp -s "$(stale_file)" "${home}/kept.before" || no "the kept file was changed by a record that is not the one named"
+  serve_stale false
+  check_in npm fixture-stale-record@1.0.0
+  hard_blocked
+  jq -e --arg m "${stale_current}" '.modified == $m and .aliases == ["CVE-2026-9999"]' "$(stale_file)" >/dev/null \
+    || no "the matching live record did not replace the kept file: $(cat "$(stale_file)")"
+}
+row "npm: a kept file that is not the named record is asked again, and the matching record replaces it" stale_kept_then_current
+stale_record_control() {
+  fresh_home
+  check_in npm fixture-stale-record@1.0.0
+  hard_blocked
+  jq -e --arg m "${stale_current}" '.modified == $m' "$(stale_file)" >/dev/null || no "the matching record is not kept under its pair"
+  ! grep -q 'is not that record' "${home}/advisory.log" || no "a fresh home warned about a kept record"
+}
+row "npm: the record querybatch named, KEV-listed by its alias, blocks and is kept" stale_record_control
 record_url_not_derived() {
   fresh_home
   check_in npm fixture-unpatched@1.0.0 SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL}?mirror=1"
@@ -1152,7 +1202,7 @@ row "non-npm: an OSV query that jq printed and failed on is not sent" fails_as u
 row "npm: the count of OSV batch queries still asked is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '[.[] | select(.ended | not)] | length'
 row "npm: the count of OSV batch results is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '.results | length'
 row "npm: the advisories an OSV batch named are read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 'unique_by(.[0])'
-row "npm: an OSV record that jq printed and failed on is no record" fails_as unavailable npm fixture-unpatched@1.0.0 'select(length == 1 and (.[0] | osv_record($id)))'
+row "npm: an OSV record that jq printed and failed on is no record" fails_as unavailable npm fixture-unpatched@1.0.0 'select(length == 1 and (.[0] | osv_record($id; $modified)))'
 row "non-npm: the next page's query that jq printed and failed on is not sent" fails_as unavailable pypi fixture-clean@1.0.0 'if $t == null then empty else $query + {page_token: $t} end'
 row "non-npm: the pages of an OSV answer that jq joined and failed on are no answer" fails_as unavailable pypi fixture-clean@1.0.0 'map(.vulns // []) | add // []'
 row "npm: a curl that printed 200 and failed is not an OSV batch answer" fails_as unavailable npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/querybatch

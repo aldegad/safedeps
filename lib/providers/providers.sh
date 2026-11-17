@@ -213,11 +213,15 @@ safedeps_cache_is_fresh() {
 #                    empty when it goes on, and an error for anything else. A
 #                    page with a token is part of an answer, never the whole of
 #                    one.
-#   osv_record($id)  the record GET /v1/vulns/<id> answers: an object that
-#                    names that id.
+#   osv_record($id; $modified)
+#                    the record GET /v1/vulns/<id> answers: an object that
+#                    names that id and, when the answer that named it gave a
+#                    `modified`, carries that `modified`. A record another
+#                    `modified` names is another version of the advisory,
+#                    not the one the answer named.
 # The core reads by the same rules (osv_answer, page_token and record in
 # rust/src/post/providers.rs), and `osv_answers_match_cli` holds them together.
-SAFEDEPS_OSV_JQ='def osv_answer: type == "object" and (.vulns | type == "array" or . == null); def osv_page_token: .next_page_token as $t | if $t == null then null elif ($t | type) == "string" and ($t | length) > 0 then $t else error("not a page token") end; def osv_record($id): type == "object" and .id == $id;'
+SAFEDEPS_OSV_JQ='def osv_answer: type == "object" and (.vulns | type == "array" or . == null); def osv_page_token: .next_page_token as $t | if $t == null then null elif ($t | type) == "string" and ($t | length) > 0 then $t else error("not a page token") end; def osv_record($id; $modified): type == "object" and .id == $id and ($modified == "" or .modified == $modified);'
 
 # The answer this prints is the one the rule read, and it is the only copy a
 # verdict reads: the file may hold something else by the time anything opens it
@@ -586,12 +590,17 @@ safedeps_osv_query_batch() {
 # /querybatch has no record URL, and that is a failed read.
 #
 # OSV changes a record's `modified` whenever it changes the record, so the id
-# and the MODIFIED the answer gave name one record. A record read under that
-# pair is kept in cache/osv-vuln and read again under the same pair. Without a
-# MODIFIED nothing names one record, so the record is asked of OSV and not kept.
+# and the MODIFIED the answer gave name one record, and a record is that record
+# only when it carries both (osv_record). A record OSV serves with another
+# `modified` is not an answer: it is not used and not kept, and the read
+# fails. A record read under that pair is kept in cache/osv-vuln and read again
+# under the same pair; a kept file that is not that record is no answer, OSV is
+# asked again, and the record it gives replaces the file. Without a MODIFIED
+# nothing names one record, so the record is asked of OSV and not kept.
 # Prints the record; returns 1 when there is no record to print.
+#   safedeps_osv_vuln_answer FILE ID [MODIFIED]
 safedeps_osv_vuln_answer() {
-  jq -ces --arg id "$2" "${SAFEDEPS_OSV_JQ}"'select(length == 1 and (.[0] | osv_record($id))) | .[0]' "$1" 2>/dev/null
+  jq -ces --arg id "$2" --arg modified "${3:-}" "${SAFEDEPS_OSV_JQ}"'select(length == 1 and (.[0] | osv_record($id; $modified))) | .[0]' "$1" 2>/dev/null
 }
 
 safedeps_osv_vuln_detail() {
@@ -609,16 +618,21 @@ safedeps_osv_vuln_detail() {
   cache_key=$(safedeps_cache_key "osv-vuln" "${id}" "${modified}" "") || return 1
   cache_path="${SAFEDEPS_CACHE_DIR}/osv-vuln/${cache_key}.json"
 
-  if [[ -n "${modified}" ]] && answer=$(safedeps_osv_vuln_answer "${cache_path}" "${id}"); then
-    printf '%s\n' "${answer}"
-    return 0
+  if [[ -n "${modified}" ]]; then
+    if answer=$(safedeps_osv_vuln_answer "${cache_path}" "${id}" "${modified}"); then
+      printf '%s\n' "${answer}"
+      return 0
+    fi
+    if [[ -e "${cache_path}" ]]; then
+      safedeps_provider_log "WARN" "OSV record kept for id=${id} modified=${modified} is not that record; asking OSV again"
+    fi
   fi
 
   safedeps_require_http_client || return 1
   response_file=$(safedeps_cache_response_temp "${cache_path}") || return 1
   http_status=$(curl -fsS --max-time 15 -o "${response_file}" -w '%{http_code}' \
     "${base}/vulns/$(safedeps_json_uri_escape "${id}")" 2>/dev/null) || http_status="${http_status:-none} exit $?"
-  if [[ "${http_status}" == "200" ]] && answer=$(safedeps_osv_vuln_answer "${response_file}" "${id}") \
+  if [[ "${http_status}" == "200" ]] && answer=$(safedeps_osv_vuln_answer "${response_file}" "${id}" "${modified}") \
     && if [[ -n "${modified}" ]]; then safedeps_cache_store "${response_file}" "${cache_path}"; else rm -f "${response_file}"; fi; then
     printf '%s\n' "${answer}"
     return 0

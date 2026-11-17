@@ -64,13 +64,30 @@ const kevAlias = osvVuln('GHSA-fixt-kev0-alas', null, ['CVE-2026-9999']);
 // Named by querybatch, with no record behind it, or with another record.
 const recordMissing = { id: 'GHSA-fixt-gone-0000', modified: MODIFIED };
 const recordOther = { id: 'GHSA-fixt-othr-0000', modified: MODIFIED };
+// An advisory OSV changed: querybatch names it at CURRENT, and its record at
+// CURRENT carries the KEV-listed CVE. With `serve_stale_record` set in the
+// state, /v1/vulns/<id> serves the version before the change instead: same
+// id, modified MODIFIED, no KEV alias. That record is not the one querybatch
+// named.
+const CURRENT = '2026-01-02T00:00:00Z';
+const staleId = 'GHSA-fixt-stal-0000';
+const staleNamed = { id: staleId, modified: CURRENT };
+function staleRecord() {
+  const before = state().serve_stale_record;
+  return {
+    id: staleId,
+    modified: before ? MODIFIED : CURRENT,
+    aliases: before ? [staleId] : ['CVE-2026-9999'],
+    affected: [{ package: { ecosystem: 'npm', name: 'fixture' }, ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }] }] }]
+  };
+}
 
 // The answer to one query. A package named for it below, or listed under the
 // state key of the same name, answers in pages as OSV does (`paged`: a first
 // page with next_page_token and the rest asked again with that token), with a
 // token that is not one (`bad_token`), with no end (`endless`), or names an
-// advisory whose record carries the KEV-listed CVE (`kev_alias`) or that has
-// no record (`record_missing`).
+// advisory whose record carries the KEV-listed CVE (`kev_alias`), that has
+// no record (`record_missing`), or that OSV changed (`stale_record`).
 function osvResponse(packageName, version, pageToken) {
   const key = `${packageName}@${version}`;
   const current = state();
@@ -89,6 +106,9 @@ function osvResponse(packageName, version, pageToken) {
   }
   if (packageName === 'fixture-record-other') {
     return { vulns: [recordOther] };
+  }
+  if (packageName === 'fixture-stale-record' || listed('stale_record')) {
+    return { vulns: [staleNamed] };
   }
   if ((packageName === 'fixture-paged' || listed('paged')) && pageToken !== 'page-2') {
     return { vulns: [], next_page_token: 'page-2' };
@@ -162,6 +182,10 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json');
     if (id === recordOther.id) {
       res.end(JSON.stringify(RECORDS.get('CVE-2026-1002') || osvVuln('CVE-2026-1002', null)));
+      return;
+    }
+    if (id === staleId) {
+      res.end(JSON.stringify(staleRecord()));
       return;
     }
     const record = RECORDS.get(id);

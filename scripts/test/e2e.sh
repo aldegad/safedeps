@@ -1388,6 +1388,70 @@ grep -q 'fixture-record-missing' "${tmp_root}/accept-no-record/package-lock.json
 grep -q 'ERROR OSV record read failed id=GHSA-fixt-gone-0000 status=404' "${SAFEDEPS_HOME}/advisory.log" || fail "the record says which record could not be read"
 pass "SAFEDEPS_ACCEPT_RISK keeps nothing when an advisory's OSV record cannot be read"
 
+# A record is the one querybatch named only when its id and its `modified`
+# both match. Here querybatch names GHSA-fixt-stal-0000 at its current
+# `modified`, whose record carries a KEV-listed alias, and the fixture serves
+# the record from before that change. That record is no answer: it is not
+# used and not kept, and the override keeps nothing. A file kept under the
+# pair that holds the earlier record is not the named record either: it is
+# asked for again and left as it was. Once OSV serves the current record, it
+# replaces the file, and its KEV listing is rolled back whatever the override
+# says.
+stale_kept="${SAFEDEPS_HOME}/cache/osv-vuln/$(bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv-vuln GHSA-fixt-stal-0000 2026-01-02T00:00:00Z ""').json"
+serve_stale() { jq --argjson on "$1" '.serve_stale_record = $on' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"; }
+log_count() { { grep -cF -- "$1" "${SAFEDEPS_HOME}/advisory.log" 2>/dev/null || true; } | tr -d ' '; }
+stale_install() {
+  accept_project "${tmp_root}/$1"
+  accept_before=$(accept_entries)
+  stale_pre=$(accept_payload "$1" "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci" "${tmp_root}/$1" | pre_hook)
+  [[ "$(hook_response_read decision "${stale_pre}")" == allow ]] || fail "$1: npm ci with the override runs"
+  payload=$(accept_payload "$1" "$(hook_response_read required-rewrite "${stale_pre}")" "${tmp_root}/$1")
+  accept_lock "${tmp_root}/$1" "${accept_extra}"',
+    "node_modules/fixture-stale-record": {"version": "1.0.0"}'
+  stale_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+}
+stale_read_failed='ERROR OSV record read failed id=GHSA-fixt-stal-0000 status=200'
+stale_warned='WARN OSV record kept for id=GHSA-fixt-stal-0000 modified=2026-01-02T00:00:00Z is not that record; asking OSV again'
+stale_failed_before=$(log_count "${stale_read_failed}")
+serve_stale true
+stale_install accept-stale-live
+serve_stale false
+grep -q 'suspicious dependency change detected. A rollback ran.' < "${stale_post}" || fail "a record at another modified rolls back under the override: $(cat "${stale_post}")"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${stale_post}" || fail "the rollback says OSV gave no whole answer"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${stale_post}" \
+  || fail "the rollback says the override does not cover a record that is not the one named"
+grep -q 'fixture-stale-record' "${tmp_root}/accept-stale-live/package-lock.json" && fail "the lockfile with the unanswered package is restored"
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a rollback for a record at another modified writes no accepted-risk entry"
+(( $(log_count "${stale_read_failed}") == stale_failed_before + 1 )) || fail "the record says the record OSV served is not the one named"
+[[ ! -e "${stale_kept}" ]] || fail "the record at another modified is not kept: $(cat "${stale_kept}")"
+mkdir -p "${stale_kept%/*}"
+printf '{"id":"GHSA-fixt-stal-0000","modified":"2026-01-01T00:00:00Z","aliases":["GHSA-fixt-stal-0000"]}' > "${stale_kept}"
+cp "${stale_kept}" "${tmp_root}/stale-kept.before"
+stale_failed_before=$(log_count "${stale_read_failed}")
+stale_warned_before=$(log_count "${stale_warned}")
+serve_stale true
+stale_install accept-stale-kept
+serve_stale false
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${stale_post}" \
+  || fail "a kept file that is not the named record, with OSV serving the same, rolls back under the override: $(cat "${stale_post}")"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${stale_post}" \
+  || fail "the rollback says the override does not cover a kept file that is not the named record"
+grep -q 'fixture-stale-record' "${tmp_root}/accept-stale-kept/package-lock.json" && fail "the lockfile with the unanswered package is restored"
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a rollback for a kept file that is not the named record writes no accepted-risk entry"
+(( $(log_count "${stale_warned}") == stale_warned_before + 1 )) || fail "the record says the kept file is not that record: $(grep 'OSV record' "${SAFEDEPS_HOME}/advisory.log" | tail -n 3)"
+(( $(log_count "${stale_read_failed}") == stale_failed_before + 1 )) || fail "the record says the live record is not the named one either"
+cmp -s "${stale_kept}" "${tmp_root}/stale-kept.before" || fail "a record that is not the named one does not replace the kept file: $(cat "${stale_kept}")"
+stale_install accept-stale-current
+grep -q 'KEV-blocked package(s): fixture-stale-record@1.0.0' < "${stale_post}" \
+  || fail "the named record, KEV-listed by its alias, is rolled back under the override: $(cat "${stale_post}")"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${stale_post}" \
+  || fail "the rollback says the override does not cover a KEV listing"
+grep -q 'fixture-stale-record' "${tmp_root}/accept-stale-current/package-lock.json" && fail "the KEV-listed lockfile is restored"
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a KEV rollback writes no accepted-risk entry"
+jq -e '.modified == "2026-01-02T00:00:00Z" and .aliases == ["CVE-2026-9999"]' "${stale_kept}" >/dev/null \
+  || fail "the named record replaces the kept file: $(cat "${stale_kept}")"
+pass "SAFEDEPS_ACCEPT_RISK keeps nothing on a record that is not the one OSV named, and the named record's KEV listing is rolled back"
+
 # On Codex the pre-guard cannot withhold install scripts, so the override does
 # not lift the ledger check for a spec; the post-install override still holds.
 accept_project "${tmp_root}/accept-codex"
