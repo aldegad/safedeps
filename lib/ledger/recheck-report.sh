@@ -11,9 +11,9 @@
 # shellcheck disable=SC2034,SC2016  # jq text, read by the files that source this one
 SAFEDEPS_RECHECK_REPORT_JQ='
 def recheck_command: "re-check";
-def recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery):
+def recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors):
   {command: recheck_command, checked: $checked, still_clean: $still_clean, newly_vulnerable: $newly_vulnerable,
-   kev_hit: $kev_hit, revoked: $revoked, suspected_forgery: $suspected_forgery};
+   kev_hit: $kev_hit, revoked: $revoked, suspected_forgery: $suspected_forgery, errors: $errors};
 def recheck_is_report: .command == recheck_command;
 def recheck_checked: .checked // 0;
 def recheck_still_clean: .still_clean // 0;
@@ -21,4 +21,7 @@ def recheck_newly_vulnerable: .newly_vulnerable // [];
 def recheck_kev_hit: .kev_hit // [];
 def recheck_revoked: .revoked // [];
 def recheck_suspected_forgery: .suspected_forgery // [];
+# An entry the run could not read or revoke. A report with any is printed in
+# full, and the run then exits non-zero.
+def recheck_errors: .errors // [];
 '

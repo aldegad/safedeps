@@ -277,6 +277,52 @@ row_current() {
 }
 row "a second build holds what the checkout holds and nothing older, and a third changes nothing" row_current
 
+# ---- what the runtime says it is ---------------------------------------------------------------
+# The installer writes .safedeps-runtime.json; the scan (safedeps_watch_runtime_info
+# in lib/watch/scan.sh) reads it, hashes the source checkout by the same rule
+# and calls the runtime stale when the checkout has moved on.
+runtime_info() { # RUNTIME
+  ( SAFEDEPS_REPO_DIR="$1" SAFEDEPS_VERSION=unused HOME="${home}"
+    # shellcheck source=../../lib/watch/scan.sh
+    source "$1/lib/watch/scan.sh"
+    safedeps_watch_runtime_info )
+}
+row_runtime_meta() {
+  local d co root meta info
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  root="${d}/out/agent"
+  stage_ok "${co}" "${root}" || return 1
+  meta="${root}/.safedeps-runtime.json"
+  [[ -f "${meta}" ]] || no "the runtime has no .safedeps-runtime.json"
+  [[ "$(jq -r '.version' "${meta}")" == "$(HOME="${home}" "${root}/bin/safedeps" --json version | jq -r '.version')" ]] || no "the recorded version is not the bin's"
+  [[ "$(jq -r '.source_repo' "${meta}")" == "$(cd -P "${co}" && pwd)" ]] || no "source_repo is not the checkout"
+  [[ "$(jq -r '.digest' "${meta}")" == "$( (source "${co}/lib/watch/scan.sh"; safedeps_watch_tree_digest "${co}") )" ]] \
+    || no "the installer and the scan hash the checkout differently"
+  info=$(runtime_info "${root}")
+  jq -e '.built == true and .stale == false' <<< "${info}" > /dev/null || no "a fresh runtime: ${info}"
+  printf '# moved on\n' >> "${co}/lib/watch/lock.sh"
+  info=$(runtime_info "${root}")
+  jq -e '.stale == true' <<< "${info}" > /dev/null || no "a runtime whose checkout moved on: ${info}"
+}
+row "the runtime records its version and the digest of its checkout, and reads stale once the checkout moves on" row_runtime_meta
+
+row_configure() {
+  local d co h cfg
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; mkdir -p "${h}"; cfg="${h}/.safedeps/watch/config.json"
+  HOME="${h}" node "${co}/${INSTALLER}" configure --population-command /bin/echo --population-arg x \
+    --exclude /fixture/forbidden --followup cargo_lock=p/one --tool-path /fixture/tools > /dev/null || no "configure exited $?"
+  HOME="${h}" node "${co}/${INSTALLER}" configure --followup uv_lock=p/two > /dev/null || no "a second configure exited $?"
+  jq -e '.population_command == ["/bin/echo", "x"] and .followups == {cargo_lock: "p/one", uv_lock: "p/two"}' "${cfg}" > /dev/null \
+    || no "a key no option named was not kept: $(cat "${cfg}")"
+  [[ "$(cat "${h}/.safedeps/watch/exclude")" == /fixture/forbidden ]] || no "the exclude file: $(cat "${h}/.safedeps/watch/exclude")"
+  printf '[]\n' > "${cfg}"
+  if HOME="${h}" node "${co}/${INSTALLER}" configure --followup a=b > /dev/null 2>&1; then no "a config that is not an object was overwritten"; fi
+  [[ "$(cat "${cfg}")" == "[]" ]] || no "the unreadable config changed"
+  if HOME="${h}" node "${co}/${INSTALLER}" configure --exclude relative/path > /dev/null 2>&1; then no "a relative exclude was taken"; fi
+}
+row "configure keeps what no option names, refuses a config that is not an object and a relative path" row_configure
+
 # ---- install: the same runtime, registered ---------------------------------------------------
 # `install` is macOS only and calls launchctl. A launchctl on PATH that only
 # records its arguments stands in; nothing is registered.
@@ -335,7 +381,9 @@ row_install_fails() {
   plist=$(plist_of "${h}")
   before_agent=$(digest "${agent}"); before_plist=$(cksum < "${plist}"); calls=$(wc -l < "${LC_LOG}" | tr -d ' ')
   ln -s closure.sh "${co}/lib/npm/zz-link.sh"
+  rm -f "${h}/.safedeps/watch/config.json"
   install_in "${co}" "${h}"
+  [[ ! -e "${h}/.safedeps/watch/config.json" ]] || no "a failed install wrote the watch config"
   (( LAST_RC != 0 )) || no "install exited 0 with a link in lib/" || return 1
   grep -qF "neither a file nor a directory" "${tmp_root}/last.err" || no "install did not say why: $(head -c 300 "${tmp_root}/last.err")"
   [[ "$(digest "${agent}")" == "${before_agent}" ]] || no "the registered agent's runtime changed"

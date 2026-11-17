@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Run safedeps re-check and notify only when attention is needed.
+# Run the daily safedeps watch scan (`safedeps watch scan`: the ledger re-check,
+# then every project root and runtime) and notify only when attention is needed.
+#
+# Each run appends one line to recheck.log with its status and the runtime it
+# ran (`runtime_version`, from the .safedeps-runtime.json the installer wrote),
+# then the scan's report. Exit 75 is a scan that found the watch lock held: no
+# result, retried by the next schedule, and the consumer's watchdog sees the age.
 
 set -euo pipefail
 
@@ -40,25 +46,47 @@ tmp_root="${TMPDIR:-/tmp}"
 mkdir -p "${tmp_root}"
 tmp_json=$(mktemp "${tmp_root%/}/safedeps-recheck.XXXXXX")
 tmp_err=$(mktemp "${tmp_root%/}/safedeps-recheck-err.XXXXXX")
+tmp_scan=$(mktemp "${tmp_root%/}/safedeps-watch.XXXXXX")
 cleanup() {
-  rm -f "${tmp_json}" "${tmp_err}"
+  rm -f "${tmp_json}" "${tmp_err}" "${tmp_scan}"
 }
 trap cleanup EXIT
 
 run_at=$(now_utc)
 status=0
+runtime_version=$(jq -r '.version // empty' "${ROOT_DIR}/.safedeps-runtime.json" 2>/dev/null) \
+  || runtime_version=""
+[[ -n "${runtime_version}" ]] || runtime_version="checkout"
 
+# The scan's report carries the ledger re-check's report as `.ledger`; the
+# fixture is a ledger report, put where the scan would put it.
 if [[ -n "${SAFEDEPS_RECHECK_FIXTURE_JSON:-}" ]]; then
-  cat "${SAFEDEPS_RECHECK_FIXTURE_JSON}" > "${tmp_json}"
+  jq -c '{command:"watch scan", exit:0, ledger:., errors:[], new_events:0, population:null, summary:null}' \
+    "${SAFEDEPS_RECHECK_FIXTURE_JSON}" > "${tmp_scan}"
 else
-  "${SAFEDEPS_BIN}" re-check --json > "${tmp_json}" 2> "${tmp_err}" || status=$?
+  "${SAFEDEPS_BIN}" --json watch scan > "${tmp_scan}" 2> "${tmp_err}" || status=$?
 fi
+jq -c '.ledger // empty' "${tmp_scan}" > "${tmp_json}" 2>/dev/null || : > "${tmp_json}"
 
 {
-  printf '[%s] safedeps re-check status=%s\n' "${run_at}" "${status}"
-  cat "${tmp_json}" 2>/dev/null || true
+  printf '[%s] safedeps re-check status=%s runtime_version=%s\n' "${run_at}" "${status}" "${runtime_version}"
+  cat "${tmp_scan}" 2>/dev/null || true
   printf '\n'
 } >> "${SAFEDEPS_RECHECK_LOG}"
+
+if [[ "${status}" -eq 75 ]]; then
+  append_alert "$(jq -cn --arg at "${run_at}" '{kind:"recheck_busy", at:$at, exit_status:75}')"
+  exit 75
+fi
+
+# A scan that published with errors (exit 1) still has a report: it is read
+# below, and the run then exits 1. No report is the failure it always was.
+if [[ "${status}" -eq 1 ]] && jq -e '.command == "watch scan" and (.generation | type) == "number"' "${tmp_scan}" >/dev/null 2>&1; then
+  scan_errors=1
+  status=0
+else
+  scan_errors=0
+fi
 
 if [[ -s "${tmp_err}" ]]; then
   {
@@ -142,3 +170,20 @@ if [[ "${newly_vulnerable}" -gt 0 || "${kev_hit}" -gt 0 || "${revoked}" -gt 0 ||
   fi
   notify "safedeps attention needed" "${message}. See ~/.safedeps/recheck-alerts.jsonl"
 fi
+
+# The watch's own news: new findings or transitions, a population that is not
+# fresh, errors the scan published with, a runtime that no longer matches its
+# checkout. Each says itself once; the consumer delivers the events.
+if [[ -z "${SAFEDEPS_RECHECK_FIXTURE_JSON:-}" ]]; then
+  watch_alert=$(jq -c --arg at "${run_at}" '
+    select((.new_events // 0) > 0 or ((.population.state // "fresh") != "fresh") or ((.errors // []) | length) > 0
+           or (.agent_runtime_stale == true))
+    | {kind:"watch_attention", at:$at, new_events, population:.population.state, errors:(.errors | length),
+       agent_runtime_stale:(.agent_runtime_stale == true), summary:.summary.line}' "${tmp_scan}" 2>/dev/null) || watch_alert=""
+  if [[ -n "${watch_alert}" ]]; then
+    append_alert "${watch_alert}"
+    notify "safedeps watch" "$(jq -r '"\(.new_events) new, population \(.population), \(.errors) errors" + (if .agent_runtime_stale then ", agent runtime stale" else "" end)' <<< "${watch_alert}")"
+  fi
+fi
+
+[[ "${scan_errors}" -eq 0 ]] || exit 1

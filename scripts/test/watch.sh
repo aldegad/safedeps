@@ -1,0 +1,691 @@
+#!/usr/bin/env bash
+# safedeps: the daily watch (`safedeps watch`, lib/watch/) and the re-check it
+# runs first.
+#
+# Every source the watch reads is a loopback fixture (scripts/test/lib/
+# watch-fixture.mjs) whose answers a row rewrites between scans, so one row is
+# a timeline: approved and clean at T0, an advisory published at T1, a lockfile
+# fixed at T2. Each row has its own SAFEDEPS_HOME, projects and population
+# command, and says what the published state.json holds after each step.
+#
+# The rows are the verification table of the plan that made the watch
+# (safedeps/advisory-watch-remediation-1118): what opens and closes a finding,
+# what may never read as clean, where the scan does not read, the ledger
+# re-check's error rows, and the lock, the atomic publish and the event
+# hand-off under overlap and interruption. A scan paused at a point
+# (SAFEDEPS_WATCH_PAUSE_AT) waits at most 60 seconds and then finishes on its
+# own, in a home under this battery's mktemp root: that bound is what reaps a
+# paused scan when the battery itself is killed. The fixture exits when its
+# parent goes.
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "${ROOT_DIR}"
+SD="${ROOT_DIR}/bin/safedeps"
+failures=0
+# SAFEDEPS_WATCH_ROWS=<regex of row functions> runs only those (development).
+only="${SAFEDEPS_WATCH_ROWS:-}"
+
+pass() { printf 'ok - %s\n' "$1"; }
+bad() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
+no() { printf '# %s\n' "$*" >&2; exit 1; }
+
+# Physical, so the roots the scan resolves are the paths written here.
+tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-watch.XXXXXX")
+tmp_root=$(cd -P "${tmp_root}" && pwd)
+bg_pids=()
+fixture_pid=""
+cleanup() {
+  local rc=$? pid
+  for pid in "${bg_pids[@]+${bg_pids[@]}}"; do
+    kill -9 "${pid}" 2>/dev/null || true
+  done
+  if [[ -n "${fixture_pid}" ]]; then
+    kill "${fixture_pid}" 2>/dev/null || true
+    wait "${fixture_pid}" 2>/dev/null || true
+  fi
+  if (( rc == 0 && failures == 0 )); then
+    chmod -R u+rwx "${tmp_root}" 2>/dev/null || true
+    rm -rf "${tmp_root}"
+  else
+    printf '# failed row artifacts: %s\n' "${tmp_root}" >&2
+  fi
+}
+trap cleanup EXIT
+
+# ---- the fixture -------------------------------------------------------------------
+fx_state="${tmp_root}/fixture-state.json"
+fx_log="${tmp_root}/fixture-requests.jsonl"
+BASE_STATE='{"osv":{},"kev":[],"openjdk":[],"adoptium":{},"down":[],"delay_ms":0}'
+printf '%s\n' "${BASE_STATE}" > "${fx_state}"
+: > "${fx_log}"
+node scripts/test/lib/watch-fixture.mjs "${tmp_root}/fixture-port" "${fx_state}" "${fx_log}" &
+fixture_pid=$!
+for _ in $(seq 100); do [[ -s "${tmp_root}/fixture-port" ]] && break; sleep 0.1; done
+[[ -s "${tmp_root}/fixture-port" ]] || { printf 'not ok - the fixture server did not start\n'; exit 1; }
+base="http://127.0.0.1:$(cat "${tmp_root}/fixture-port")"
+
+fx() { # FILTER: rewrite the fixture's answers
+  jq "$1" "${fx_state}" > "${fx_state}.new" && mv -f "${fx_state}.new" "${fx_state}"
+}
+# An OSV record: ID, ALIAS ("" for none), PACKAGE, FIXED ("" for no fix).
+osv_record() {
+  jq -nc --arg id "$1" --arg alias "$2" --arg pkg "$3" --arg fixed "$4" '
+    {id: $id, modified: "2026-11-01T00:00:00Z", aliases: (if $alias == "" then [] else [$alias] end),
+     affected: [{package: {ecosystem: "npm", name: $pkg},
+                 ranges: [{type: "SEMVER", events: ([{introduced: "0"}] + (if $fixed == "" then [] else [{fixed: $fixed}] end))}]}]}'
+}
+
+# ---- a row's world -----------------------------------------------------------------
+# Each row: d (its directory), home (SAFEDEPS_HOME and HOME), a population
+# command that prints d/pop.tsv (or exits 3 while d/pop.fail exists), and the
+# config that names it.
+new_world() {
+  d=$(mktemp -d "${tmp_root}/row.XXXXXX")
+  home="${d}/home"
+  mkdir -p "${home}/watch" "${d}/bin" "${d}/p" "${d}/fakebin"
+  : > "${d}/pop.tsv"
+  printf '#!/bin/sh\n[ -e "%s/pop.fail" ] && exit 3\ncat "%s/pop.tsv"\n' "${d}" "${d}" > "${d}/bin/pop"
+  chmod +x "${d}/bin/pop"
+  jq -n --arg pop "${d}/bin/pop" '{population_command: [$pop], followups: {cargo_lock: "safedeps/fixture-cargo-followup"}}' \
+    > "${home}/watch/config.json"
+  printf '%s\n' "${BASE_STATE}" > "${fx_state}"
+  row_path="${d}/fakebin:${PATH}"
+}
+config() { # FILTER
+  jq "$1" "${home}/watch/config.json" > "${home}/watch/config.new" && mv -f "${home}/watch/config.new" "${home}/watch/config.json"
+}
+register() { # NAME... : projects under d/p, in the population
+  local name
+  for name in "$@"; do
+    mkdir -p "${d}/p/${name}"
+    printf '%s\t%s\n' "${name}" "${d}/p/${name}" >> "${d}/pop.tsv"
+  done
+}
+npm_lock() { # DIR NAME@VERSION...
+  local dir="$1" spec
+  shift
+  for spec in "$@"; do printf '%s\n' "${spec}"; done \
+    | jq -R -s 'split("\n") | map(select(length > 0) | split("@")) as $s
+        | {name: "fixture", lockfileVersion: 3,
+           packages: ({"": {name: "fixture"}} + ($s | map({key: ("node_modules/" + .[0]), value: {version: .[1]}}) | from_entries))}' \
+    > "${dir}/package-lock.json"
+}
+
+envd() {
+  env -u SAFEDEPS_ADVISORY_LOG -u SAFEDEPS_CACHE_DIR -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON -u SAFEDEPS_RECHECK_FIXTURE_JSON \
+    HOME="${home}" SAFEDEPS_HOME="${home}" PATH="${row_path}" SAFEDEPS_NOTIFY=0 \
+    SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=-1 \
+    SAFEDEPS_OSV_API_URL="${base}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${base}/osv/v1/querybatch" \
+    SAFEDEPS_KEV_CATALOG_URL="${base}/kev.json" SAFEDEPS_GHSA_API_URL="${base}/advisories" \
+    SAFEDEPS_OPENJDK_ADVISORIES_URL="${base}/openjdk/" SAFEDEPS_ADOPTIUM_API_URL="${base}/adoptium" "$@"
+}
+# sd ARGS...: one CLI run in the row's world. rc and out hold its answer.
+sd() {
+  rc=0
+  out=$(cd "${d}" && envd "${SD}" --json "$@" 2> "${d}/stderr") || rc=$?
+}
+scan() { sd watch scan "$@"; }
+scan_ok() { scan "$@"; [[ "${rc}" == 0 ]] || no "scan $* exited ${rc}: ${out} $(head -c 400 "${d}/stderr")"; }
+state() { cat "${home}/watch/state.json"; }
+# st EXPR [WHAT]: EXPR holds of the published state.
+# st [--arg NAME VALUE]... EXPR [WHAT [SHOW]]: EXPR holds of the published state.
+st() {
+  local -a args=()
+  while [[ "${1:-}" == --arg ]]; do args+=(--arg "$2" "$3"); shift 3; done
+  jq -e "${args[@]+"${args[@]}"}" "$1" "${home}/watch/state.json" > /dev/null \
+    || no "${2:-state}: not $1 — $(jq -c "${3:-.summary.line}" "${home}/watch/state.json")"
+}
+npm_findings() { jq -c '[.findings[] | select(.ecosystem == "npm")]' "${home}/watch/state.json"; }
+
+# row NAME FUNCTION
+row() {
+  local rc=0
+  [[ -z "${only}" || "$2" =~ ^(${only})$ ]] || return 0
+  set +e
+  ( set -e; "$2" )
+  rc=$?
+  set -e
+  if (( rc == 0 )); then pass "$1"; else bad "$1"; fi
+}
+
+# ---- T0 clean, T1 advisory, T2 fixed: through the daily wrapper ----------------------
+row_timeline() {
+  new_world; register a
+  npm_lock "${d}/p/a" left@1.0.0 right@2.0.0
+  local wrap="${ROOT_DIR}/scripts/safedeps-recheck-alert.sh" alerts="${home}/recheck-alerts.jsonl" n key
+  run_wrapper() { rc=0; (cd "${d}" && envd SAFEDEPS_BIN="${SD}" "${wrap}" > /dev/null 2> "${d}/wrapper.err") || rc=$?; }
+  run_wrapper
+  [[ "${rc}" == 0 ]] || no "T0 wrapper exited ${rc}: $(cat "${d}/wrapper.err")"
+  [[ "$(npm_findings)" == "[]" ]] || no "T0 has npm findings: $(npm_findings)"
+  grep -q 'safedeps re-check status=0 runtime_version=' "${home}/recheck.log" || no "recheck.log has no runtime_version"
+  st '.population.state == "fresh" and .summary.osv_measured == 1'
+  n=0; [[ ! -f "${alerts}" ]] || n=$(wc -l < "${alerts}")
+  # T1: one advisory under two ids that alias each other, KEV-listed.
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-aaaa-bbbb-cccc CVE-2026-1111 left 1.0.3), $(osv_record CVE-2026-1111 GHSA-aaaa-bbbb-cccc left 1.0.3)] | .kev = [\"CVE-2026-1111\"]"
+  run_wrapper
+  [[ "${rc}" == 0 ]] || no "T1 wrapper exited ${rc}"
+  [[ "$(npm_findings | jq 'length')" == 1 ]] || no "T1 npm findings: $(npm_findings)"
+  npm_findings | jq -e '.[0] | .state == "open" and .fixed == ["1.0.3"] and .kev == true and .advisory == "CVE-2026-1111" and .package == "left"' > /dev/null \
+    || no "T1 finding: $(npm_findings)"
+  key=$(npm_findings | jq -r '.[0].key')
+  st --arg k "${key}" '[.events[] | select(.finding == $k)] | length == 1' 'T1 events'
+  [[ "$(wc -l < "${alerts}")" -eq $((n + 1)) ]] || no "T1 did not alert once: $(tail -n 2 "${alerts}")"
+  tail -n 1 "${alerts}" | jq -e '.kind == "watch_attention" and .new_events >= 1' > /dev/null || no "T1 alert: $(tail -n 1 "${alerts}")"
+  # The same answers again: nothing new, nothing said.
+  run_wrapper
+  [[ "${rc}" == 0 ]] || no "T1 again exited ${rc}"
+  st --arg k "${key}" '([.diff.new, .diff.closed, .diff.changed] | map(length) | add) == 0 and ([.events[] | select(.finding == $k)] | length == 1)' 'T1 again'
+  [[ "$(wc -l < "${alerts}")" -eq $((n + 1)) ]] || no "T1 again alerted"
+  # T2: the lockfile holds the fixed version.
+  npm_lock "${d}/p/a" left@1.0.3 right@2.0.0
+  run_wrapper
+  st --arg k "${key}" '.findings[$k].state == "closed" and .findings[$k].closed_reason == "seen_fixed"' 'T2'
+  st --arg k "${key}" '[.events[] | select(.finding == $k and .to == "closed:seen_fixed")] | length == 1' 'T2 close event'
+}
+row "T0 clean, T1 advisory (two aliased ids, KEV) opens one finding and alerts once, again says nothing, T2 fixed closes it seen_fixed" row_timeline
+
+# ---- no fix, withdrawn, provider down ------------------------------------------------
+row_no_fix_withdrawn() {
+  new_world; register a
+  npm_lock "${d}/p/a" lone@1.0.0
+  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-nofx-nofx-nofx '' lone '')]"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].state == "no_fix_available" and .[0].fixed == []' > /dev/null || no "no fix: $(npm_findings)"
+  st '.summary.no_fix == 1 and .summary.fixable == 0'
+  # OSV moves `modified` when it withdraws a record.
+  fx '.osv["lone@1.0.0"][0] += {withdrawn: "2026-11-10T00:00:00Z", modified: "2026-11-10T00:00:00Z"}'
+  scan_ok
+  npm_findings | jq -e '.[0].state == "closed" and .[0].closed_reason == "advisory_withdrawn"' > /dev/null || no "withdrawn: $(npm_findings)"
+}
+row "an advisory with no fixed version is no_fix_available, and a withdrawn one closes advisory_withdrawn" row_no_fix_withdrawn
+
+row_provider_down() {
+  new_world; register a b
+  npm_lock "${d}/p/a" left@1.0.0
+  npm_lock "${d}/p/b" left@1.0.0
+  fx '.down = ["osv"]'
+  scan
+  [[ "${rc}" == 1 ]] || no "a scan with OSV down exited ${rc}"
+  st '[.errors[] | select(.kind == "provider_unavailable")] | length == 1'
+  st '[.unmeasured[] | select(.kind == "provider_unavailable")] | length == 2'
+  st '.summary.osv_measured == 0 and .last_success_at == null'
+  # Up, the advisory is found; down again, the finding stays open, measured stale.
+  fx ".down = [] | .osv[\"left@1.0.0\"] = [$(osv_record GHSA-down-down-down '' left 1.0.1)]"
+  scan_ok
+  [[ "$(npm_findings | jq '[.[] | select(.state == "open")] | length')" == 2 ]] || no "up: $(npm_findings)"
+  npm_lock "${d}/p/a" left@1.0.1
+  fx '.down = ["osv"]'
+  scan
+  [[ "${rc}" == 1 ]] || no "down again exited ${rc}"
+  npm_findings | jq -e 'all(.[]; .state == "open" and .stale_measurement == true)' > /dev/null || no "down again closed or reopened: $(npm_findings)"
+}
+row "OSV 503 is provider_unavailable, never clean, and a finding it cannot re-measure stays open and stale" row_provider_down
+
+# ---- native audit, resolvers not implemented ---------------------------------------
+row_native_and_unmeasured() {
+  new_world; register pn cg
+  printf 'lockfileVersion: 9.0\n' > "${d}/p/pn/pnpm-lock.yaml"
+  printf '[[package]]\nname = "x"\n' > "${d}/p/cg/Cargo.lock"
+  printf 'FROM eclipse-temurin:21-jre\n' > "${d}/p/cg/Dockerfile"
+  # No pnpm on the agent's path: unavailable, not clean.
+  scan_ok
+  st '[.unmeasured[] | select(.kind == "native_audit_unavailable" and .reason == "tool_not_found")] | length == 1'
+  st '[.unmeasured[] | select(.kind == "cargo_lock" and .followup == "safedeps/fixture-cargo-followup")] | length == 1'
+  st '[.unmeasured[] | select(.kind == "container_image" and .followup == null)] | length == 1'
+  st '.summary.unmeasured_without_followup >= 1 and .summary.complete == false'
+  # A pnpm stand-in that reports one high advisory, then none.
+  mkdir -p "${d}/tools"
+  printf '#!/bin/sh\n[ "$1" = audit ] || exit 2\ncat "%s/tools/report.json"\n[ -e "%s/tools/vuln" ] && exit 1\nexit 0\n' "${d}" "${d}" > "${d}/tools/pnpm"
+  chmod +x "${d}/tools/pnpm"
+  printf '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":1,"critical":0}}}\n' > "${d}/tools/report.json"
+  : > "${d}/tools/vuln"
+  config ".tool_path = [\"${d}/tools\"]"
+  scan_ok
+  st '[.findings[] | select(.ecosystem == "pnpm" and .state == "triage_needed")] | length == 1'
+  st '[.roots[].lockfiles[]? | select(.kind == "native" and .native_audit == "vulnerable")] | length == 1'
+  st '.summary.triage == 1 and .summary.native_audit == 1 and .summary.osv_measured == 0'
+  printf '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}\n' > "${d}/tools/report.json"
+  rm -f "${d}/tools/vuln"
+  scan_ok
+  st '[.roots[].lockfiles[]? | select(.kind == "native" and .native_audit == "no_finding")] | length == 1'
+  st '.summary.osv_measured == 0'
+}
+row "pnpm without its tool is unavailable, with it vulnerable is one triage_needed and clean is no_finding (not OSV clean); Cargo and images are unmeasured with their follow-up" row_native_and_unmeasured
+
+# ---- a root's measurement goes away: nothing closes without evidence ----------------
+row_root_lifecycle() {
+  new_world; register a keep
+  npm_lock "${d}/p/a" left@1.0.0
+  npm_lock "${d}/p/keep" right@2.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-life-life-life '' left 1.0.1)]"
+  scan_ok
+  local key
+  key=$(npm_findings | jq -r '.[0].key')
+  kept() { st --arg k "${key}" '.findings[$k].state == "open" and .findings[$k].stale_measurement == true' "$1" ".findings[\"${key}\"]"; }
+  mv "${d}/p/a/package-lock.json" "${d}/lock.aside"
+  scan_ok
+  kept "lockfile missing"
+  st '[.unmeasured[] | select(.kind == "lockfile_missing")] | length == 1'
+  mv "${d}/lock.aside" "${d}/p/a/package-lock.json"
+  mv "${d}/p/a" "${d}/a.aside"
+  scan_ok
+  kept "root unreachable"
+  st '[.unmeasured[] | select(.kind == "root_unreachable")] | length == 1'
+  mv "${d}/a.aside" "${d}/p/a"
+  grep -v "^a	" "${d}/pop.tsv" > "${d}/pop.new"; mv "${d}/pop.new" "${d}/pop.tsv"
+  scan_ok
+  kept "unregistered"
+  st '[.unmeasured[] | select(.kind == "removed_from_population")] | length == 1'
+  sd watch retire --root "${d}/p/a" --evidence "owner note: fixture root a deleted for good"
+  [[ "${rc}" == 0 ]] || no "retire exited ${rc}"
+  scan_ok
+  st --arg k "${key}" '.findings[$k].state == "closed" and .findings[$k].closed_reason == "root_retired" and (.findings[$k].retired_evidence | test("owner note"))' "retired" ".findings[\"${key}\"]"
+}
+row "a missing lockfile, an unreachable root and an unregistered root keep the open finding stale; only a retire record closes it" row_root_lifecycle
+
+row_population() {
+  new_world
+  touch "${d}/pop.fail"
+  scan
+  [[ "${rc}" == 1 ]] || no "no provider and no snapshot exited ${rc}"
+  st '.population.state == "missing" and ([.unmeasured[] | select(.kind == "population_missing")] | length == 1)'
+  rm -f "${d}/pop.fail"; register a
+  npm_lock "${d}/p/a" right@2.0.0
+  scan_ok
+  st '.population.state == "fresh" and .population.count == 1'
+  touch "${d}/pop.fail"
+  scan
+  [[ "${rc}" == 1 ]] || no "a failed provider exited ${rc}"
+  st '.population.state == "stale" and .population.reason == "exit_3" and .population.count == 1 and .summary.complete == false'
+  st '[.roots[] | select(.class == "ok")] | length == 1' "the snapshot's roots are measured"
+  rm -f "${d}/pop.fail"; register b
+  npm_lock "${d}/p/b" right@2.0.0
+  scan_ok
+  st '.population.state == "fresh" and .population.count == 2 and ([.roots[] | select(.name == "b")] | length == 1)'
+}
+row "population: no snapshot is missing, a failed provider is stale on the last snapshot, a project registered since is in the next fresh scan" row_population
+
+# ---- where the scan does not read -------------------------------------------------------
+row_remote_and_excluded() {
+  new_world
+  local real_mount line
+  real_mount=$(PATH=/sbin:/usr/sbin:/bin:/usr/bin command -v mount)
+  mkdir -p "${d}/nas/proj" "${d}/forbidden/proj" "${d}/p/local/mnt"
+  npm_lock "${d}/nas/proj" left@1.0.0
+  npm_lock "${d}/forbidden/proj" left@1.0.0
+  npm_lock "${d}/p/local/mnt" left@1.0.0
+  npm_lock "${d}/p/local" right@2.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-moun-moun-moun '' left 1.0.1)]"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    line="//fixture@nas/share on ${d}/nas (smbfs, nodev, nosuid, mounted by fixture)
+//fixture@nas/two on ${d}/p/local/mnt (smbfs, nodev, nosuid, mounted by fixture)"
+  else
+    line="nas:/share on ${d}/nas type nfs (rw)
+nas:/two on ${d}/p/local/mnt type nfs (rw)"
+  fi
+  printf '#!/bin/sh\n%s\ncat <<'"'"'MOUNTS'"'"'\n%s\nMOUNTS\n' "${real_mount}" "${line}" > "${d}/fakebin/mount"
+  chmod +x "${d}/fakebin/mount"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$PWD $*" >> "%s/find.log"\nexec %s "$@"\n' "${d}" "$(PATH=/usr/bin:/bin command -v find)" > "${d}/fakebin/find"
+  chmod +x "${d}/fakebin/find"
+  ln -s "${d}/nas/proj" "${d}/p/link-nas"
+  ln -s "${d}/forbidden/proj" "${d}/p/link-forbidden"
+  printf '%s\n' "${d}/forbidden" > "${home}/watch/exclude"
+  printf 'nas\t%s\nlinknas\t%s\nforbidden\t%s\nlinkforbidden\t%s\nlocal\t%s\n' \
+    "${d}/nas/proj" "${d}/p/link-nas" "${d}/forbidden/proj" "${d}/p/link-forbidden" "${d}/p/local" > "${d}/pop.tsv"
+  config '.followups.remote_mount = "safedeps/fixture-remote-followup"'
+  # Nothing may be read there, and nothing could be: the scan answers before it.
+  chmod 000 "${d}/nas" "${d}/forbidden" "${d}/p/local/mnt"
+  scan_ok
+  chmod 755 "${d}/nas" "${d}/forbidden" "${d}/p/local/mnt"
+  st '[.roots[] | select(.class == "remote_mount")] | length == 2' "remote roots" '.roots'
+  st '[.unmeasured[] | select(.kind == "remote_mount" and .followup == "safedeps/fixture-remote-followup")] | length == 3'
+  st --arg r "${d}/p/local" '[.unmeasured[] | select(.kind == "remote_mount" and .root == $r and .path == "./mnt")] | length == 1' "the nested mount" '.unmeasured'
+  st '[.roots[] | select(.name == "local" and .whole == false and (.skipped | map(.path) == ["./mnt"]))] | length == 1' "the local root is not whole" '.roots'
+  st '.population.excluded == 2' "excluded" '.population'
+  st '[.findings[] | select(.package == "left")] | length == 0' "a finding was read where nothing may be read" '.findings'
+  st '[.errors[] | select(.kind == "root_walk_incomplete")] | length == 0' "the walk went into the nested mount" '.errors'
+  st '[.roots[] | select(.name == "local" and .class == "ok")] | length == 1' "the local root" '.roots'
+  if grep -E "^(${d}/nas|${d}/forbidden|${d}/p/local/mnt)" "${d}/find.log"; then no "find ran inside a remote or excluded tree"; fi
+  grep -q "^${d}/p/local " "${d}/find.log" || no "the harness saw no find at all: $(cat "${d}/find.log")"
+}
+row "network mounts, symlinks to them, an excluded prefix and a nested mount are classified before any read: remote_mount or excluded, zero reads, with the follow-up" row_remote_and_excluded
+
+# A registered root that is itself a symlink to a local tree, with a network
+# mount inside that tree: ~/.kuma as a link to workspace/.kuma, its vaults/
+# holding an SMB share. The mount table names the mount by its real path, so
+# the walk is of the resolved tree and the prune is matched there; matched
+# against the path as registered it would match nothing. No exclude glob is
+# involved: the mount table decides. What the walk left out is reported: the
+# share is an unmeasured remote_mount with its follow-up, the root is not
+# whole, and a finding the share used to show keeps its reason.
+row_symlink_root_over_mount() {
+  new_world
+  local real_mount line key
+  real_mount=$(PATH=/sbin:/usr/sbin:/bin:/usr/bin command -v mount)
+  mkdir -p "${d}/real/kuma/vaults/share" "${d}/real/kuma/vaults/local-vault"
+  npm_lock "${d}/real/kuma/vaults/share" left@1.0.0
+  npm_lock "${d}/real/kuma/vaults/local-vault" right@2.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-shar-shar-shar '' left 1.0.1)]"
+  ln -s "${d}/real/kuma" "${d}/p/dot-kuma"
+  printf 'kuma\t%s\n' "${d}/p/dot-kuma" > "${d}/pop.tsv"
+  config '.followups.remote_mount = "safedeps/fixture-remote-followup"'
+  # T0: vaults/share is a plain local directory, and its lockfile is measured.
+  scan_ok
+  key=$(npm_findings | jq -r '.[] | select(.package == "left") | .key')
+  [[ -n "${key}" ]] || no "T0 measured nothing in the local share: $(npm_findings)"
+  st '.summary.osv_measured == 2'
+  # T1: the same path is now a network mount.
+  if [[ "$(uname -s)" == Darwin ]]; then
+    line="//fixture@nas/vault on ${d}/real/kuma/vaults/share (smbfs, nodev, nosuid, mounted by fixture)"
+  else
+    line="nas:/vault on ${d}/real/kuma/vaults/share type nfs (rw)"
+  fi
+  printf '#!/bin/sh\n%s\ncat <<'"'"'MOUNTS'"'"'\n%s\nMOUNTS\n' "${real_mount}" "${line}" > "${d}/fakebin/mount"
+  chmod +x "${d}/fakebin/mount"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$PWD $*" >> "%s/find.log"\nexec %s "$@"\n' "${d}" "$(PATH=/usr/bin:/bin command -v find)" > "${d}/fakebin/find"
+  chmod +x "${d}/fakebin/find"
+  chmod 000 "${d}/real/kuma/vaults/share"
+  scan_ok
+  chmod 755 "${d}/real/kuma/vaults/share"
+  # Measured beside it, nothing read inside it.
+  st --arg r "${d}/real/kuma" '[.roots[] | select(.name == "kuma" and .class == "ok" and .resolved == $r and .partial == false)] | length == 1' "the linked root" '.roots'
+  st '.summary.osv_measured == 1' "the local vault beside the share" '.roots'
+  st '[.errors[] | select(.kind == "root_walk_incomplete")] | length == 0' "the walk went into the share" '.errors'
+  if grep -E "^${d}/real/kuma/vaults/share" "${d}/find.log"; then no "find ran inside the share"; fi
+  grep -q -- "-path ./vaults/share" "${d}/find.log" || no "the walk did not prune the share: $(cat "${d}/find.log")"
+  # What was left out is said: the share, its follow-up, a root not whole.
+  st --arg r "${d}/p/dot-kuma" '[.unmeasured[] | select(.kind == "remote_mount" and .root == $r and .path == "./vaults/share" and .followup == "safedeps/fixture-remote-followup")] | length == 1' "the share is unmeasured" '.unmeasured'
+  st '[.roots[] | select(.name == "kuma" and .whole == false and (.skipped | map([.path, .class]) == [["./vaults/share", "remote_mount"]]))] | length == 1' "the root says what it skipped" '.roots'
+  st '.summary.complete == false'
+  # The finding the share showed at T0 is not closed and says why.
+  st --arg k "${key}" '.findings[$k].state == "open" and .findings[$k].stale_measurement == true and .findings[$k].unmeasured_reason == "remote_mount"' "the hidden finding" ".findings[\"${key}\"]"
+  st '[.unmeasured[] | select(.kind == "lockfile_missing")] | length == 0' "the hidden lockfile read as missing" '.unmeasured'
+}
+row "a registered root that is a symlink to a local tree with a network mount inside it: walked resolved, the mount pruned and reported unmeasured with its follow-up, the root not whole, a finding it hid kept open with its reason" row_symlink_root_over_mount
+
+# ---- Java ------------------------------------------------------------------------------
+row_jdk() {
+  new_world; register older same pre down
+  printf 'java=21.0.10-tem\n' > "${d}/p/older/.sdkmanrc"
+  printf 'java=21.0.14-tem\n' > "${d}/p/same/.sdkmanrc"
+  printf 'temurin-17.0.18\n' > "${d}/p/pre/.java-version"
+  printf 'java temurin-25.0.2\n' > "${d}/p/down/.tool-versions"
+  # A host JDK in the row's own SDKMAN, and one from a vendor with no feed.
+  mkdir -p "${home}/.sdkman/candidates/java/21.0.10-tem" "${home}/.sdkman/candidates/java/21.0.9-oracle"
+  printf 'IMPLEMENTOR="Eclipse Adoptium"\nJAVA_RUNTIME_VERSION="21.0.10+7-LTS"\n' > "${home}/.sdkman/candidates/java/21.0.10-tem/release"
+  printf 'IMPLEMENTOR="Oracle Corporation"\nJAVA_RUNTIME_VERSION="21.0.9+8-LTS"\n' > "${home}/.sdkman/candidates/java/21.0.9-oracle/release"
+  release() { jq -nc --arg n "$1" --argjson maj "$2" --argjson sec "$3" '{release_name: $n, timestamp: "2026-10-22T00:00:00Z", release_link: "https://example.invalid/r", version_data: {major: $maj, minor: 0, security: $sec, build: 7, openjdk_version: "\($maj).0.\($sec)+7-LTS"}}'; }
+  fx ".adoptium = {\"21\": $(release jdk-21.0.14+7 21 14), \"17\": $(release jdk-17.0.18+7 17 18)}
+      | .openjdk = [{date: \"2026-10-20\", affected: \"25.0.1, 21.0.13, 17.0.18, 8u504\"}]"
+  scan_ok
+  local s
+  s() { jq -r --arg l "$1" '[.runtime.jdks[] | select(.location == $l or .scope == $l)][0].state // "none"' "${home}/watch/state.json"; }
+  [[ "$(s ./.sdkmanrc)" != none ]] || no "no pin judged: $(jq -c '.runtime' "${home}/watch/state.json")"
+  st --arg r "${d}/p/older" '[.findings[] | select(.root == $r and .ecosystem == "runtime" and .state == "update_available" and .fixed == ["21.0.14+7-LTS"])] | length == 1' "older pin" '.runtime'
+  st --arg r "${d}/p/same" '[.runtime.jdks[] | select(.root == $r and (.state == "current_as_of" or .state == "pre_announced"))] | length == 1' "same pin" '.runtime'
+  # The next scheduled OpenJDK update (third Tuesday of Jan, Apr, Jul, Oct)
+  # decides between the two: within 14 days it is pre_announced.
+  local within
+  within=$(node -e '
+    const now = new Date(); let best = null;
+    for (let y = now.getUTCFullYear(); y <= now.getUTCFullYear() + 1; y++) for (const m of [0, 3, 6, 9]) {
+      const first = new Date(Date.UTC(y, m, 1)); const day = 1 + ((2 - first.getUTCDay() + 7) % 7) + 14;
+      const t = new Date(Date.UTC(y, m, day)); if (t > now && (best === null || t < best)) best = t; }
+    console.log((best - now) / 86400000 <= 14 ? "yes" : "no");')
+  if [[ "${within}" == no ]]; then
+    st --arg r "${d}/p/same" '[.runtime.jdks[] | select(.root == $r and .state == "current_as_of")] | length == 1' "same pin, no update due" '.runtime'
+  fi
+  st --arg r "${d}/p/pre" '[.findings[] | select(.root == $r and .state == "pre_announced")] | length == 1' "affected latest build" '.runtime'
+  st --arg r "${d}/p/down" '[.runtime.jdks[] | select(.root == $r and .state == "feed_unavailable")] | length == 1' "no feed for 25" '.runtime'
+  st --arg r "${d}/p/down" '[.unmeasured[] | select(.kind == "runtime_feed_unavailable" and .root == $r)] | length == 1'
+  st '[.findings[] | select(.root == "@host" and (.location | test("21.0.10-tem")) and .state == "update_available")] | length == 1' "host JDK" '.runtime'
+  st '[.unmeasured[] | select(.kind == "jdk_vendor_feed_missing")] | length >= 1' "oracle" '.unmeasured'
+  st '[.runtime.jdks[] | select(.state == "clean")] | length == 0'
+  fx '.down = ["adoptium", "openjdk"]'
+  scan_ok
+  st --arg r "${d}/p/older" '[.runtime.jdks[] | select(.root == $r and .state == "feed_unavailable")] | length == 1' "feeds down" '.runtime'
+  st --arg r "${d}/p/older" '[.findings[] | select(.root == $r and .ecosystem == "runtime" and .state == "update_available")] | length == 1' "feeds down keeps the finding" '.findings'
+}
+row "JDK: older than the vendor's latest is update_available, the same is current_as_of, an affected latest is pre_announced, no feed is feed_unavailable; nothing is clean" row_jdk
+
+# ---- the ledger re-check ----------------------------------------------------------------
+row_ledger_errors() {
+  new_world
+  sd check PyPI lumi-ledger-read-probe@1.0.0
+  [[ "${rc}" == 0 ]] || no "setup check exited ${rc}: ${out}"
+  sd re-check
+  [[ "${rc}" == 0 ]] || no "control re-check exited ${rc}"
+  jq -e '.checked == 1 and .still_clean == 1 and .errors == []' <<< "${out}" > /dev/null || no "control: ${out}"
+  # validator-lumi/probe.py's counterexample: one file that is not JSON.
+  printf '{"ecosystem":"PyPI",\n' > "${home}/approved-specs/malformed.json"
+  sd re-check
+  [[ "${rc}" == 1 ]] || no "a malformed entry exited ${rc}"
+  jq -e '.checked == 1 and .still_clean == 1 and (.errors | length == 1) and .errors[0].kind == "ledger_entry_unreadable" and .errors[0].file == "malformed.json"' <<< "${out}" > /dev/null \
+    || no "malformed: ${out}"
+  rm -f "${home}/approved-specs/malformed.json"
+  # A revoke that cannot write: the report stays, one errors row, the others judged.
+  sd check PyPI lumi-second@1.0.0
+  fx ".osv[\"lumi-ledger-read-probe@1.0.0\"] = [{id: \"PYSEC-2026-1\", modified: \"2026-11-01T00:00:00Z\", affected: [{package: {ecosystem: \"PyPI\", name: \"lumi-ledger-read-probe\"}, ranges: [{type: \"ECOSYSTEM\", events: [{introduced: \"0\"}, {fixed: \"1.0.1\"}]}]}]}]"
+  chmod 500 "${home}/approved-specs"; chmod 400 "${home}"/approved-specs/*.json
+  sd re-check
+  chmod 700 "${home}/approved-specs"; chmod 600 "${home}"/approved-specs/*.json
+  [[ "${rc}" == 1 ]] || no "a failed revoke exited ${rc}: ${out}"
+  jq -e '.checked == 2 and .still_clean == 1 and (.errors | length == 1) and .errors[0].kind == "revoke_failed" and .revoked == []' <<< "${out}" > /dev/null \
+    || no "revoke failure: ${out}"
+  # The scan carries the ledger's errors and publishes anyway.
+  chmod 500 "${home}/approved-specs"; chmod 400 "${home}"/approved-specs/*.json
+  scan
+  chmod 700 "${home}/approved-specs"; chmod 600 "${home}"/approved-specs/*.json
+  [[ "${rc}" == 1 ]] || no "a scan with a failed revoke exited ${rc}"
+  st '([.errors[] | select(.kind == "ledger_revoke_failed")] | length == 1) and .ledger.checked == 2' "ledger errors in the scan" '.errors'
+}
+row "re-check: a malformed entry and a revoke that cannot write are errors rows, the report is printed and the run exits 1" row_ledger_errors
+
+row_ledger_mixed() {
+  new_world
+  local ctx="${d}/context.json"
+  jq -n --arg root "${d}/p/x" '{type: "npm-overrides-probe", context_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    project_root: $root, overrides_source: "package.json", overrides_sha256: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    overrides: {"mixed": "1.0.0"}}' > "${ctx}"
+  envd lib/ledger/ledger.sh approve npm mixed 1.0.0 > /dev/null
+  envd lib/ledger/ledger.sh approve npm mixed 1.0.0 1.0.0 local "" "" "" "${ctx}" > /dev/null
+  envd lib/ledger/ledger.sh approve npm other 2.0.0 > /dev/null
+  [[ "$(find "${home}/approved-specs" -name '*.json' | wc -l | tr -d ' ')" == 3 ]] || no "the ledger does not hold three entries"
+  : > "${fx_log}"
+  sd re-check
+  [[ "${rc}" == 0 ]] || no "a mixed ledger exited ${rc}: ${out}"
+  jq -e '.checked == 3 and .still_clean == 3' <<< "${out}" > /dev/null || no "mixed: ${out}"
+  [[ "$(grep -c '"path":"/osv/v1/query"' "${fx_log}")" == 2 ]] || no "each spec is not asked once: $(grep -c '/osv/v1/query' "${fx_log}") OSV queries"
+  fx ".osv[\"mixed@1.0.0\"] = [$(osv_record GHSA-mixd-mixd-mixd '' mixed 1.0.1)]"
+  sd re-check
+  jq -e '.checked == 3 and .still_clean == 1 and (.revoked | length == 2) and .errors == []' <<< "${out}" > /dev/null || no "both contexts of the spec are not revoked: ${out}"
+}
+row "a ledger of entries with and without a project context: every entry judged, each spec asked once, both contexts revoked" row_ledger_mixed
+
+# ---- the lock, the publish, the hand-off ------------------------------------------------
+wait_for() { # FILE
+  local i
+  for i in $(seq 300); do [[ -e "$1" ]] && return 0; sleep 0.1; done
+  no "timed out waiting for $1"
+}
+bg_scan() { # NAME POINT [ARGS]: a scan paused at POINT, in the background
+  local name="$1" point="$2"
+  shift 2
+  (cd "${d}" && exec env SAFEDEPS_WATCH_PAUSE_AT="${point}" SAFEDEPS_WATCH_PAUSE_FILE="${d}/${name}.pause" \
+    HOME="${home}" SAFEDEPS_HOME="${home}" PATH="${row_path}" SAFEDEPS_NOTIFY=0 SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=-1 \
+    SAFEDEPS_OSV_API_URL="${base}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${base}/osv/v1/querybatch" \
+    SAFEDEPS_KEV_CATALOG_URL="${base}/kev.json" SAFEDEPS_GHSA_API_URL="${base}/advisories" \
+    SAFEDEPS_OPENJDK_ADVISORIES_URL="${base}/openjdk/" SAFEDEPS_ADOPTIUM_API_URL="${base}/adoptium" \
+    "${SD}" --json watch scan "$@" > "${d}/${name}.out" 2> "${d}/${name}.err") &
+  bg_pid=$!
+  bg_pids+=("${bg_pid}")
+}
+gen() { jq '.generation' "${home}/watch/state.json"; }
+
+row_overlap() {
+  new_world; register a
+  npm_lock "${d}/p/a" left@1.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-over-over-over '' left 1.0.1)] | .delay_ms = 200"
+  : > "${fx_log}"
+  bg_scan first after_lock
+  local first=${bg_pid}
+  wait_for "${d}/first.pause"
+  scan
+  [[ "${rc}" == 75 ]] || no "a second full scan exited ${rc}"
+  jq -e '.busy == true' <<< "${out}" > /dev/null || no "the refusal: ${out}"
+  scan --root "${d}/p/a"
+  [[ "${rc}" == 75 ]] || no "a root scan exited ${rc}"
+  sd re-check
+  [[ "${rc}" == 75 ]] || no "a re-check exited ${rc}"
+  # 09:30: the consumer finds the scan running. It reads the last complete
+  # generation (none yet) and claims nothing.
+  sd watch claim --consumer routine
+  [[ "${rc}" == 75 ]] || no "a claim during a scan exited ${rc}"
+  sd watch status
+  [[ "${rc}" == 0 ]] || no "status during a scan exited ${rc}"
+  jq -e '.generation == 0 and .last_scan == null' <<< "${out}" > /dev/null || no "status during a scan: ${out}"
+  rm -f "${d}/first.pause"
+  wait "${first}" || no "the first scan exited $?: $(cat "${d}/first.err" | head -c 300)"
+  [[ "$(gen)" == 1 ]] || no "generation $(gen) after one published scan"
+  st '[.events[] | select(.kind == "finding" and (.finding | test("\\|npm\\|")))] | length == 1'
+  [[ "$(jq -s 'map(.in_flight) | max' "${fx_log}")" -le 1 ]] || no "provider requests overlapped: $(jq -s 'map(.in_flight) | max' "${fx_log}")"
+  # The follow-up consumption, once the scan is done.
+  sd watch claim --consumer routine
+  [[ "${rc}" == 0 ]] || no "the follow-up claim exited ${rc}"
+  jq -e '[.claimed[] | select(.finding | test("\\|npm\\|"))] | length == 1' <<< "${out}" > /dev/null || no "follow-up claim: ${out}"
+  # Serial control: the same three scans one after another.
+  local overlapped_events
+  overlapped_events=$(jq '[.events[] | select(.finding | test("\\|npm\\|"))] | length' "${home}/watch/state.json")
+  new_world; register a
+  npm_lock "${d}/p/a" left@1.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-over-over-over '' left 1.0.1)]"
+  scan_ok; scan_ok; scan_ok --root "${d}/p/a"
+  [[ "$(gen)" == 3 ]] || no "serial generations: $(gen)"
+  [[ "$(jq '[.events[] | select(.finding | test("\\|npm\\|"))] | length' "${home}/watch/state.json")" == "${overlapped_events}" ]] || no "serial and overlapped runs raised different events"
+}
+row "overlapping scans, re-check and claim in one home: the others exit 75, providers see one run, one generation and one event; the consumer reads the complete generation and claims after" row_overlap
+
+row_homes() {
+  new_world; register a
+  npm_lock "${d}/p/a" right@2.0.0
+  local d1="${d}" h1="${home}" p1
+  bg_scan one after_lock; p1=${bg_pid}
+  wait_for "${d1}/one.pause"
+  new_world; register b
+  npm_lock "${d}/p/b" right@2.0.0
+  local p2
+  bg_scan two after_lock; p2=${bg_pid}
+  wait_for "${d}/two.pause"
+  rm -f "${d1}/one.pause" "${d}/two.pause"
+  wait "${p1}" || no "the first home's scan exited $?"
+  wait "${p2}" || no "the second home's scan exited $?"
+  [[ "$(jq '.generation' "${h1}/watch/state.json")" == 1 && "$(gen)" == 1 ]] || no "a home's generation is not 1"
+  [[ "$(jq -r '[.roots[]][0].name' "${h1}/watch/state.json")" == a ]] || no "the first home holds another's roots"
+  [[ "$(jq -r '[.roots[]][0].name' "${home}/watch/state.json")" == b ]] || no "the second home holds another's roots"
+}
+row "scans in two homes at once each hold their own lock and publish their own state" row_homes
+
+row_interrupt() {
+  new_world; register a
+  npm_lock "${d}/p/a" right@2.0.0
+  scan_ok
+  local before pid
+  before=$(state)
+  # Killed after the new generation is written and checked, before the rename.
+  bg_scan cut before_publish; pid=${bg_pid}
+  wait_for "${d}/cut.pause"
+  [[ -n "$(find "${home}/watch" -maxdepth 1 -name '.state.json.*')" ]] || no "no generation was written beside the state"
+  # A live run's lock is not taken, and its file is not swept.
+  scan
+  [[ "${rc}" == 75 ]] || no "a scan beside a live one exited ${rc}"
+  [[ -n "$(find "${home}/watch" -maxdepth 1 -name '.state.json.*')" ]] || no "the live run's generation was swept"
+  kill -9 "${pid}"
+  wait "${pid}" 2>/dev/null || true
+  [[ "$(state)" == "${before}" ]] || no "a run killed before its rename changed the state"
+  jq -e '.generation == 1' "${home}/watch/state.json" > /dev/null || no "the state is not the last complete generation"
+  for _ in $(seq 40); do scan; [[ "${rc}" != 75 ]] && break; sleep 0.25; done
+  [[ "${rc}" == 0 ]] || no "the next scan exited ${rc}"
+  [[ "$(gen)" == 2 ]] || no "the next scan published generation $(gen)"
+  [[ -z "$(find "${home}/watch" -maxdepth 1 -name '.state.json.*')" ]] || no "the killed run's file is still there"
+  # Killed after the rename: the new generation is whole.
+  bg_scan after after_publish; pid=${bg_pid}
+  wait_for "${d}/after.pause"
+  kill -9 "${pid}"
+  wait "${pid}" 2>/dev/null || true
+  jq -e '.generation == 3 and (.findings | type == "object")' "${home}/watch/state.json" > /dev/null || no "after the rename: generation $(gen)"
+  for _ in $(seq 40); do scan; [[ "${rc}" != 75 ]] && break; sleep 0.25; done
+  [[ "${rc}" == 0 && "$(gen)" == 4 ]] || no "the scan after a kill past the rename exited ${rc} at generation $(gen)"
+}
+row "a scan killed before or after its rename leaves a whole generation, a live scan's lock and file are left alone, and the next scan publishes" row_interrupt
+
+row_delayed_old_scan() {
+  new_world; register a b
+  npm_lock "${d}/p/a" left@1.0.0
+  npm_lock "${d}/p/b" right@2.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-dela-dela-dela '' left 1.0.1)] | .osv[\"right@2.0.0\"] = [$(osv_record GHSA-righ-righ-righ '' right 2.0.1)]"
+  scan_ok
+  local key_a key_b old
+  key_a=$(npm_findings | jq -r '.[] | select(.package == "left") | .key')
+  key_b=$(npm_findings | jq -r '.[] | select(.package == "right") | .key')
+  # An old full scan starts and is held before it takes the lock.
+  bg_scan old before_lock; old=${bg_pid}
+  wait_for "${d}/old.pause"
+  # Meanwhile a root scan of a, now fixed, closes a's finding.
+  npm_lock "${d}/p/a" left@1.0.1
+  scan_ok --root "${d}/p/a"
+  st --arg k "${key_a}" '.findings[$k].state == "closed"'
+  rm -f "${d}/old.pause"
+  wait "${old}" || no "the old scan exited $?"
+  [[ "$(gen)" == 3 ]] || no "the old scan did not publish on top of the root scan: generation $(gen)"
+  st --arg k "${key_a}" '.findings[$k].state == "closed" and ([.events[] | select(.finding == $k and .to == "closed:seen_fixed")] | length == 1)' "a"
+  st --arg k "${key_b}" '.findings[$k].state == "open" and ([.events[] | select(.finding == $k and .status == "pending")] | length == 1)' "b"
+}
+row "an old scan held before the lock merges onto the root scan that published meanwhile: the closed finding, the other root and the undelivered events stay" row_delayed_old_scan
+
+row_consumers() {
+  new_world; register a
+  npm_lock "${d}/p/a" left@1.0.0 right@2.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-cons-cons-cons '' left 1.0.1)] | .osv[\"right@2.0.0\"] = [$(osv_record GHSA-cont-cont-cont '' right 2.0.1)]"
+  scan_ok
+  local e1 e2
+  sd watch claim --consumer c1 --limit 1
+  e1=$(jq -r '.claimed[0].id' <<< "${out}")
+  sd watch claim --consumer c2 --limit 5
+  e2=$(jq -r '.claimed[0].id' <<< "${out}")
+  [[ "$(jq '.claimed | length' <<< "${out}")" == 1 && "${e1}" != "${e2}" && "${e1}" != null ]] || no "two consumers claimed: ${e1} ${e2}"
+  # c1 stops after its claim. Its event stays its own: no one else claims it.
+  sd watch claim --consumer c2
+  [[ "$(jq '.claimed | length' <<< "${out}")" == 0 ]] || no "a claimed event was claimed again: ${out}"
+  sd watch claimed --consumer c1
+  [[ "$(jq -r '.claimed[0].id' <<< "${out}")" == "${e1}" ]] || no "c1's claim is gone: ${out}"
+  sd watch ack --event "${e1}" --consumer c2 --task other
+  [[ "${rc}" != 0 ]] || no "another consumer acked c1's event"
+  # c1 cannot tell whether it dispatched: unknown, kept, never retried.
+  sd watch ack --event "${e1}" --consumer c1 --unknown
+  [[ "${rc}" == 0 ]] || no "ack unknown exited ${rc}"
+  sd watch ack --event "${e2}" --consumer c2 --task kongkongi-fixture-1
+  [[ "${rc}" == 0 ]] || no "ack task exited ${rc}"
+  sd watch ack --event "${e2}" --consumer c2 --task kongkongi-fixture-2
+  [[ "${rc}" != 0 ]] || no "an acked event was acked again"
+  scan_ok
+  sd watch claim --consumer c3
+  [[ "$(jq '.claimed | length' <<< "${out}")" == 0 ]] || no "an unknown or dispatched event was claimed again: ${out}"
+  st --arg e "${e1}" '[.events[] | select(.id == $e and .status == "unknown")] | length == 1' "the unknown event is kept"
+  # The repair's states, as the routine records them.
+  local key
+  key=$(npm_findings | jq -r '.[] | select(.package == "left") | .key')
+  sd watch remediation --finding "${key}" --state blocked --detail "dirty main"
+  [[ "${rc}" == 0 ]] || no "remediation blocked exited ${rc}"
+  st '.summary.blocked == 1 and .summary.complete == false'
+  sd watch remediation --finding "${key}" --state fix_failed --detail "tests failed; branch kept" --task kongkongi-fixture-1
+  st --arg k "${key}" '.findings[$k].remediation.state == "fix_failed" and .summary.blocked == 0'
+  sd watch remediation --finding "${key}" --state fixed
+  [[ "${rc}" != 0 ]] || no "a remediation state outside the closed set was taken"
+}
+row "two consumers: a claimed event is held by its consumer until it acks it, unknown is kept and never retried, a dispatched event is acked once; remediation states are a closed set" row_consumers
+
+if (( failures > 0 )); then
+  printf '# %d row(s) did not pass\n' "${failures}" >&2
+  exit 1
+fi

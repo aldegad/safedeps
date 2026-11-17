@@ -521,6 +521,58 @@ safedeps_osv_query_batch() {
   return "${rc}"
 }
 
+# One OSV advisory record, by id: GET <OSV API>/v1/vulns/<id>. querybatch names
+# the advisories that affect a version and nothing else (its records carry `id`
+# and `modified` only), so a reader that needs the fixed versions, the aliases
+# or `withdrawn` asks for the record. The URL is the query URL with its last
+# segment, `query`, replaced by `vulns/<id>`, so a moved OSV source moves this
+# read with it and the moved-source notice covers it. A query URL that does not
+# end in /query has no record URL, and that is a failed read.
+#
+# The record is cached under cache/osv-vuln by id and MODIFIED (the batch's
+# `modified`). With a MODIFIED the cached record is the one OSV last changed
+# and stays good until OSV changes it; without one the provider TTL applies.
+# Prints the record; returns 1 when there is no record to print.
+safedeps_osv_vuln_answer() {
+  jq -ce --arg id "$2" 'select(type == "object" and .id == $id)' "$1" 2>/dev/null
+}
+
+safedeps_osv_vuln_detail() {
+  local id="$1"
+  local modified="${2:-}"
+  local base cache_key cache_path response_file http_status answer
+
+  safedeps_require_json_tools || return 1
+  safedeps_providers_init
+  if [[ "${SAFEDEPS_OSV_API_URL}" != */query ]]; then
+    safedeps_provider_log "ERROR" "OSV record URL cannot be derived from ${SAFEDEPS_OSV_API_URL} id=${id}"
+    return 1
+  fi
+  base="${SAFEDEPS_OSV_API_URL%/query}"
+  cache_key=$(safedeps_cache_key "osv-vuln" "${id}" "${modified}" "") || return 1
+  cache_path="${SAFEDEPS_CACHE_DIR}/osv-vuln/${cache_key}.json"
+
+  if [[ -n "${modified}" && -f "${cache_path}" ]] || safedeps_cache_is_fresh "${cache_path}"; then
+    if answer=$(safedeps_osv_vuln_answer "${cache_path}" "${id}"); then
+      printf '%s\n' "${answer}"
+      return 0
+    fi
+  fi
+
+  safedeps_require_http_client || return 1
+  response_file=$(safedeps_cache_response_temp "${cache_path}") || return 1
+  http_status=$(curl -fsS --max-time 15 -o "${response_file}" -w '%{http_code}' \
+    "${base}/vulns/$(safedeps_json_uri_escape "${id}")" 2>/dev/null) || http_status="${http_status:-none} exit $?"
+  if [[ "${http_status}" == "200" ]] && answer=$(safedeps_osv_vuln_answer "${response_file}" "${id}") \
+    && safedeps_cache_store "${response_file}" "${cache_path}"; then
+    printf '%s\n' "${answer}"
+    return 0
+  fi
+  rm -f "${response_file}"
+  safedeps_provider_log "ERROR" "OSV record read failed id=${id} status=${http_status:-none}"
+  return 1
+}
+
 safedeps_extract_cves_from_osv() {
   local osv_json="$1"
 

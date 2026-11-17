@@ -1172,7 +1172,214 @@ cmd_revoke() {
   fi
 }
 
+# ---- watch -------------------------------------------------------------------
+
+# The watch (lib/watch/watch.sh) is its own entry, as the release-time gates
+# are: the CLI hands it the command and the two things it cannot read for
+# itself, the version and the output mode. Nothing of it is sourced here, so
+# the CLI files stay the set the core's tests read (rust/src/cli_text.rs).
+cmd_watch() {
+  case "${1:-}" in
+    -h|--help) cmd_help watch; return 0 ;;
+  esac
+  SAFEDEPS_VERSION="${SAFEDEPS_VERSION}" SAFEDEPS_JSON_MODE="${SAFEDEPS_JSON_MODE}" \
+    exec bash "${SAFEDEPS_REPO_DIR}/lib/watch/watch.sh" "$@"
+}
+
 # ---- re-check ----------------------------------------------------------------
+
+# The approve lines of advisory.log, read once into an index the whole run looks
+# entries up in: {present, hashes:{"hash=<h>":true}, specs:{"<eco>\0<pkg>\0<ver>":true}}.
+# The rule is the one the per-entry scan had, and both properties it named
+# still hold: a token is compared whole (`hash=<h>` equals the token, never a
+# prefix of it), and nothing is escape-interpreted (jq -R reads the bytes as
+# written, and keys are compared as strings). A line vouches for an entry by
+# its hash token, or by an ecosystem, a package and a version token of the same
+# line. Read once, the log costs one grep a run, not one pass an entry.
+sf_recheck_provenance_index() {
+  local out="$1" lines rc=0
+
+  if [[ ! -f "${SAFEDEPS_ADVISORY_LOG}" ]]; then
+    printf '{"present":false,"hashes":{},"specs":{}}\n' > "${out}"
+    return 0
+  fi
+  lines=$(sf_mktemp_evidence) || return 1
+  LC_ALL=C grep -aF 'check approve' "${SAFEDEPS_ADVISORY_LOG}" > "${lines}" || rc=$?
+  if [[ "${rc}" -gt 1 ]]; then
+    rm -f "${lines}"
+    return 1
+  fi
+  rc=0
+  jq -R -s -c '
+    split("\n")
+    | map(select(contains("check approve")) | [splits("[ \t]+")] | map(select(length > 0)))
+    | {present: true,
+       hashes: ([.[][] | select(startswith("hash="))] | map({key: ., value: true}) | from_entries),
+       specs: ([.[]
+                | [.[] | select(startswith("ecosystem=")) | .[10:]] as $e
+                | [.[] | select(startswith("package=")) | .[8:]] as $p
+                | [.[] | select(startswith("version=")) | .[8:]] as $v
+                | $e[] as $ee | $p[] as $pp | $v[] as $vv | [$ee, $pp, $vv] | join("\u0000")]
+               | map({key: ., value: true}) | from_entries)}' "${lines}" > "${out}" || rc=1
+  rm -f "${lines}"
+  return "${rc}"
+}
+
+# The ledger stage of a re-check: every live ledger entry asked of the
+# providers again, a vulnerable or KEV-listed one revoked. Prints the report
+# (`recheck_report`) and returns 0, or 1 when the report carries errors[].
+#
+# One entry that cannot be read or revoked is a row of errors[], and the run
+# goes on to the next: a revoke that failed, a file that is not one ledger
+# entry, a field that is not a string. The report is printed whatever errors
+# it holds, and only then does the stage say it failed. Before, one such entry
+# ended the run under errexit with no report at all.
+#
+# A spec several contexts approved is asked once, and the answer applies to
+# each of its entries; the counts stay per entry.
+SF_RECHECK_REPORT=""
+sf_recheck_stage() {
+  local work entries fields expected index groups f n=0 rc=0
+  local errors_arr='[]'
+
+  SF_RECHECK_REPORT=""
+  safedeps_ledger_init
+  if ! sf_ledger_files; then
+    return 4
+  fi
+  work=$(safedeps_provider_mktemp_dir) || return 1
+  entries="${work}/entries.jsonl"
+  fields="${work}/fields.bin"
+  expected="${work}/expected.jsonl"
+  index="${work}/provenance.json"
+  groups="${work}/groups.bin"
+  : > "${entries}"
+  : > "${expected}"
+
+  # 1. Each file, read once. A file that is not one entry with string fields is
+  #    an error row, not the end of the run.
+  for f in "${SF_LEDGER_FILES[@]+${SF_LEDGER_FILES[@]}}"; do
+    if ! jq -cse --argjson i "${n}" --arg file "${f##*/}" "${SAFEDEPS_LEDGER_JQ_PREDICATE}"'
+        select(length == 1) | .[0]
+        | select(type == "object" and (.ecosystem | type) == "string" and (.package | type) == "string"
+                 and ((.version | type) == "string" or (.version | type) == "number"))
+        | {i: $i, file: $file, ecosystem, package, version: (.version | tostring),
+           revoked_at: ((.revoked_at // "") | tostring), hash: ((.hash // "") | tostring),
+           context_hash: (ledger_context_hash | tostring)}
+        | . + {malformed: ([.ecosystem, .package, .version] | any(test("[\\x00-\\x1F\\x7F]")))}' \
+        "${f}" >> "${entries}" 2>/dev/null; then
+      errors_arr=$(jq -c --arg file "${f##*/}" '. + [{kind:"ledger_entry_unreadable", file:$file}]' <<< "${errors_arr}")
+    fi
+    n=$((n + 1))
+  done
+
+  # 2. The canonical hash of each live, well-formed entry, recomputed from its
+  #    own fields: the stored one is writable by anyone who can write the file.
+  if ! jq -j 'select(.revoked_at == "" and (.malformed | not))
+        | [(.i | tostring), .ecosystem, .package, .version, .context_hash] | map(. + "\u0000") | add' "${entries}" > "${fields}"; then
+    rm -rf "${work}"
+    return 1
+  fi
+  local i eco pkg ver ctx h
+  while IFS= read -r -d '' i && IFS= read -r -d '' eco && IFS= read -r -d '' pkg \
+      && IFS= read -r -d '' ver && IFS= read -r -d '' ctx; do
+    h=$(safedeps_ledger_hash "${eco}" "${pkg}" "${ver}" "${ctx}") || { rm -rf "${work}"; return 1; }
+    printf '{"i":%s,"expected":"%s"}\n' "${i}" "${h}" >> "${expected}"
+  done < "${fields}"
+
+  # 3. Provenance for all of them from one read of the log, and the entries
+  #    grouped by spec for the providers.
+  if ! sf_recheck_provenance_index "${index}"; then
+    rm -rf "${work}"
+    return 1
+  fi
+  local suspected_forgery_arr checked
+  if ! suspected_forgery_arr=$(jq -s -c --slurpfile expected "${expected}" --slurpfile index "${index}" '
+        ($expected | map({key: (.i | tostring), value: .expected}) | from_entries) as $want
+        | ($index[0]) as $log
+        | [.[] | select(.revoked_at == "")
+           | . as $e
+           | (if .malformed then "malformed_spec"
+              elif .hash != $want[(.i | tostring)] then "hash_spec_mismatch"
+              elif ($log.present | not) then "missing_advisory_log_approval"
+              elif $log.hashes["hash=" + $want[(.i | tostring)]] == true then null
+              elif $log.specs[[.ecosystem, .package, .version] | join("\u0000")] == true then null
+              else "missing_advisory_log_approval" end) as $reason
+           | select($reason != null)
+           | {ecosystem, package, version, hash, reason: $reason}]' "${entries}") \
+    || ! checked=$(jq -s '[.[] | select(.revoked_at == "")] | length' "${entries}") \
+    || ! jq -s -j '[.[] | select(.revoked_at == "")]
+        | group_by([.ecosystem, .package, .version])[]
+        | [.[0].ecosystem, .[0].package, .[0].version, ([.[] | [.context_hash, .file]] | tojson)]
+        | map(. + "\u0000") | add' "${entries}" > "${groups}"; then
+    rm -rf "${work}"
+    return 1
+  fi
+  local fg_count
+  fg_count=$(jq 'length' <<< "${suspected_forgery_arr}")
+  if [[ "${fg_count}" -gt 0 ]]; then
+    sf_warn "  ${fg_count} ledger entries have no provenance — flagged as suspected forgery (not revoked)"
+  fi
+
+  # 4. Each spec asked once.
+  local still_clean=0
+  local newly_vuln_arr='[]' kev_hit_arr='[]' revoked_arr='[]'
+  local members count pj s reason ctx_hash file
+  while IFS= read -r -d '' eco && IFS= read -r -d '' pkg && IFS= read -r -d '' ver && IFS= read -r -d '' members; do
+    count=$(jq 'length' <<< "${members}")
+    sf_info "re-checking ${eco} ${pkg}@${ver} (${count} entr$([[ "${count}" -eq 1 ]] && printf 'y' || printf 'ies'))"
+    if ! pj=$(safedeps_providers_query "${eco}" "${pkg}" "${ver}" 2>/dev/null); then
+      sf_warn "  no provider response — skipped"
+      continue
+    fi
+    s=$(sf_provider_status "${pj}")
+    case "${s}" in
+      "${SAFEDEPS_STATUS_CLEAN}")
+        still_clean=$(( still_clean + count ))
+        ;;
+      "${SAFEDEPS_STATUS_VULNERABLE}"|"${SAFEDEPS_STATUS_HARD_BLOCK}")
+        reason="re-check ${s}"
+        while IFS=$'\x1f' read -r ctx_hash file; do
+          if ! safedeps_ledger_revoke "${eco}" "${pkg}" "${ver}" "${reason}" "${ctx_hash}" >/dev/null 2>&1; then
+            sf_err "  revoke failed: ${eco} ${pkg}@${ver} (${file})"
+            errors_arr=$(jq -c --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" --arg file "${file}" \
+              '. + [{kind:"revoke_failed", ecosystem:$ecosystem, package:$package, version:$version, file:$file}]' <<< "${errors_arr}")
+            continue
+          fi
+          sf_advisory_log "re-check revoke ecosystem=${eco} package=${pkg} version=${ver} status=${s}"
+          if [[ "${s}" == "${SAFEDEPS_STATUS_HARD_BLOCK}" ]]; then
+            sf_err "  KEV match -> revoked"
+            kev_hit_arr=$(jq -c --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" \
+              "${SAFEDEPS_STATUS_JQ}"'. + [{ecosystem:$ecosystem, package:$package, version:$version, status:status_hard_block}]' <<< "${kev_hit_arr}")
+          else
+            sf_warn "  new CVE match -> revoked"
+            newly_vuln_arr=$(jq -c --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" \
+              "${SAFEDEPS_STATUS_JQ}"'. + [{ecosystem:$ecosystem, package:$package, version:$version, status:status_vulnerable}]' <<< "${newly_vuln_arr}")
+          fi
+          revoked_arr=$(jq -c --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" --arg reason "${reason}" \
+            '. + [{ecosystem:$ecosystem, package:$package, version:$version, reason:$reason}]' <<< "${revoked_arr}")
+        done < <(jq -r '.[] | .[0] + "\u001f" + .[1]' <<< "${members}")
+        ;;
+      *)
+        sf_warn "  no readable provider status — skipped"
+        sf_advisory_log "re-check skipped ecosystem=${eco} package=${pkg} version=${ver}"
+        ;;
+    esac
+  done < "${groups}"
+  rm -rf "${work}"
+
+  SF_RECHECK_REPORT=$(jq -nc \
+    --argjson newly_vulnerable "${newly_vuln_arr}" \
+    --argjson kev_hit "${kev_hit_arr}" \
+    --argjson revoked "${revoked_arr}" \
+    --argjson suspected_forgery "${suspected_forgery_arr}" \
+    --argjson errors "${errors_arr}" \
+    --argjson checked "${checked}" \
+    --argjson still_clean "${still_clean}" \
+    "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors)') || return 1
+  [[ "$(jq 'length' <<< "${errors_arr}")" -eq 0 ]] || rc=1
+  return "${rc}"
+}
 
 cmd_recheck() {
   while [[ $# -gt 0 ]]; do
@@ -1183,111 +1390,45 @@ cmd_recheck() {
   done
 
   sf_require_jq
-  safedeps_ledger_init
+  # A re-check runs under the watch lock, so two never revoke from one ledger at
+  # once and a scan never reads one half done. lib/watch/watch.sh takes the
+  # lock (or answers busy, exit 75) and runs this command again as its child,
+  # naming itself in SAFEDEPS_WATCH_LOCK_HELD: a value that is not this
+  # process's parent is not the lock.
+  if [[ "${SAFEDEPS_WATCH_LOCK_HELD:-}" != "${PPID}" ]]; then
+    SAFEDEPS_VERSION="${SAFEDEPS_VERSION}" SAFEDEPS_JSON_MODE="${SAFEDEPS_JSON_MODE}" \
+      exec bash "${SAFEDEPS_REPO_DIR}/lib/watch/watch.sh" locked re-check
+  fi
+  local rc=0
 
-  if ! sf_ledger_files; then
+  sf_recheck_stage || rc=$?
+  if [[ "${rc}" -eq 4 ]]; then
     sf_ledger_unlisted "re-check"
     return 4
   fi
-  local entries=("${SF_LEDGER_FILES[@]+${SF_LEDGER_FILES[@]}}")
-
-  local checked=0 still_clean=0
-  local newly_vuln_arr='[]' kev_hit_arr='[]' revoked_arr='[]' suspected_forgery_arr='[]'
-
-  for f in "${entries[@]+${entries[@]}}"; do
-    local ecosystem pkg version revoked_at hash context_hash
-    ecosystem=$(jq -r '.ecosystem' "${f}")
-    pkg=$(jq -r '.package' "${f}")
-    version=$(jq -r '.version' "${f}")
-    revoked_at=$(jq -r '.revoked_at // ""' "${f}")
-    hash=$(jq -r '.hash // ""' "${f}")
-    context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${f}")
-    [[ -n "${revoked_at}" ]] && continue
-    local expected_hash forgery_reason=""
-    if [[ "${ecosystem}" == *[[:cntrl:]]* || "${pkg}" == *[[:cntrl:]]* || "${version}" == *[[:cntrl:]]* ]]; then
-      # The canonical hash joins the fields with newlines, so a control char
-      # (newline/tab/...) injected into one field shifts the field boundary and
-      # lets a different (ecosystem, package, version) tuple collide onto a
-      # legitimate approval's hash. No real package spec contains control
-      # characters, so a spec that does is itself a forged/malformed entry.
-      forgery_reason="malformed_spec"
-    else
-      # The stored hash is attacker-writable: recompute the canonical hash from
-      # the entry's own spec so a valid hash copied from another approval cannot
-      # borrow that approval's provenance.
-      expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}" "${context_hash}")
-      if [[ "${hash}" != "${expected_hash}" ]]; then
-        forgery_reason="hash_spec_mismatch"
-      elif ! sf_ledger_has_approval_provenance "${expected_hash}" "${ecosystem}" "${pkg}" "${version}"; then
-        forgery_reason="missing_advisory_log_approval"
-      fi
-    fi
-    if [[ -n "${forgery_reason}" ]]; then
-      sf_warn "  no provenance — flagged as suspected forgery (not revoked, reason=${forgery_reason})"
-      suspected_forgery_arr=$(jq -c \
-        --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg hash "${hash}" --arg reason "${forgery_reason}" \
-        '. + [{ecosystem:$ecosystem, package:$package, version:$version, hash:$hash, reason:$reason}]' <<< "${suspected_forgery_arr}")
-    fi
-    checked=$(( checked + 1 ))
-
-    sf_info "re-checking ${ecosystem} ${pkg}@${version}"
-    local pj
-    if ! pj=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${version}" 2>/dev/null); then
-      sf_warn "  no provider response — skipped"
-      continue
-    fi
-    local s; s=$(sf_provider_status "${pj}")
-    case "${s}" in
-      "${SAFEDEPS_STATUS_CLEAN}")
-        still_clean=$(( still_clean + 1 ))
-        ;;
-      "${SAFEDEPS_STATUS_VULNERABLE}"|"${SAFEDEPS_STATUS_HARD_BLOCK}")
-        local reason="re-check ${s}"
-        safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" "${context_hash}" >/dev/null
-        sf_advisory_log "re-check revoke ecosystem=${ecosystem} package=${pkg} version=${version} status=${s}"
-        if [[ "${s}" == "${SAFEDEPS_STATUS_HARD_BLOCK}" ]]; then
-          sf_err "  KEV match -> revoked"
-          kev_hit_arr=$(jq -c \
-            --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" \
-            "${SAFEDEPS_STATUS_JQ}"'. + [{ecosystem:$ecosystem, package:$package, version:$version, status:status_hard_block}]' <<< "${kev_hit_arr}")
-        else
-          sf_warn "  new CVE match -> revoked"
-          newly_vuln_arr=$(jq -c \
-            --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" \
-            "${SAFEDEPS_STATUS_JQ}"'. + [{ecosystem:$ecosystem, package:$package, version:$version, status:status_vulnerable}]' <<< "${newly_vuln_arr}")
-        fi
-        revoked_arr=$(jq -c \
-          --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg reason "${reason}" \
-          '. + [{ecosystem:$ecosystem, package:$package, version:$version, reason:$reason}]' <<< "${revoked_arr}")
-        ;;
-      *)
-        sf_warn "  no readable provider status — skipped"
-        sf_advisory_log "re-check skipped ecosystem=${ecosystem} package=${pkg} version=${version}"
-        ;;
-    esac
-  done
-
-  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-    jq -nc \
-      --argjson newly_vulnerable "${newly_vuln_arr}" \
-      --argjson kev_hit "${kev_hit_arr}" \
-      --argjson revoked "${revoked_arr}" \
-      --argjson suspected_forgery "${suspected_forgery_arr}" \
-      --argjson checked "${checked}" \
-      --argjson still_clean "${still_clean}" \
-      "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery)'
-    return 0
+  if [[ -z "${SF_RECHECK_REPORT}" ]]; then
+    sf_err "re-check could not finish"
+    return "${rc:-1}"
   fi
 
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    printf '%s\n' "${SF_RECHECK_REPORT}"
+    return "${rc}"
+  fi
+
+  local checked still_clean nv kv fg er
+  checked=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_checked' <<< "${SF_RECHECK_REPORT}")
+  still_clean=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_still_clean' <<< "${SF_RECHECK_REPORT}")
+  nv=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_newly_vulnerable | length' <<< "${SF_RECHECK_REPORT}")
+  kv=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_kev_hit | length' <<< "${SF_RECHECK_REPORT}")
+  fg=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_suspected_forgery | length' <<< "${SF_RECHECK_REPORT}")
+  er=$(jq -r "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_errors | length' <<< "${SF_RECHECK_REPORT}")
   sf_info "re-check complete: ${still_clean}/${checked} still clean"
-  local nv kv
-  nv=$(jq -r 'length' <<< "${newly_vuln_arr}")
-  kv=$(jq -r 'length' <<< "${kev_hit_arr}")
-  local fg
-  fg=$(jq -r 'length' <<< "${suspected_forgery_arr}")
   [[ "${nv}" -gt 0 ]] && sf_warn "revoked ${nv} for new CVE match"
   [[ "${kv}" -gt 0 ]] && sf_err  "revoked ${kv} for KEV match"
   [[ "${fg}" -gt 0 ]] && sf_warn "flagged ${fg} ledger entries with no approval provenance"
+  [[ "${er}" -gt 0 ]] && sf_err "${er} ledger entries could not be read or revoked (see --json errors)"
+  return "${rc}"
 }
 
 # ---- migrate -----------------------------------------------------------------
@@ -1394,8 +1535,38 @@ EOF
       cat <<'EOF'
 safedeps re-check [--json]
 
-  Re-query providers for every active approved spec.
+  Re-query providers for every active approved spec, each spec once.
   Auto-revoke entries that newly match a CVE or KEV.
+  An entry that cannot be read or revoked is a row of `errors`, and the run
+  goes on: the report is printed, then the command exits 1.
+  It holds the watch lock (~/.safedeps/watch/lock); a second run exits 75.
+EOF
+      ;;
+    watch)
+      cat <<'EOF'
+safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]
+
+  scan [--root DIR]     The ledger re-check, then every registered project root
+                        and the host's JDKs, measured again and merged into
+                        ~/.safedeps/watch/state.json. Exit 0 published; 1
+                        published with errors; 3 nothing published; 75 another
+                        run holds the lock (retry later).
+  status                Age of the last scan and last success, without the lock.
+  claim --consumer ID [--limit N]
+                        Take pending events; each stays claimed until acked.
+  claimed --consumer ID Events this consumer holds.
+  ack --event ID --consumer ID (--task T | --unknown)
+                        Record the dispatch an event became, or that it is
+                        unknown whether it did.
+  remediation --finding KEY --state S [--detail TEXT] [--task T]
+                        Record a repair's state on a finding.
+  retire --root DIR --evidence TEXT
+                        The owner's record that a root is gone for good.
+
+  Config: ~/.safedeps/watch/config.json (population_command, tool_path,
+  followups) and ~/.safedeps/watch/exclude (absolute prefixes never read).
+  A root on a network mount or behind an excluded prefix is never read; it is
+  reported as unmeasured.
 EOF
       ;;
     migrate)
@@ -1445,7 +1616,8 @@ COMMANDS
   ledger                                    List approved specs.
   revoke <hash | pkg@version>               Revoke an approved spec.
   re-check                                  Re-query providers for all approved specs.
-  migrate                                   Migrate legacy npm-reorg-guard state.
+  watch <scan|status|claim|ack|...>          Daily scan of projects and runtimes.
+  migrate                                  Migrate legacy npm-reorg-guard state.
   gates [run]                               Release-time repo gates: secret scan, dep audit, hook/CI check.
   scan secrets [--repo|--worktree|--staged] Run gitleaks secret scan (repo profile aware).
   audit [npm|pnpm|yarn|bun]                 Audit dependency lockfiles (auto-detects ecosystem).
@@ -1524,6 +1696,7 @@ main() {
     ledger)   cmd_ledger   "$@" ;;
     revoke)   cmd_revoke   "$@" ;;
     re-check|recheck) cmd_recheck "$@" ;;
+    watch)    cmd_watch    "$@" ;;
     migrate)  cmd_migrate  "$@" ;;
     gates)    cmd_gates    "$@" ;;
     scan)     cmd_scan     "$@" ;;
