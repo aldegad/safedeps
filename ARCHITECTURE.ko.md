@@ -733,6 +733,8 @@ OSV.dev — 응답 무 / timeout
   • effect gate 의 deadline 은 하나다: 시작부터 25초이고, backstop,
     native inspection, 모든 provider 요청(OSV page, record, KEV catalog)이
     함께 쓴다
+  • install 이 어느 registry 에서 가져왔는지에 대한 npm 의 응답
+    (`npm config ls`)도 같은 deadline 을 쓴다
   • 각 요청은 남은 시간을 받되 자신의 cap 을 넘지 않는다. 남은 시간이
     100 ms 미만이면 요청을 시작하지 않는다
   • deadline 에 잘린 OSV 요청(page 또는 record)은 응답 없음이므로
@@ -741,8 +743,24 @@ OSV.dev — 응답 무 / timeout
     download 가 모두 그렇듯, local catalog 가 오래된 것이든 아니든 답하고
     `advisory.log` 에 한 줄이 남는다. 읽을 local catalog 가 없을 때만
     응답 없음이고, install 은 rollback 된다
-  • hook 은 runtime 의 30초 kill 전에 답하며, runtime 의 kill 은 응답으로
-    세지 않는다
+  • deadline 에 잘린 npm 응답, 또는 남은 시간이 100 ms 미만이라 시작하지
+    않은 npm 응답은 `unknown` 이다
+  • 그러면 npm 에 물은 새 integrity 는 모두 그 사유와 함께 withheld 로
+    기록된다. 그 기록은 생략되지 않는다
+  • 그 byte 에는 `npm rebuild` 를 실행하지 않는다
+  • rollback 때에도 그 기록을 위해 deadline 안에서 npm 에 질의한다.
+    byte 가 npm 의 cache 에 남아 다음 project 가 쓸 수 있기 때문이다
+  • rollback 때에는 public-source check 를 위해 npm 에 질의하지 않는다.
+    그 응답은 유지된 install 만 읽는다
+  • deadline 이 제한하는 것은 판정 전에 다른 process 를 기다리는 시간이다
+  • lockfile 과 `node_modules` 순회, rollback 자체의 file 작업은 제한하지
+    않는다
+  • 확정된 install 의 `npm query` 와 `npm rebuild` 도 제한하지 않는다.
+    이 둘은 자신의 clock 을 따로 쓴다
+  • deadline 뒤, runtime 의 30초 kill 전의 5초가 이들이 쓰는 여유다
+  • 이 여유가 모든 tree 에 충분함을 보이는 test 는 없다
+  • runtime 의 kill 뒤에는 install 이 판정 없이 남으며, runtime 의
+    kill 은 응답으로 세지 않는다
 
 OSV.dev — 읽을 수 없는 응답
   • provider 목록에 없는 status, 빈 status, provider 자체 코드의 단계 실패는
@@ -773,8 +791,24 @@ OSV.dev — 읽을 수 없는 응답
     쌍 아래에만 보관한다
   • 그 쌍으로 보관한 record 는 같은 쌍으로 다시 읽는다. OSV 가 바꾼
     advisory 는 `modified` 가 새로우므로 key 도 새롭다
+  • record 는 자신의 `id` 와 `modified` 가 모두 그 쌍과 같을 때만 응답이
+    가리킨 record 다
   • `modified` 없이 가리킨 record 는 매번 질의하고 보관하지 않는다
+  • 응답에 `modified` 가 없으면 `id` 만 맞으면 된다
   • 읽을 수 없는 record, 또는 다른 advisory 의 record 는 응답 없음이다
+  • OSV 가 다른 `modified` 로 주는 record 는 이번 판정에 쓰지 않고
+    보관하지도 않는다
+  • 이때 응답은 응답 없음이다: check 는 `provider_unavailable` 을 보고한다
+  • 그러면 effect gate 는 `SAFEDEPS_ACCEPT_RISK` 여부와 상관없이
+    rollback 한다
+  • 그 쌍으로 보관한 file 이 다른 record 를 담고 있으면 그것도 응답이
+    가리킨 record 가 아니다
+  • 다른 record 란 `id` 가 다르거나, `id` 는 같고 `modified` 가 다른
+    record 다
+  • 그런 file 에는 `advisory.log` 에 WARN 한 줄이 남고 OSV 에 다시
+    질의한다
+  • file 은 그대로 둔다. OSV 가 이제 맞는 record 를 주면 그 record 가
+    file 을 대체한다
 
 CISA KEV — 응답 무
   • KEV 는 하루 1회 download 하는 정적 catalog; 로컬 cache 만 사용

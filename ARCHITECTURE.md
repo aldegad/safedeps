@@ -733,6 +733,8 @@ OSV.dev — no response / timeout
   • the effect gate has one deadline: 25 seconds from its start, shared by
     the backstop, the native inspection and every provider request (OSV
     pages, records, KEV catalog)
+  • npm's answer about the registry the install fetched from
+    (`npm config ls`) shares the same deadline
   • each request gets the time left, at most its own cap; a request with
     under 100 ms left is not started
   • an OSV request (page or record) the deadline cut is no answer, so the
@@ -741,7 +743,24 @@ OSV.dev — no response / timeout
     KEV download, a local catalog answers, stale or not, with a line in
     `advisory.log`; only with no local catalog to read is it no answer,
     and the install rolls back
-  • the hook answers before the runtime's 30-second kill, and the runtime's
+  • an npm answer the deadline cut, or one not started because under
+    100 ms was left, is `unknown`
+  • every new integrity npm was asked about is then recorded as withheld,
+    with that reason; the record is not left out
+  • `npm rebuild` does not run over those bytes
+  • on a rollback npm is still asked for that record within the deadline:
+    the bytes stay in npm's cache for the next project
+  • on a rollback npm is not asked for the public-source check; only a
+    kept install reads its answer
+  • the deadline bounds the waiting on other processes before the verdict
+  • it does not bound the walks of the lockfiles and `node_modules`, or
+    the rollback's own file work
+  • on a confirmed install it does not bound `npm query` and
+    `npm rebuild`, which keep their own clocks
+  • the 5 seconds after the deadline, before the runtime's 30-second kill,
+    are the room those take
+  • no test shows that room is enough for every tree
+  • past the runtime's kill the install stands unjudged, and the runtime's
     kill is never counted as an answer
 
 OSV.dev — an answer that cannot be read
@@ -772,9 +791,21 @@ OSV.dev — an answer that cannot be read
     `modified`) the answer gave
   • a record kept under that pair is read again under the same pair; an
     advisory OSV has changed has a new `modified`, so a new key
+  • a record is the one the answer named only when its own `id` and
+    `modified` both equal that pair
   • a record named with no `modified` is asked every time and not kept
+  • with no `modified` in the answer, only the `id` must match
   • a record that cannot be read, or that is another advisory's record, is
     no answer
+  • a record OSV serves with another `modified` is not used for this
+    verdict and is not kept
+  • the answer is then no answer: the check reports `provider_unavailable`
+  • the effect gate then rolls back, `SAFEDEPS_ACCEPT_RISK` or not
+  • a file kept under the pair that holds another record is not that
+    record either: another `id`, or the same `id` at another `modified`
+  • for such a file `advisory.log` gets a WARN line and OSV is asked again
+  • the file is left as it was unless OSV now serves the matching record,
+    which then replaces it
 
 CISA KEV — no response
   • KEV is a static catalog downloaded once a day; only the local cache is used
