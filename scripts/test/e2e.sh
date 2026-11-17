@@ -940,6 +940,12 @@ EOF
   printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 }
 f1_cut='from ?npm did not finish before the deadline, so safedeps cannot tell which registry this install fetches from'
+# The record of withheld bytes is one advisory.log line that names every
+# package it records, in the core's sorted order, each with its reason, and
+# ends with the project. Both packages of the lockfile are matched in that
+# one line, with the reason on each, and nothing after the second: a line with
+# one of them, another reason, or the two split over two lines is not it.
+f1_withheld="post-verify: recorded as withheld on this machine, by integrity: fixture-child@1.0.0 ${f1_cut}; fixture-parent@1.0.0 ${f1_cut} (into "
 # OSV holds the first page past the 20 seconds a batch request may take, so
 # the gate has a reason to roll back with about five seconds left. npm, asked
 # then, answers after 6 seconds: the deadline cuts it, its answer is unknown,
@@ -952,7 +958,7 @@ grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_
 osv_cache_rolled_back f1-slow-npm
 grep -q 'ERROR OSV batch query failed status=000 exit 28 page=1' "${SAFEDEPS_HOME}/advisory.log" \
   || fail "f1-slow-npm: the record says the first page ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
-grep -qF "post-verify: recorded as withheld on this machine, by integrity: fixture-parent@1.0.0 ${f1_cut}" "${SAFEDEPS_HOME}/advisory.log" \
+grep -qF "${f1_withheld}" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "f1-slow-npm: npm's answer the deadline cut is unknown and the new integrities are recorded as withheld: $(grep 'post-verify' "${SAFEDEPS_HOME}/advisory.log")"
 (( osv_cache_post_ms < 30000 )) || fail "f1-slow-npm: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
 (( osv_cache_post_ms >= 23000 )) || fail "f1-slow-npm: the post hook answered in ${osv_cache_post_ms}ms, before the deadline npm was given"
@@ -975,7 +981,7 @@ grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_
 osv_cache_rolled_back f1-npm-at-deadline
 grep -q 'ERROR OSV batch query failed status=000 exit 28 page=2' "${SAFEDEPS_HOME}/advisory.log" \
   || fail "f1-npm-at-deadline: the record says the second page ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
-grep -qF "post-verify: recorded as withheld on this machine, by integrity: fixture-parent@1.0.0 ${f1_cut}" "${SAFEDEPS_HOME}/advisory.log" \
+grep -qF "${f1_withheld}" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "f1-npm-at-deadline: npm past the deadline is unknown and the new integrities are recorded as withheld: $(grep 'post-verify' "${SAFEDEPS_HOME}/advisory.log")"
 (( osv_cache_post_ms < 30000 )) || fail "f1-npm-at-deadline: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
 # No hold, and npm at once: a clean install stays, and its public bytes are
