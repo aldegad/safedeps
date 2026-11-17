@@ -95,7 +95,7 @@ Running `safedeps gates run --root <repo> --strict` locally is the safe first st
 
 Entry points:
 
-- `safedeps watch status [--json]`: read the last published state without taking the lock. Use it to see the age of the last scan, the last full scan (`last_full_scan`, which a root scan does not replace) and the last success, and `awaiting_owner`: the live findings that wait for the owner's judgment, each with why.
+- `safedeps watch status [--json]`: read the last published state without taking the lock. Use it to see the age of the last scan, the last full scan (`last_full_scan`, which a root scan does not replace) and the last success, and `awaiting_owner`: the live findings that wait for the owner's judgment, each with why and its `report_fact`.
 - `safedeps watch scan [--json]`: run a full scan under the lock. The installed LaunchAgent runs the same scan once a day.
 - `safedeps watch scan --root DIR`: measure one root again. Every other root's state and every undelivered event are kept. Run it before and after a repair.
 
@@ -117,7 +117,7 @@ Rules:
 - Never read a network mount or an excluded prefix to fill a gap. It is measured only on the host that owns it.
 - As a consumer: `claim --consumer ID`, then dispatch, then `ack --event ID --consumer ID` with `--task T` or `--unknown`. Never re-send by time.
 - As a consumer, read `last_full_scan` and `awaiting_owner` from `watch status` by name. Do not rebuild either from `state.json`. An `--unknown` ack does not take a finding out of `awaiting_owner`.
-- `report_acknowledged` is the owner's judgment of a finding that only reports: `no_fix_available`, or a runtime's `update_available` or `pre_announced`. Only the owner records it, with the judgment in `--detail`. It is not a repair. A scan that changes the report puts the finding back in `awaiting_owner`.
+- `report_acknowledged` is the owner's judgment of a finding that only reports: `no_fix_available`, or a runtime's `update_available` or `pre_announced`. Only the owner records it, with the judgment in `--detail` and, in `--expect`, the `report_fact` of the row they judged. If the finding's report is another one by then, nothing is written. It is not a repair. A scan that changes the report later puts the finding back in `awaiting_owner`.
 
 When you are handed a watch finding to repair:
 
@@ -127,7 +127,7 @@ When you are handed a watch finding to repair:
 - Pass: merge locally only. Push and deploy follow that project's existing authority. A deploy left to its owner is `awaiting_deploy`.
 - Fail: keep the branch and the logs, leave main untouched, record `fix_failed`.
 - No fixed version: the finding is `no_fix_available` and is looked at again every day. Never use a made-up version or an arbitrary downgrade. `SAFEDEPS_ACCEPT_RISK` is a person's decision and is not a repair.
-- Record progress with `safedeps watch remediation --finding KEY --state S [--detail TEXT] [--task T]`, where S is `dispatched`, `blocked`, `fix_failed`, `awaiting_deploy` or `fixed_pending_rescan`. It does not close the finding. The next scan that sees the fixed version does. `report_acknowledged` is the owner's, not yours.
+- Record progress with `safedeps watch remediation --finding KEY --state S [--detail TEXT] [--task T]`, where S is `dispatched`, `blocked`, `fix_failed`, `awaiting_deploy` or `fixed_pending_rescan`. It does not close the finding. The next scan that sees the fixed version does. After `fixed_pending_rescan`, a scan that still sees the finding puts it back in `awaiting_owner` as `rescan_still_live`. `report_acknowledged` is the owner's, not yours.
 
 Options: `safedeps help watch`. How it works: [ARCHITECTURE.md, The daily watch](./ARCHITECTURE.md#the-daily-watch). Installing the agent: [`README.md`](./README.md#daily-watch-with-macos-alerts).
 

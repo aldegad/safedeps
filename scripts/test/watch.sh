@@ -688,6 +688,9 @@ row "two consumers: a claimed event is held by its consumer until it acks it, un
 # ---- what waits for the owner, and the last full scan --------------------------------------
 # aw KEY: the why of KEY in the last `watch status` (out), as a JSON array.
 aw() { jq -c --arg k "$1" '[.awaiting_owner[] | select(.key == $k) | .why]' <<< "${out}"; }
+# rf KEY: the report_fact of KEY's row in the last `watch status` (out), the
+# value the owner hands back with --expect.
+rf() { jq -c --arg k "$1" '.awaiting_owner[] | select(.key == $k) | .report_fact' <<< "${out}"; }
 ack_all_unknown() { # CONSUMER: claim every pending event and ack each --unknown
   local e
   sd watch claim --consumer "$1" --limit 50
@@ -701,9 +704,9 @@ ack_all_unknown() { # CONSUMER: claim every pending event and ack each --unknown
 row_report_only_npm() {
   new_world; register a
   npm_lock "${d}/p/a" lone@1.0.0 left@1.0.0
-  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lone-lone-lone '' lone '')] | .osv[\"left@1.0.0\"] = [$(osv_record GHSA-left-left-left '' left 1.0.1)]"
+  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lone-lone-lone CVE-2026-4101 lone '')] | .osv[\"left@1.0.0\"] = [$(osv_record GHSA-left-left-left '' left 1.0.1)]"
   scan_ok
-  local lone left g events
+  local lone left g events fact left_fact
   lone=$(npm_findings | jq -r '.[] | select(.package == "lone") | .key')
   left=$(npm_findings | jq -r '.[] | select(.package == "left") | .key')
   # The day's send failed: every event was acked unknown. Both findings still wait.
@@ -711,13 +714,31 @@ row_report_only_npm() {
   scan_ok
   sd watch status
   [[ "$(aw "${lone}")" == '["unassigned"]' && "$(aw "${left}")" == '["unassigned"]' ]] || no "after unknown acks: lone $(aw "${lone}"), left $(aw "${left}")"
-  # A finding that can be fixed, and a judgment without words, are refused.
+  fact=$(rf "${lone}")
+  left_fact=$(rf "${left}")
+  [[ "$(jq -c '{state, fixed, kev}' <<< "${fact}")" == '{"state":"no_fix_available","fixed":[],"kev":null}' ]] || no "lone's report_fact: ${fact}"
+  # A finding that can be fixed, a judgment without words, and one that does
+  # not name the report it judged are refused.
   g=$(gen)
-  sd watch remediation --finding "${left}" --state report_acknowledged --detail "seen"
+  sd watch remediation --finding "${left}" --state report_acknowledged --detail "seen" --expect "${left_fact}"
   [[ "${rc}" != 0 && "$(gen)" == "${g}" ]] || no "report_acknowledged on an open finding: rc ${rc}, generation $(gen)"
-  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "   "
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "   " --expect "${fact}"
   [[ "${rc}" != 0 && "$(gen)" == "${g}" ]] || no "report_acknowledged with a blank detail: rc ${rc}, generation $(gen)"
   sd watch remediation --finding "${lone}" --state report_acknowledged --detail "upstream fix awaited"
+  [[ "${rc}" != 0 && "$(gen)" == "${g}" ]] || no "report_acknowledged without --expect: rc ${rc}, generation $(gen)"
+  # KEV lists lone after the owner read the status: the judgment was made on
+  # another report. It is refused, nothing is written, and the error shows the
+  # report as it is now.
+  fx '.kev = ["CVE-2026-4101"]'
+  scan_ok
+  g=$(gen)
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "upstream fix awaited" --expect "${fact}"
+  [[ "${rc}" != 0 && "$(gen)" == "${g}" ]] || no "a judgment of the report before the KEV listing: rc ${rc}, generation $(gen)"
+  grep -qF '"kev":true' "${d}/stderr" || no "the refusal does not show the report now: $(head -c 400 "${d}/stderr")"
+  sd watch status
+  [[ "$(aw "${lone}")" == '["unassigned"]' && "$(rf "${lone}" | jq '.kev')" == true ]] || no "after the refusal: lone $(aw "${lone}") $(rf "${lone}")"
+  fact=$(rf "${lone}")
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "listed in KEV; upstream fix awaited" --expect "${fact}"
   [[ "${rc}" == 0 ]] || no "report_acknowledged exited ${rc}: $(head -c 300 "${d}/stderr")"
   events=$(jq -c '[.events[] | {id, status}]' "${home}/watch/state.json")
   scan_ok
@@ -726,13 +747,13 @@ row_report_only_npm() {
   [[ "$(jq -c '[.events[] | {id, status}]' "${home}/watch/state.json")" == "${events}" ]] || no "the events moved: $(jq -c '[.events[] | {id, status}]' "${home}/watch/state.json")"
   # A fixed version is published: the judgment was made on another report.
   # OSV moves `modified` when it changes a record.
-  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lone-lone-lone '' lone 1.0.2)] | .osv[\"lone@1.0.0\"][0].modified = \"2026-11-10T00:00:00Z\""
+  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lone-lone-lone CVE-2026-4101 lone 1.0.2)] | .osv[\"lone@1.0.0\"][0].modified = \"2026-11-10T00:00:00Z\""
   scan_ok
   sd watch status
   [[ "$(aw "${lone}")" == '["acknowledged_other_state"]' ]] || no "no_fix -> open: lone $(aw "${lone}")"
   st --arg k "${lone}" '[.events[] | select(.finding == $k and .from == "no_fix_available" and .to == "open" and .status == "pending")] | length == 1' "one no_fix -> open event" '.events'
 }
-row "awaiting_owner: a no-fix finding acked --unknown still waits; report_acknowledged takes it out, is refused on an open finding or a blank detail, and holds until a fix is published" row_report_only_npm
+row "awaiting_owner: a no-fix finding acked --unknown still waits; report_acknowledged takes it out, is refused on an open finding, a blank detail, no --expect or a report KEV listed after the status was read, and holds until a fix is published" row_report_only_npm
 
 row_report_only_runtime() {
   new_world; register older pre
@@ -742,7 +763,7 @@ row_report_only_runtime() {
   fx ".adoptium = {\"21\": $(release jdk-21.0.14+7 21 14), \"17\": $(release jdk-17.0.18+7 17 18)}
       | .openjdk = [{date: \"2026-10-20\", affected: \"21.0.13, 17.0.18\"}]"
   scan_ok
-  local older pre k pending
+  local older pre pending older_fact pre_fact
   older=$(jq -r --arg r "${d}/p/older" '.findings[] | select(.root == $r and .ecosystem == "runtime") | .key' "${home}/watch/state.json")
   pre=$(jq -r --arg r "${d}/p/pre" '.findings[] | select(.root == $r and .ecosystem == "runtime") | .key' "${home}/watch/state.json")
   st --arg o "${older}" --arg p "${pre}" '.findings[$o].state == "update_available" and .findings[$p].state == "pre_announced" and .findings[$p].fixed == []' "the two runtime findings" '.findings'
@@ -750,10 +771,12 @@ row_report_only_runtime() {
   scan_ok
   sd watch status
   [[ "$(aw "${older}")" == '["unassigned"]' && "$(aw "${pre}")" == '["unassigned"]' ]] || no "after unknown acks: older $(aw "${older}"), pre $(aw "${pre}")"
-  for k in "${older}" "${pre}"; do
-    sd watch remediation --finding "${k}" --state report_acknowledged --detail "the owner installs the update on 2026-11-25"
-    [[ "${rc}" == 0 ]] || no "report_acknowledged exited ${rc}: $(head -c 300 "${d}/stderr")"
-  done
+  older_fact=$(rf "${older}")
+  pre_fact=$(rf "${pre}")
+  sd watch remediation --finding "${older}" --state report_acknowledged --detail "the owner installs the update on 2026-11-25" --expect "${older_fact}"
+  [[ "${rc}" == 0 ]] || no "report_acknowledged on older exited ${rc}: $(head -c 300 "${d}/stderr")"
+  sd watch remediation --finding "${pre}" --state report_acknowledged --detail "the owner installs the update on 2026-11-25" --expect "${pre_fact}"
+  [[ "${rc}" == 0 ]] || no "report_acknowledged on pre exited ${rc}: $(head -c 300 "${d}/stderr")"
   # A newer advisory names 17.0.18 again: pre stays pre_announced with fixed []
   # and a new date, so it waits again. Older's report did not move: it does not.
   fx '.openjdk += [{date: "2026-11-10", affected: "17.0.18"}]'
@@ -773,26 +796,69 @@ row "awaiting_owner on runtimes: report_acknowledged holds while the report hold
 
 row_report_ack_lock() {
   new_world; register a
-  npm_lock "${d}/p/a" lone@1.0.0
-  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lock-lock-lock '' lone '')]"
+  npm_lock "${d}/p/a" lone@1.0.0 kevd@1.0.0
+  fx ".osv[\"lone@1.0.0\"] = [$(osv_record GHSA-lock-lock-lock '' lone '')] | .osv[\"kevd@1.0.0\"] = [$(osv_record GHSA-kevd-kevd-kevd CVE-2026-4102 kevd '')]"
   scan_ok
-  local lone first g
-  lone=$(npm_findings | jq -r '.[0].key')
+  local lone kevd first g lone_fact kevd_fact
+  lone=$(npm_findings | jq -r '.[] | select(.package == "lone") | .key')
+  kevd=$(npm_findings | jq -r '.[] | select(.package == "kevd") | .key')
+  sd watch status
+  lone_fact=$(rf "${lone}")
+  kevd_fact=$(rf "${kevd}")
   bg_scan first after_lock
   first=${bg_pid}
   wait_for "${d}/first.pause"
   g=$(gen)
-  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "seen"
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "seen" --expect "${lone_fact}"
   [[ "${rc}" == 75 && "$(gen)" == "${g}" ]] || no "report_acknowledged during a scan: rc ${rc}, generation $(gen)"
+  sd watch remediation --finding "${kevd}" --state report_acknowledged --detail "seen" --expect "${kevd_fact}"
+  [[ "${rc}" == 75 && "$(gen)" == "${g}" ]] || no "report_acknowledged during a scan: rc ${rc}, generation $(gen)"
+  # The scan that held the lock reads KEV after the pause, and KEV lists kevd.
+  fx '.kev = ["CVE-2026-4102"]'
   rm -f "${d}/first.pause"
   wait "${first}" || no "the paused scan exited $?: $(head -c 300 "${d}/first.err")"
-  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "seen"
-  [[ "${rc}" == 0 ]] || no "the retry exited ${rc}"
+  # The same commands again, as they were.
+  sd watch remediation --finding "${lone}" --state report_acknowledged --detail "seen" --expect "${lone_fact}"
+  [[ "${rc}" == 0 ]] || no "the retry exited ${rc}: $(head -c 300 "${d}/stderr")"
+  g=$(gen)
+  sd watch remediation --finding "${kevd}" --state report_acknowledged --detail "seen" --expect "${kevd_fact}"
+  [[ "${rc}" != 0 && "${rc}" != 75 && "$(gen)" == "${g}" ]] || no "the retry after a scan that listed kevd in KEV: rc ${rc}, generation $(gen)"
+  grep -qF '"kev":true' "${d}/stderr" || no "the refusal does not show the report now: $(head -c 400 "${d}/stderr")"
   scan_ok
   sd watch status
-  [[ "$(aw "${lone}")" == '[]' ]] || no "the next scan dropped the judgment: $(aw "${lone}")"
+  [[ "$(aw "${lone}")" == '[]' && "$(aw "${kevd}")" == '["unassigned"]' ]] || no "after the next scan: lone $(aw "${lone}"), kevd $(aw "${kevd}")"
 }
-row "report_acknowledged while a scan holds the lock exits 75 and changes nothing; the retry is kept by the next scan" row_report_ack_lock
+row "report_acknowledged while a scan holds the lock exits 75 and changes nothing; the same command again is kept by the next scan, and refused for a finding that scan listed in KEV" row_report_ack_lock
+
+# fixed_pending_rescan is the worker's word. A scan that started after it and
+# still sees the finding contradicts it, and the finding waits again;
+# awaiting_deploy does not. The scan waits for the next second: last_seen and
+# the record's time are both whole seconds.
+row_rescan_still_live() {
+  new_world; register a
+  npm_lock "${d}/p/a" left@1.0.0 right@2.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-resc-resc-resc '' left 1.0.1)] | .osv[\"right@2.0.0\"] = [$(osv_record GHSA-depl-depl-depl '' right 2.0.1)]"
+  scan_ok
+  local left right t0
+  left=$(npm_findings | jq -r '.[] | select(.package == "left") | .key')
+  right=$(npm_findings | jq -r '.[] | select(.package == "right") | .key')
+  sd watch remediation --finding "${left}" --state fixed_pending_rescan --task kongkongi-fixture-3
+  [[ "${rc}" == 0 ]] || no "fixed_pending_rescan exited ${rc}"
+  sd watch remediation --finding "${right}" --state awaiting_deploy --task kongkongi-fixture-4
+  [[ "${rc}" == 0 ]] || no "awaiting_deploy exited ${rc}"
+  sd watch status
+  [[ "$(aw "${left}")" == '[]' && "$(aw "${right}")" == '[]' ]] || no "before a scan: left $(aw "${left}"), right $(aw "${right}")"
+  t0=$(date -u +%s)
+  while [[ "$(date -u +%s)" == "${t0}" ]]; do sleep 0.1; done
+  scan_ok
+  sd watch status
+  [[ "$(aw "${left}")" == '["rescan_still_live"]' && "$(aw "${right}")" == '[]' ]] || no "a scan that still sees both: left $(aw "${left}"), right $(aw "${right}")"
+  [[ "$(rf "${left}" | jq -c '{state, fixed}')" == '{"state":"open","fixed":["1.0.1"]}' ]] || no "left's row: $(rf "${left}")"
+  npm_lock "${d}/p/a" left@1.0.1 right@2.0.0
+  scan_ok
+  st --arg k "${left}" '.findings[$k].state == "closed" and .findings[$k].closed_reason == "seen_fixed"' "left closed by the fixed lockfile" '.findings'
+}
+row "fixed_pending_rescan: a later scan that still sees the finding puts it back as rescan_still_live, and one that sees the fix closes it; awaiting_deploy still seen does not wait" row_rescan_still_live
 
 row_last_full_scan() {
   new_world; register a

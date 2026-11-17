@@ -67,11 +67,25 @@ def day_of($ts): ($ts // "" | .[0:10]);
 # versions as a set, the advisory and its record ids, its URL and date, the
 # reason, the vendor's latest and the KEV answer. first_seen, last_seen and
 # the other times a scan stamps are not in it, so a scan that only saw the
-# finding again leaves it as it was.
+# finding again leaves it as it was. kev reads true or null: not listed (false)
+# and a catalog the scan could not read (null, with a kev_unavailable error of
+# that scan) are one value here, so a listing reopens a judgment and an outage
+# of the catalog does not.
 def report_fact:
   {state, fixed: ((.fixed // []) | unique), advisory: (.advisory // null), ids: ((.ids // []) | unique),
    advisory_url: (.advisory_url // null), advisory_date: (.advisory_date // null),
    reason: (.reason // null), latest: (.latest // null), kev: (.kev // null)};
+
+# The shape of a report_fact handed back by the owner (--expect): every key and
+# no other, each of the type the producers write.
+def report_fact_keys: ["advisory", "advisory_date", "advisory_url", "fixed", "ids", "kev", "latest", "reason", "state"];
+def is_report_fact:
+  type == "object" and keys == report_fact_keys
+  and (.state | type) == "string"
+  and (.fixed | type) == "array" and all(.fixed[]; type == "string")
+  and (.ids | type) == "array" and all(.ids[]; type == "string")
+  and all(.advisory, .advisory_url, .advisory_date, .reason, .latest; type == "string" or type == "null")
+  and (.kev == null or (.kev | type) == "boolean");
 
 # ---- scan merge --------------------------------------------------------------
 # $prior: the last complete document (or empty_state). $m: what this run
@@ -250,28 +264,48 @@ def ack_event($id; $consumer; $outcome; $task; $now):
   else .events |= map(if .id == $id then . + {status: $outcome, task: $task, acked_at: $now} else . end)
   end;
 
-# report_acknowledged is taken only for a live finding that only reports, and
-# only with the owner's judgment in words. It keeps the report it was made on
-# (seen), so a scan that changes the report puts the finding back in
-# awaiting_owner. The check and the snapshot are one reading of the document
-# the caller holds under the lock.
-def set_remediation($key; $state; $detail; $task; $now):
+# report_acknowledged is taken only for a live finding that only reports, only
+# with the owner's judgment in words, and only for the report the owner judged:
+# $expect is that report_fact, as awaiting_owner printed it. It must equal the
+# finding's report_fact now, or nothing is written and the error names the
+# report as it is now, for the owner to judge. A scan that changes the report
+# later puts the finding back in awaiting_owner. The check and the record are
+# one reading of the document the caller holds under the lock. $expect is the
+# empty string when it was not given; no other state takes one.
+def set_remediation($key; $state; $detail; $task; $expect; $now):
   .findings[$key] as $f
   | if $f == null then error("no such finding: " + $key)
     elif (remediation_states | index($state)) == null then error("not a remediation state: " + $state)
-    elif $state != "report_acknowledged" then .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now}
+    elif $state != "report_acknowledged" then
+      (if $expect != "" then error("--expect goes with --state report_acknowledged only")
+       else .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now} end)
     elif ($f | is_closed) then error("report_acknowledged needs a live finding; this one is closed: " + $key)
     elif (report_only_states | index($f.state)) == null then
       error("report_acknowledged is for a finding that only reports (" + (report_only_states | join(", ")) + "), not " + ($f.state | tostring) + ": " + $key)
     elif (($detail // "") | test("\\S") | not) then error("report_acknowledged needs --detail: the owner's judgment, in words")
-    else .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now, seen: ($f | report_fact)}
+    elif $expect == "" then
+      error("report_acknowledged needs --expect: the report_fact of the awaiting_owner row you judged, as watch status printed it")
+    else
+      ($expect | try fromjson catch null) as $e
+      | ($f | report_fact) as $fact
+      | if ($e | is_report_fact | not) then
+          error("--expect is not a report_fact (exactly the keys " + (report_fact_keys | join(", ")) + "): " + $expect)
+        elif ($e | report_fact) != $fact then
+          error("report_acknowledged refused, nothing written: the report is not the one you judged. Judge this one: " + ($fact | tojson))
+        else .findings[$key].remediation = {state: $state, detail: $detail, task: $task, at: $now, seen: $fact}
+        end
     end;
 
 # The live findings that wait for the owner's judgment, with why: unassigned
 # (no remediation), blocked or fix_failed (work that stopped),
-# acknowledged_other_state (a report_acknowledged made on another report), or
-# unrecognized_remediation (a value this definition does not know). A finding a
-# worker is on and a report_acknowledged that still holds do not wait.
+# acknowledged_other_state (a report_acknowledged made on another report),
+# rescan_still_live (fixed_pending_rescan, and a scan that started after it was
+# written still saw the finding), or unrecognized_remediation (a value this
+# definition does not know). A finding a worker is on and a report_acknowledged
+# that still holds do not wait. A scan that did not measure the finding does
+# not move last_seen, so an unmeasured finding is not taken for one seen.
+# Each row carries the finding's report_fact, which the owner hands back with
+# report_acknowledged.
 def awaiting_owner:
   [.findings | to_entries[]
    | .value as $f
@@ -281,9 +315,10 @@ def awaiting_owner:
       elif $r == "blocked" or $r == "fix_failed" then $r
       elif $r == "report_acknowledged" then
         (if $f.remediation.seen == ($f | report_fact) then null else "acknowledged_other_state" end)
+      elif $r == "fixed_pending_rescan" and (($f.last_seen // "") > ($f.remediation.at // "")) then "rescan_still_live"
       elif (remediation_in_progress | index($r)) != null then null
       else "unrecognized_remediation" end) as $why
    | select($why != null)
    | {key, state: $f.state, root: $f.root, ecosystem: $f.ecosystem, package: $f.package, version: $f.version,
-      fixed: $f.fixed, remediation: $f.remediation, why: $why}]
+      fixed: $f.fixed, report_fact: ($f | report_fact), remediation: $f.remediation, why: $why}]
   | sort_by(.key);

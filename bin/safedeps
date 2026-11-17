@@ -1560,6 +1560,13 @@ safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]
                         unknown whether it did.
   remediation --finding KEY --state S [--detail TEXT] [--task T]
                         Record a repair's state on a finding.
+  remediation --finding KEY --state report_acknowledged --detail TEXT
+              --expect REPORT_FACT
+                        The owner's judgment of a finding that only reports.
+                        REPORT_FACT is the report_fact of the awaiting_owner
+                        row the owner judged, as status printed it. If the
+                        finding's report is another one now, nothing is
+                        written and the error prints it.
   retire --root DIR --evidence TEXT
                         The owner's record that a root is gone for good.
 

@@ -78,7 +78,7 @@ watch_transform() {
 }
 
 watch_main() {
-  local sub="${1:-}" root="" consumer="" limit=20 event="" task="" outcome="" finding="" state="" detail="" evidence=""
+  local sub="${1:-}" root="" consumer="" limit=20 event="" task="" outcome="" finding="" state="" detail="" evidence="" expect=""
   [[ $# -gt 0 ]] && shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -92,6 +92,7 @@ watch_main() {
       --state) state="${2:-}"; shift 2 ;;
       --detail) detail="${2:-}"; shift 2 ;;
       --evidence) evidence="${2:-}"; shift 2 ;;
+      --expect) expect="${2:-}"; shift 2 ;;
       -h|--help) exec "${SAFEDEPS_SD}" help watch ;;
       *) watch_say "unexpected arg for watch ${sub}: $1"; return 4 ;;
     esac
@@ -150,10 +151,11 @@ watch_main() {
       jq -nc --arg id "${event}" --arg outcome "${outcome}" --arg task "${task}" '{command:"watch ack", event:$id, status:$outcome, task:(if $task == "" then null else $task end)}'
       ;;
     remediation)
-      [[ -n "${finding}" && -n "${state}" ]] || { watch_say "usage: safedeps watch remediation --finding KEY --state STATE [--detail TEXT] [--task TASK]"; return 4; }
+      [[ -n "${finding}" && -n "${state}" ]] || { watch_say "usage: safedeps watch remediation --finding KEY --state STATE [--detail TEXT] [--task TASK] [--expect REPORT_FACT]"; return 4; }
       watch_lock_or_refuse "watch remediation" || return $?
-      watch_transform 'set_remediation($key; $state; $detail; (if $task == "" then null else $task end); $now)' \
-        --arg key "${finding}" --arg state "${state}" --arg detail "${detail}" --arg task "${task}" --arg now "${now}" > /dev/null || return $?
+      watch_transform 'set_remediation($key; $state; $detail; (if $task == "" then null else $task end); $expect; $now)' \
+        --arg key "${finding}" --arg state "${state}" --arg detail "${detail}" --arg task "${task}" --arg expect "${expect}" \
+        --arg now "${now}" > /dev/null || return $?
       jq -nc --arg key "${finding}" --arg state "${state}" '{command:"watch remediation", finding:$key, state:$state}'
       ;;
     retire)
