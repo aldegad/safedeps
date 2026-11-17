@@ -1,6 +1,6 @@
 //! npm records, fetch answers, and the machine-wide record of withheld bytes.
 use super::{jv,sh,closure,workspaces,tree,trace::{self,Install},snapshot::Store,report::{self,Report,cat}};
-use crate::{ask,callid::record as rec,json::Value,state,os,sha256};
+use crate::{ask,callid::record as rec,json::Value,state,os,sha256,outcome::{Outcome,Action,Form}};
 use std::{fs,path::Path,time::{Duration,Instant}};
 type W=Vec<u8>;
 pub const WITHHELD_SCOPE:&[u8]=b"safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry";
@@ -16,10 +16,19 @@ pub fn unread_note(meta:&Path)->W{if report::inert_unread(meta){cat(&[b". ",repo
 #[derive(Default)]
 pub struct Npm{pub sources:Vec<W>,pub nodes:Vec<W>,pub facts:Option<Value>,pub recorded:Vec<W>}
 impl Npm{
-    pub fn facts(&mut self,store:&Store,current:&Value)->&Value{
+    /// npm's answers about the registry this install fetched from: the
+    /// pre-guard's, and npm's own after the command. npm is asked within the
+    /// post run's deadline (`until`, post::LIMIT from its start) and never a
+    /// window of its own, and not at all with less than post::LEAST_REQUEST
+    /// left. An answer the deadline cut or never let start is `unknown`, the
+    /// same as an npm that failed: every new integrity it was asked about is
+    /// recorded as withheld, and npm rebuild does not run over it.
+    pub fn facts(&mut self,store:&Store,current:&Value,until:Instant)->&Value{
         if self.facts.is_none(){
             let pre=match field(current,rec::NPM_FETCH){Ok(v@Value::Obj(_))=>v.clone(),_=>jv::obj(vec![("unknown",jv::s(b"the pre-guard left no answer about which registry this install fetches from"))])};
-            let post=ask::fetch_facts(&store.project,Instant::now()+Duration::from_secs(ask::POST_SECONDS),&[],&[b"--workspaces=false".to_vec()]);
+            let post=if until.saturating_duration_since(Instant::now())<super::LEAST_REQUEST{
+                jv::obj(vec![("unknown",jv::s(&cat(&[&Outcome::Deadline.describe(Action::Npm,Form::Action),b", so safedeps cannot tell which registry this install fetches from"])))])
+            }else{ask::fetch_facts(&store.project,until,&[],&[b"--workspaces=false".to_vec()])};
             self.facts=Some(Value::Arr(vec![pre,post]));
         }self.facts.as_ref().unwrap()
     }
@@ -125,25 +134,28 @@ impl Npm{
             for token in tokens{let Value::Str(t)=token else{return Err(())};jv::set(&mut out,t.clone(),entry.clone());}
         }Ok(Value::Obj(out))
     }
-    pub fn record(&mut self,store:&Store,current:&Value,trace:&Install,report:&mut Report){
+    /// The record of withheld bytes is written on a rollback too: the bytes
+    /// stay in npm's cache for the next project. Its npm answer waits only
+    /// within `until`; past it the answer is `unknown` (see `facts`).
+    pub fn record(&mut self,store:&Store,current:&Value,trace:&Install,report:&mut Report,until:Instant){
         if trace.absent{return}
         let hidden=store.project.join(trace::RECORDS[1]);
         let judged=if sh::is_file(&hidden){sh::mktemp(&cat(&[sh::bytes(&store.home),b"/snapshots/.",&store.id,b"_judged."])).and_then(|p|if sh::cp(&hidden,&p)==0{Some(p)}else{sh::rm_f(&p);None})}else{None};
         let tree=judged.as_deref().unwrap_or(&hidden);
-        let success=self.record_inner(store,current,tree,report);
+        let success=self.record_inner(store,current,tree,report,until);
         if success&&!sourced(current)&&trace.records.iter().any(|r|r==trace::RECORDS[1].as_bytes()){
             if let Some(j)=&judged{Self::observe(store,j);}
         }
         if let Some(j)=judged{sh::rm_f(&j);}
     }
-    fn record_inner(&mut self,store:&Store,current:&Value,tree:&Path,report:&mut Report)->bool{
+    fn record_inner(&mut self,store:&Store,current:&Value,tree:&Path,report:&mut Report,until:Instant)->bool{
         let project=sh::bytes(&store.project);
         let found=match Self::fresh_integrities(store,tree){Ok(f)=>f,Err(_)=>{
             state::log_advisory(&store.home,&cat(&[b"post-verify: the npm records in ",project,b" could not be read for the bytes this install brought in, so none of them were recorded as withheld."]));
             report.say(cat(&[b"safedeps could not read which bytes this install brought into ",project,b", so if npm fetched any of them from a registry that is not the public npm registry, it has not recorded them, and another project that receives the same bytes may rebuild them"]));return false;
         }};
         if found.is_empty(){return true}
-        let mut facts=self.facts(store,current).clone();
+        let mut facts=self.facts(store,current,until).clone();
         if sourced(current){
             if let Value::Arr(fs)=&mut facts{fs.retain(|f|!matches!(field(f,"cause"),Ok(Value::Str(c)) if c==b"sourced"));}
             state::log_advisory(&store.home,&cat(&[b"post-verify: not recording the bytes this install brought into ",project,b" as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. safedeps did not run npm rebuild for them this time",&unread_note(&store.meta()),b"."]));
@@ -221,15 +233,19 @@ fn clauses(lines:&[W])->W{
     }out.join(b", and ".as_slice())
 }
 impl Npm{
-    pub fn sources(&mut self,store:&Store,current:&Value,input:&[u8],codex:bool,reasons:&mut Vec<W>,confirm:&mut Vec<W>){
+    /// The public-registry sources are judged against npm's answer only for
+    /// an install that may be kept: what that judgment gives (a confirm line,
+    /// and a log line that says the install is kept) is read by nothing on a
+    /// rollback, so with a reason already given npm is not asked for it.
+    pub fn sources(&mut self,store:&Store,current:&Value,input:&[u8],codex:bool,reasons:&mut Vec<W>,confirm:&mut Vec<W>,until:Instant){
         if self.sources.is_empty(){return}
         let mut nonstandard=Vec::new();let mut public=Vec::new();
         for line in &self.sources{
             let url=line.windows(2).position(|x|x==b": ").map(|p|&line[p+2..]).unwrap_or(line);
             if closure::public_registry_url(url){public.push(line.clone());}else{nonstandard.push(line.clone());}
         }
-        if !public.is_empty(){
-            let facts=self.facts(store,current).clone();let mut fetched=Vec::new();let mut failed=false;
+        if !public.is_empty()&&reasons.is_empty(){
+            let facts=self.facts(store,current,until).clone();let mut fetched=Vec::new();let mut failed=false;
             for entry in public{
                 let url=entry.windows(2).position(|x|x==b": ").map(|p|&entry[p+2..]).unwrap_or(&entry);
                 match ask::fetch_known_problems(&facts,&String::from_utf8_lossy(url)){
@@ -279,7 +295,7 @@ impl Npm{
         let origins=|url:&Value|ask::fetch_origins(facts,&String::from_utf8_lossy(jv::text(url).ok_or(())?)).map(|os|os.iter().map(|o|o.value()).collect());
         tree::judge(&store.project,&store.home,&jv::read(&answer.stdout),withheld,&problems,&origins).map_err(|_|b"npm query answered with something safedeps could not compare with the lockfiles".to_vec())
     }
-    pub fn rebuild(&mut self,store:&Store,current:&Value,trace:&mut Install,input:&[u8],report:&mut Report){
+    pub fn rebuild(&mut self,store:&Store,current:&Value,trace:&mut Install,input:&[u8],report:&mut Report,until:Instant){
         if !meta_true(&store.meta(),"ignore_scripts_injected"){return}
         let meta=store.meta();let home=&store.home;let project=sh::bytes(&store.project);
         if trace.absent{report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&trace.line]));trace.said=true;return}
@@ -294,7 +310,7 @@ impl Npm{
         }
         // This tree still needs npm's registry answers when the install
         // brought in no new integrity and record()/sources() needed none.
-        self.facts(store,current);
+        self.facts(store,current,until);
         let withheld=match withheld_read(home){Ok(v)=>v,Err(_)=>{
             let why=cat(&[b"safedeps could not read its record of the bytes it withheld in ",sh::bytes(&home.join("npm-withheld"))]);
             state::log_advisory(home,&cat(&[b"post-verify: npm rebuild after the install skipped in ",project," — ".as_bytes(),&why,b", so it cannot tell that tree holds none of them."]));
@@ -311,7 +327,7 @@ impl Npm{
             let rest:Vec<_>=blockers.into_iter().filter(|l|![b"fetched\t".as_slice(),b"origin\t",b"withheld\t",b"held\t"].iter().any(|p|l.starts_with(p))).collect();
             if !rest.is_empty(){report.say(cat(&[b"npm rebuild was not run: the tree npm would rebuild in ",project,b" holds ",&clauses(&rest),b". safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. safedeps did not run npm rebuild; review it, then run `npm rebuild` yourself if it is what you expect"]));}return;
         }
-        use std::process::{Command,Stdio};use crate::outcome::{Outcome,Action,Form};
+        use std::process::{Command,Stdio};
         let child=Command::new("npm").current_dir(&store.project).args(["rebuild","--global=false","--location=project","--prefix"]).arg(&store.project)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
         let outcome=match child {

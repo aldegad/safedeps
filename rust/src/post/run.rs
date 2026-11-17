@@ -149,9 +149,9 @@ fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<
 }
 
 fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant) -> Result<Option<W>, i32> {
-    // One deadline for the run, fixed at its start: the provider requests and
-    // the native inspection end by it, so what is left is the room the answer
-    // takes, a rollback included, before the runtime ends the hook.
+    // One deadline for the run, fixed at its start: the provider requests, the
+    // native inspection and npm's registry answer end by it (post::LIMIT says
+    // what it does not bound), so no wait on another process runs past it.
     let until = post_started + super::LIMIT;
     if call.record != Record::Install { return backstop(call, journal, input, until) }
     let mut trace = Install::settle(&call.store.project, &call.store.home, &call.current, &call.command);
@@ -167,8 +167,8 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
     effect::check(&call.store, &mut reasons, accept.as_ref().map(|_| &mut accepted), until);
     heuristics::scripts(&call.store, &npm.nodes, &mut reasons)?;
     heuristics::lockfile(&call.store, &mut reasons);
-    npm.record(&call.store, &call.current, &trace, &mut report);
-    npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm);
+    npm.record(&call.store, &call.current, &trace, &mut report, until);
+    npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm, until);
     if reasons.is_empty() { heuristics::binaries(&call.store, &mut reasons, post_started); }
     let mut unrecorded = false;
     if reasons.is_empty() && !accepted.problems.is_empty() {
@@ -191,7 +191,7 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
         return rollback(call, journal, &mut trace, &mut report, target, &reasons.join(b"; ".as_slice()), input, false).map(Some)
     }
     report.lines.extend(confirm);
-    npm.rebuild(&call.store, &call.current, &mut trace, input, &mut report);
+    npm.rebuild(&call.store, &call.current, &mut trace, input, &mut report, until);
     call.store.confirm(&mut report).map_err(|_| 0)?;
     call.store.cleanup().map_err(|_| 0)?;
     if report.lines.is_empty() { return Ok(None) }

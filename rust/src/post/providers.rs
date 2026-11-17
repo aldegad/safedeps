@@ -20,8 +20,6 @@ const OSV_PAGES: usize = 20;
 const BATCH_SECONDS: u64 = 20;
 const RECORD_SECONDS: u64 = 15;
 const KEV_SECONDS: u64 = 15;
-/// A request with less time than this left before the deadline is not started.
-const LEAST_REQUEST: Duration = Duration::from_millis(100);
 /// Where the OSV record an answer named by its id and `modified` is kept. OSV
 /// changes `modified` whenever it changes a record, so the pair names one
 /// record. The CLI keeps it at the same path (safedeps_osv_vuln_detail), and
@@ -115,7 +113,7 @@ impl Providers{
     /// the two, and a request the deadline leaves no time for is not started.
     fn curl(url:&str,response:&Path,payload:Option<&Path>,cap:u64,until:Instant)->W{
         let left=until.saturating_duration_since(Instant::now()).min(Duration::from_secs(cap));
-        if left<LEAST_REQUEST{return Outcome::Deadline.describe(Action::Curl,Form::Action)}
+        if left<super::LEAST_REQUEST{return Outcome::Deadline.describe(Action::Curl,Form::Action)}
         let seconds=format!("{}.{:03}",left.as_secs(),left.subsec_millis());
         let mut c=Command::new("curl");c.args(["-fsS","--max-time",seconds.as_str()]);
         if payload.is_some(){c.args(["-H","Content-Type: application/json"]);}

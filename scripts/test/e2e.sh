@@ -880,6 +880,110 @@ grep -q 'ERROR OSV batch query failed status=000 exit 28 page=2' "${SAFEDEPS_HOM
   || fail "deadline: the record says the second page ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
 (( osv_cache_post_ms < 30000 )) || fail "deadline: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
 (( osv_cache_post_ms >= 23000 )) || fail "deadline: the post hook answered in ${osv_cache_post_ms}ms, before the deadline it was given"
+
+# npm's answer about the registry an install fetched from ends by the same
+# deadline (Npm::facts), and so does no wait of its own. The lockfile and the
+# hidden lockfile record each package's integrity and public resolved URL, so
+# the install brought in bytes the record of withheld bytes is about, and the
+# stub npm answers `npm config ls` with npm's defaults after F1_CONFIG_DELAY
+# seconds, and `npm prefix` and `npm root` at once, so the pre-guard's answer
+# is known. The stub's sleep is not a child the hook kills; it ends by itself
+# within the delay.
+f1_bin="${tmp_root}/f1-bin"
+mkdir -p "${f1_bin}"
+cat > "${f1_bin}/npm" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  prefix) pwd -P ;;
+  root) printf '%s/node_modules\n' "$(pwd -P)" ;;
+  config)
+    [[ "${F1_CONFIG_DELAY:-0}" == 0 ]] || sleep "${F1_CONFIG_DELAY}"
+    printf '%s\n' '{"registry":"https://registry.npmjs.org/","replace-registry-host":"npmjs"}' ;;
+esac
+exit 0
+STUB
+chmod +x "${f1_bin}/npm"
+f1_install() {
+  local name="$1" state="$2" delay="$3" dir="${tmp_root}/f1-${1}" started
+  mkdir -p "${dir}/project"
+  printf '{"dependencies":{}}\n' > "${dir}/project/package.json"
+  export SAFEDEPS_HOME="${dir}/home"
+  ./bin/safedeps --json check npm fixture-parent@1.0.0 >/dev/null
+  osv_cache_project="${dir}/project"
+  osv_cache_pre=$(
+    PATH="${f1_bin}:${PATH}" pre_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}","turn_id":"turn-e2e","model":"codex-test"}
+EOF
+  )
+  hook_response_parse "${osv_cache_pre}" quiet || fail "f1-${name}: the pre hook allows the approved spec"
+  cat > "${osv_cache_project}/package-lock.json" <<'EOF'
+{
+  "name": "f1-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "integrity": "sha512-fixtureParent100", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz", "integrity": "sha512-fixtureChild100"}
+  }
+}
+EOF
+  mkdir -p "${osv_cache_project}/node_modules"
+  cp "${osv_cache_project}/package-lock.json" "${osv_cache_project}/node_modules/.package-lock.json"
+  printf '%s\n' "${state}" > "${state_file}"
+  started=$(python3 -c 'import time; print(int(time.time() * 1000))')
+  osv_cache_post=$(
+    PATH="${f1_bin}:${PATH}" F1_CONFIG_DELAY="${delay}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}"}
+EOF
+  )
+  osv_cache_post_ms=$(( $(python3 -c 'import time; print(int(time.time() * 1000))') - started ))
+  printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+}
+f1_cut='from ?npm did not finish before the deadline, so safedeps cannot tell which registry this install fetches from'
+# OSV holds the first page past the 20 seconds a batch request may take, so
+# the gate has a reason to roll back with about five seconds left. npm, asked
+# then, answers after 6 seconds: the deadline cuts it, its answer is unknown,
+# and the new integrities are recorded as withheld under that reason rather
+# than left out. Asked within a window of its own, it would answer, and
+# nothing would be recorded.
+f1_install slow-npm '{"vulnerable":[],"hold_first_ms":60000}' 6
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "f1-slow-npm: a batch the deadline cut is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back f1-slow-npm
+grep -q 'ERROR OSV batch query failed status=000 exit 28 page=1' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-slow-npm: the record says the first page ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
+grep -qF "post-verify: recorded as withheld on this machine, by integrity: fixture-parent@1.0.0 ${f1_cut}" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-slow-npm: npm's answer the deadline cut is unknown and the new integrities are recorded as withheld: $(grep 'post-verify' "${SAFEDEPS_HOME}/advisory.log")"
+(( osv_cache_post_ms < 30000 )) || fail "f1-slow-npm: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
+(( osv_cache_post_ms >= 23000 )) || fail "f1-slow-npm: the post hook answered in ${osv_cache_post_ms}ms, before the deadline npm was given"
+# The same with npm answering at once: its answer is known, the bytes came
+# from the public registry, and nothing is recorded as withheld.
+f1_install npm-in-time '{"vulnerable":[],"hold_first_ms":60000}' 0
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "f1-npm-in-time: a batch the deadline cut is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back f1-npm-in-time
+! grep -q 'recorded as withheld' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-npm-in-time: npm answered in time and nothing is withheld: $(grep 'withheld' "${SAFEDEPS_HOME}/advisory.log")"
+(( osv_cache_post_ms < 30000 )) || fail "f1-npm-in-time: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
+# OSV's second page is held to the deadline itself, so npm has less than
+# post::LEAST_REQUEST left, or nothing: it is not waited for past the
+# deadline. Asked within a window of its own, the hook would answer after the
+# runtime's 30 seconds.
+f1_install npm-at-deadline '{"vulnerable":[],"paged":["fixture-parent@1.0.0"],"hold_first_ms":15000,"hold_next_ms":60000}' 6
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "f1-npm-at-deadline: a page the deadline cut is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back f1-npm-at-deadline
+grep -q 'ERROR OSV batch query failed status=000 exit 28 page=2' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-npm-at-deadline: the record says the second page ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
+grep -qF "post-verify: recorded as withheld on this machine, by integrity: fixture-parent@1.0.0 ${f1_cut}" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-npm-at-deadline: npm past the deadline is unknown and the new integrities are recorded as withheld: $(grep 'post-verify' "${SAFEDEPS_HOME}/advisory.log")"
+(( osv_cache_post_ms < 30000 )) || fail "f1-npm-at-deadline: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
+# No hold, and npm at once: a clean install stays, and its public bytes are
+# not withheld.
+f1_install npm-clean '{"vulnerable":[]}' 0
+grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" || fail "f1-npm-clean: a clean install stays: $(cat "${osv_cache_post}")"
+! grep -q 'recorded as withheld' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-npm-clean: nothing is withheld: $(grep 'withheld' "${SAFEDEPS_HOME}/advisory.log")"
 export SAFEDEPS_HOME="${osv_cache_homes[0]}"
 if [[ -n "${osv_cache_homes[1]}" ]]; then
   export SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${osv_cache_homes[1]}"

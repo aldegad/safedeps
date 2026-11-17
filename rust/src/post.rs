@@ -29,12 +29,23 @@ mod run;
 
 /// The one deadline of a post run, counted from its start (`main`'s
 /// `started`). Every request a judgment waits on (the OSV batch, its pages and
-/// records, the KEV catalog) and the native inspection end by it, each cut to
-/// the time left, and a step it cut is unanswered: a rollback. What is left
-/// after it, before the 30 seconds the runtime gives the hook, is the room the
-/// answer takes, the rollback or the confirm. The runtime's kill is never the
-/// answer: past it the install stands unjudged.
+/// records, the KEV catalog), the native inspection and npm's answer about the
+/// registry it fetched from (`Npm::facts`) end by it, each cut to the time
+/// left, and none is started with less than `LEAST_REQUEST` left. An OSV
+/// request it cut is unanswered: a rollback. A KEV download it cut falls back
+/// on the local catalog. An npm answer it cut is `unknown`, which records
+/// every new integrity as withheld and keeps npm rebuild from running over it.
+///
+/// What this bounds is the waiting on other processes before the verdict. It
+/// does not bound the rest: the walks of the lockfiles and node_modules, the
+/// rollback's own file work, and on a confirmed install npm query and npm
+/// rebuild, which keep their own clocks. The 5 seconds after it, before the
+/// runtime's 30, are the room those take. No test shows that room is enough
+/// for every tree, and past the runtime's kill the install stands unjudged.
 pub(crate) const LIMIT: std::time::Duration = std::time::Duration::from_secs(25);
+/// A request with less than this left before `LIMIT` is not started: what it
+/// could do in the time left is not an answer to wait for.
+pub(crate) const LEAST_REQUEST: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A measurement entry, fed one JSON request. It calls the same operations
 /// the hook uses; the reference side calls their bash functions.
