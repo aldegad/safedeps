@@ -794,6 +794,12 @@ osv_batch_url="${SAFEDEPS_OSV_BATCH_API_URL}"
 osv_body_number=0
 for body in '' '{}' '{"vulns":[]}' 'null' '{"vulns":false}' unreadable; do
   osv_body_number=$((osv_body_number + 1))
+  # An unreadable file is one that chmod 000 makes unreadable. A Windows drive
+  # in WSL1, mounted without metadata, keeps it readable, so there the
+  # filesystem is asked first and these rows say they are skipped.
+  if [[ "${body}" == unreadable ]]; then
+    row_if "osv-answer-unreadable (vulnerable-${osv_body_number}, down-${osv_body_number}, clean-${osv_body_number})" read || continue
+  fi
   osv_row="vulnerable-${osv_body_number}"
   osv_cache_install "${osv_row}" "${body}" '{"vulnerable":["fixture-parent@1.0.0"]}' "${osv_batch_url}"
   grep -q 'npm closure contains vulnerable package(s): fixture-parent@1.0.0' < "${osv_cache_post}" \
@@ -814,6 +820,7 @@ for body in '' '{}' '{"vulns":[]}' 'null' '{"vulns":false}' unreadable; do
   hook_response_parse "${osv_cache_post}" quiet || fail "an earlier answer of '${body}' is not read and a clean install stays: $(cat "${osv_cache_post}")"
   grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" || fail "${osv_row}: a clean install stays"
   osv_cache_untouched "${osv_row}" "${body}"
+  [[ "${body}" != unreadable ]] || row_end
 done
 osv_body_number=0
 for live in '{"results":[null,{}]}' '{"results":[false,{}]}' '{"results":[[],{}]}' '{"results":[{"vulns":false},{}]}'; do
@@ -1150,6 +1157,11 @@ kev_catalog_url="${SAFEDEPS_KEV_CATALOG_URL}"
 kev_body_number=0
 for body in '' 'null' '{}' '{"vulnerabilities":false}' '{"vulnerabilities":[]}' '{"vulnerabilities":[{}]}' 'not json' unreadable; do
   kev_body_number=$((kev_body_number + 1))
+  # As for the OSV answer above: where chmod 000 leaves the catalog readable,
+  # these rows say they are skipped.
+  if [[ "${body}" == unreadable ]]; then
+    row_if "kev-catalog-unreadable (listed-${kev_body_number}, down-${kev_body_number}, stale-${kev_body_number}, clean-${kev_body_number})" read || continue
+  fi
   kev_row="listed-${kev_body_number}"
   kev_catalog_install "${kev_row}" "${body}" "${kev_catalog_url}" listed
   grep -q 'npm closure contains KEV-blocked package(s): fixture-parent@1.0.0' < "${kev_catalog_post}" \
@@ -1178,6 +1190,7 @@ for body in '' 'null' '{}' '{"vulnerabilities":false}' '{"vulnerabilities":[]}' 
     || fail "a KEV catalog of '${body}' is replaced and a clean install stays: $(cat "${kev_catalog_post}")"
   grep -q 'fixture-parent' "${kev_catalog_project}/package-lock.json" || fail "${kev_row}: a clean install stays"
   jq -e '.vulnerabilities | length > 0' "${kev_catalog_path}" >/dev/null || fail "${kev_row}: the download replaces the file"
+  [[ "${body}" != unreadable ]] || row_end
 done
 kev_body_number=0
 for kev_catalog_live in 'null' '{}' '{"vulnerabilities":[]}' '{"vulnerabilities":[{}]}' "${kev_catalog_body} {}"; do
