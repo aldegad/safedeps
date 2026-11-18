@@ -152,7 +152,7 @@ ORACLE_PROSE=(
   "prose-bytes-unread|rollback confirm accepted|0|safedeps could not read which bytes this install brought into "
   "prose-fetch-unknown|rollback confirm accepted|0|safedeps could not tell where npm fetched the bytes this install brought into "
   "prose-record-failed|rollback confirm accepted|0|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
-  "prose-fetched-elsewhere|confirm accepted|2|this install fetched packages from a registry that is not the public npm registry ("
+  "prose-fetched-elsewhere|confirm accepted|3|this install fetched packages from a registry that is not the public npm registry ("
 )
 oracle_prose_field() {
   local entry="$1" n="$2"
