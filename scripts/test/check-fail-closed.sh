@@ -720,6 +720,34 @@ no_answer_kept() {
 }
 row "npm: a check keeps no OSV answer" no_answer_kept npm
 row "non-npm: a check keeps no OSV answer" no_answer_kept pypi
+# An approval says where its OSV answer came from: `answered` is "live", asked
+# by this check, and `observed_at` is when the check held the whole answer. It
+# is a UTC time no earlier than the query (`queried_at`) and within the check.
+# The npm closure is asked by the batch query and pypi by the single query,
+# and each writes its own status, so the row reads both.
+answered_live() {
+  local ecosystem osv queried entry before after
+  for ecosystem in npm pypi; do
+    if [[ "${ecosystem}" == npm ]]; then
+      osv='.evidence.provider.results[0].provider_status.osv' queried='.evidence.provider.results[0].queried_at'
+    else
+      osv='.evidence.provider_status.osv' queried='.evidence.queried_at'
+    fi
+    fresh_home
+    before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    check_in "${ecosystem}" fixture-clean@1.0.0
+    after=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    passed_clean
+    entry=$(find "${home}/approved-specs" -name '*.json' -type f)
+    jq -e --arg before "${before}" --arg after "${after}" "
+      ${osv} as \$o | ${queried} as \$q
+      | \$o.answered == \"live\"
+        and (\$o.observed_at | type == \"string\" and test(\"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\$\"))
+        and \$o.observed_at >= \$q and \$o.observed_at >= \$before and \$o.observed_at <= \$after" "${entry}" >/dev/null \
+      || no "${ecosystem}: the entry's OSV status $(jq -c "${osv}" "${entry}"), queried at $(jq -r "${queried}" "${entry}"), check ${before}..${after}"
+  done
+}
+row "an approval says OSV was asked live and when this check held its answer" answered_live
 record_kept_by_pair() {
   local key
   fresh_home
