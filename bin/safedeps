@@ -1369,8 +1369,8 @@ sf_recheck_stage() {
         sf_err "  no provider answer — neither still clean nor revoked"
         sf_advisory_log "re-check unanswered ecosystem=${eco} package=${pkg} version=${ver} entries=${count}"
         while IFS=$'\x1f' read -r ctx_hash file; do
-          errors_arr=$(jq -c --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" --arg file "${file}" \
-            '. + [{kind:"provider_unavailable", ecosystem:$ecosystem, package:$package, version:$version, file:$file}]' <<< "${errors_arr}")
+          errors_arr=$(jq -c --arg kind "${SAFEDEPS_CHECK_PROVIDER_UNAVAILABLE}" --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" --arg file "${file}" \
+            '. + [{kind:$kind, ecosystem:$ecosystem, package:$package, version:$version, file:$file}]' <<< "${errors_arr}")
         done < <(jq -r '.[] | .[0] + "\u001f" + .[1]' <<< "${members}")
         ;;
     esac
