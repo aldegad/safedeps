@@ -160,6 +160,17 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && path === '/osv/v1/querybatch') {
     const body = await readJson(req);
     const queries = Array.isArray(body.queries) ? body.queries : [];
+    // A batch that names a package listed under `batch_fails` (name@version)
+    // fails whole, as a querybatch OSV could not serve does. A batch that names
+    // none of them answers.
+    const failing = state().batch_fails;
+    if (Array.isArray(failing)
+      && queries.some((query) => failing.includes(`${query.package?.name || ''}@${query.version || ''}`))) {
+      res.statusCode = 500;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ code: 13, message: 'fixture: this batch fails' }));
+      return;
+    }
     // A batch is held before it answers: a first page by hold_first_ms, a
     // page asked with a token by hold_next_ms.
     const held = state()[queries.some((query) => query.page_token) ? 'hold_next_ms' : 'hold_first_ms'];

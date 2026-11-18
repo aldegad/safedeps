@@ -13,8 +13,9 @@
 #
 # A row's fault is real where it can be (a damaged cache file, a closed port) and
 # otherwise comes from a jq in front of the real one: the call whose arguments
-# hold every line of STUB_MATCH fails, or, with STUB_STATUS set, has its output's
-# status replaced. No row runs an install; `check` only reads and judges.
+# and input hold every line of STUB_MATCH fails, or, with STUB_STATUS set, has
+# its output's status replaced. No row runs an install; `check` only reads and
+# judges.
 #
 # The last section fails each read a verdict rests on in the way that hides
 # best: the tool runs, prints what it prints, and exits non-zero. Most of these
@@ -93,7 +94,14 @@ cat > "${closures}" <<'JSON'
   "fixture-parent@1.0.0": [{"package":"fixture-parent","version":"1.0.0","direct":true},{"package":"fixture-child","version":"1.0.0","direct":false}],
   "fixture-vuln@1.0.0": [{"package":"fixture-vuln","version":"1.0.0","direct":true},{"package":"fixture-child","version":"1.0.0","direct":false}],
   "fixture-vuln@1.0.1": [{"package":"fixture-vuln","version":"1.0.1","direct":true}],
-  "fixture-unpatched@1.0.0": [{"package":"fixture-unpatched","version":"1.0.0","direct":true}]
+  "fixture-unpatched@1.0.0": [{"package":"fixture-unpatched","version":"1.0.0","direct":true}],
+  "fixture-paged@1.0.0": [{"package":"fixture-paged","version":"1.0.0","direct":true}],
+  "fixture-bad-token@1.0.0": [{"package":"fixture-bad-token","version":"1.0.0","direct":true}],
+  "fixture-endless@1.0.0": [{"package":"fixture-endless","version":"1.0.0","direct":true}],
+  "fixture-kev-alias@1.0.0": [{"package":"fixture-kev-alias","version":"1.0.0","direct":true}],
+  "fixture-record-missing@1.0.0": [{"package":"fixture-record-missing","version":"1.0.0","direct":true}],
+  "fixture-record-other@1.0.0": [{"package":"fixture-record-other","version":"1.0.0","direct":true}],
+  "fixture-stale-record@1.0.0": [{"package":"fixture-stale-record","version":"1.0.0","direct":true}]
 }
 JSON
 closure_with() {
@@ -104,16 +112,55 @@ closure_with fixture-kev-dep "${tmp_root}/closures-kev.json"
 closure_with fixture-extra "${tmp_root}/closures-extra.json"
 export SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON="${closures}"
 
-# jq, with one call gone wrong.
+# jq, with one call gone wrong. A call is matched by its arguments and, when it
+# reads standard input, by that input too: a writer that takes its item on
+# stdin is matched by the item. The stub reads stdin only for a call that jq
+# reads it for, reads it once, and hands the real jq the same bytes.
 stub_bin="${tmp_root}/stub-bin"
 mkdir -p "${stub_bin}"
 real_jq=$(command -v jq)
+real_cat=$(command -v cat)
+real_grep=$(command -v grep)
+real_mktemp=$(command -v mktemp)
+real_rm=$(command -v rm)
 cat > "${stub_bin}/jq" <<STUB
 #!/usr/bin/env bash
+# jq reads stdin unless -n is given, an input file follows the filter, or the
+# rest of the line is --args or --jsonargs.
+reads=1 filter=0 rest=files skip=0 opts=1
+for arg in "\$@"; do
+  if (( skip > 0 )); then skip=\$((skip - 1)); continue; fi
+  if (( opts )); then
+    case "\${arg}" in
+      --) opts=0; continue ;;
+      --arg|--argjson|--slurpfile|--rawfile) skip=2; continue ;;
+      -f|--from-file) filter=1; skip=1; continue ;;
+      -L|--indent) skip=1; continue ;;
+      -L?*) continue ;;
+      --null-input) reads=0; continue ;;
+      --args|--jsonargs) rest=args; continue ;;
+      --*) continue ;;
+      -?*) [[ "\${arg}" != *n* ]] || reads=0; continue ;;
+    esac
+  fi
+  if (( filter == 0 )); then filter=1; elif [[ "\${rest}" == files ]]; then reads=0; fi
+done
+input=""
+if (( reads )); then
+  input=\$("${real_mktemp}" "${tmp_root}/stub-stdin.XXXXXX") || exit 2
+  "${real_cat}" > "\${input}" || exit 2
+fi
 hit=1
 while IFS= read -r wanted; do
-  [[ -n "\${wanted}" && "\$*" == *"\${wanted}"* ]] || hit=0
+  [[ -n "\${wanted}" ]] || { hit=0; continue; }
+  [[ "\$*" != *"\${wanted}"* ]] || continue
+  [[ -n "\${input}" ]] && "${real_grep}" -qF -- "\${wanted}" "\${input}" && continue
+  hit=0
 done <<< "\${STUB_MATCH:-}"
+if [[ -n "\${input}" ]]; then
+  exec < "\${input}"
+  "${real_rm}" -f "\${input}"
+fi
 [[ "\${hit}" -eq 1 ]] || exec "${real_jq}" "\$@"
 [[ -n "\${STUB_STATUS+set}" ]] || exit 5
 args=()
@@ -556,6 +603,18 @@ kev_said_once() {
 }
 row "npm: a closure reads the KEV catalog once, and says it is stale once" kev_said_once
 
+# What re-check says of an entry no provider answered: neither still clean nor
+# revoked, an error of the run (exit 1), and the entry stays.
+recheck_unanswered() {
+  [[ "${rc}" == 1 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 0 and .revoked == []
+    and (.errors | map(.kind) == ["provider_unavailable"])
+    and (.errors[0] | .ecosystem == "pypi" and .package == "fixture-clean" and .version == "1.0.0")' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  grep -q 're-check unanswered ecosystem=pypi package=fixture-clean version=1.0.0' "${home}/advisory.log" || no "advisory.log has no unanswered line"
+  [[ -n "$(find "${home}/approved-specs" -name '*.json' -type f)" ]] || no "the entry was removed"
+  jq -e '(.revoked_at // "") == ""' "$(find "${home}/approved-specs" -name '*.json' -type f | head -1)" >/dev/null || no "the entry was revoked"
+}
 kev_recheck_counts_nothing() {
   fresh_home
   check_in pypi fixture-clean@1.0.0
@@ -563,9 +622,7 @@ kev_recheck_counts_nothing() {
   : > "$(kev_file)"
   rc=0
   json=$(env "${kev_down[@]}" SAFEDEPS_HOME="${home}" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
-  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
-  jq -e '.checked == 1 and .still_clean == 0 and .revoked == []' <<< "${json}" >/dev/null || no "the report: ${json}"
-  [[ -n "$(find "${home}/approved-specs" -name '*.json' -type f)" ]] || no "the entry is gone"
+  recheck_unanswered
 }
 row "re-check with no KEV catalog to read counts nothing clean and revokes nothing" kev_recheck_counts_nothing
 
@@ -854,15 +911,32 @@ STUB
 }
 row "cve_unpatched reports the requested version, not a clean candidate it could not scope" deny_only_candidate
 
+# The fixture fails each querybatch that names a package of batch_fails and
+# answers every other one, so a row can fail the candidate's batch alone.
+fail_batches() {
+  jq --argjson names "$1" '.batch_fails = $names' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+}
+# Only the candidate's batch fails: the requested version is judged, and the
+# candidate it found has no answer. Under the same fault a package the fault
+# does not name, and the requested version whose candidate does not name it,
+# are answered.
 candidate_batch_failed() {
+  trap 'fail_batches "[]"' EXIT
+  fail_batches '["fixture-extra@1.0.0"]'
+  fresh_home
+  check_in npm fixture-clean@1.0.0
+  passed_clean
   fresh_home
   check_in npm fixture-vuln@1.0.0
   [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
-  check_in npm fixture-vuln@1.0.0 SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON="${tmp_root}/closures-extra.json" SAFEDEPS_OSV_BATCH_API_URL="${closed_port}"
+  jq -e '.result == "patched_available" and .approved == true and .suggested_spec == "1.0.1"' <<< "${json}" >/dev/null \
+    || no "the first run's report: ${json}"
+  check_in npm fixture-vuln@1.0.0 SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON="${tmp_root}/closures-extra.json"
   [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
   jq -e '.result == "provider_unavailable" and .approved == false and .resolved_version == "1.0.0" and .suggested_spec == "1.0.1"' <<< "${json}" >/dev/null \
     || no "the report: ${json}"
   grep -q 'check fail-closed' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+  grep -q 'OSV batch query failed status=500' "${home}/advisory.log" || no "advisory.log does not say a batch failed"
 }
 row "npm: a failed batch for a patch candidate answers in JSON and is recorded" candidate_batch_failed
 
@@ -905,18 +979,6 @@ recheck_unknown_status() {
   rc=0
   json=$(env PATH="${stub_bin}:${PATH}" STUB_MATCH="${writer_one}" STUB_STATUS=weird SAFEDEPS_HOME="${home}" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
   recheck_unanswered
-}
-# What re-check says of an entry no provider answered: neither still clean nor
-# revoked, an error of the run (exit 1), and the entry stays.
-recheck_unanswered() {
-  [[ "${rc}" == 1 ]] || no "exit ${rc}: ${json}"
-  jq -e '.checked == 1 and .still_clean == 0 and .revoked == []
-    and (.errors | map(.kind) == ["provider_unavailable"])
-    and (.errors[0] | .ecosystem == "pypi" and .package == "fixture-clean" and .version == "1.0.0")' <<< "${json}" >/dev/null \
-    || no "the report: ${json}"
-  grep -q 're-check unanswered ecosystem=pypi package=fixture-clean version=1.0.0' "${home}/advisory.log" || no "advisory.log has no unanswered line"
-  [[ -n "$(find "${home}/approved-specs" -name '*.json' -type f)" ]] || no "the entry was removed"
-  jq -e '(.revoked_at // "") == ""' "$(find "${home}/approved-specs" -name '*.json' -type f | head -1)" >/dev/null || no "the entry was revoked"
 }
 row "re-check does not count an unknown status as clean, and reports it as an error" recheck_unknown_status
 recheck_provider_down() {
