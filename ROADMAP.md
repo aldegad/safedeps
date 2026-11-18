@@ -43,7 +43,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 |---|---|
 | `v2.0-doc` | `ARCHITECTURE.md` v2 written and pushed. |
 | `v2.1-rename` | Repo / skill id / paths renamed to `safedeps`; `safedeps migrate` moves legacy `~/.npm-reorg-guard` state to `~/.safedeps` and cleans up legacy hooks. |
-| `v2.1-providers` | `lib/providers/` — OSV / KEV / GHSA adapters behind one query interface, with a 24h response cache. |
+| `v2.1-providers` | `lib/providers/` — OSV / KEV / GHSA adapters behind one query interface, with a 24h response cache. v2.21.0 removed the OSV response cache. The KEV catalog and GHSA answers still use the 24h cache. |
 | `v2.1-ledger` | `lib/ledger/` — approved-spec JSON I/O (atomic write, hash, TTL check). |
 | `v2.1-cli` | `bin/safedeps` — `check`, `ledger`, `revoke`, `re-check`, `migrate`, `version` subcommands. |
 | `v2.1-guard-patch` | `safedeps-pre-guard.sh` — ledger enforcement on top of the v1 pattern blocks. |
@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.20.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.21.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily watch uses no LLM tokens and is opt-in: the same macOS `launchd` user agent, installed by `install-safedeps-recheck-agent.mjs`, now runs `safedeps --json watch scan` daily. On top of the ledger re-check, it judges the lockfiles under the registered project roots and reports the update status of the host's JDKs. It writes `~/.safedeps/watch/state.json`, `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl`. It raises a macOS notification on new events, a population that is not fresh, a run with errors, a stale agent runtime, and the ledger alerts kept from the re-check (new CVE/KEV/revoke/provider-skip/suspected-forgery). A busy scan is recorded in `recheck-alerts.jsonl` without a notification. Network is used only for OSV / CISA KEV / GHSA queries, the OpenJDK Vulnerability Group advisories, the Adoptium API, and the native audits of pnpm, yarn and bun against the npm registry's advisory database.
 
@@ -68,7 +68,7 @@ Status: shipped as v2.2.0 (npm-first).
 
 - **Authority moved to effects**: PostToolUse now reads the actual `package-lock.json` closure and compares every installed `pkg@version` against approved direct specs plus their `transitive_specs`.
 - **Full closure approval for npm**: `safedeps check npm <pkg>@<version>` resolves a script-free lockfile in a temp dir with `npm install --package-lock-only --ignore-scripts`, extracts the full closure, and queries OSV `/v1/querybatch`.
-- **Batch + cache**: OSV batch responses are written back into the same per `pkg@version` 24h cache used by single-package provider queries.
+- **Batch + cache**: OSV batch responses are written back into the same per `pkg@version` 24h cache used by single-package provider queries. v2.21.0 removed this OSV cache. OSV is now asked live on every check and on every effect-gate run.
 - **No blind trust for transitives**: a clean direct package with an unapproved or vulnerable transitive dependency is not enough; the full closure must be clean and recorded.
 - **PreToolUse demoted to fast UX guard**: command parsing still blocks obvious unapproved install attempts and keeps the bypass regression coverage, but PostToolUse is the primary enforcement surface.
 - **Inert install (Claude Code)**: the PreToolUse hook rewrites an npm install to add `--ignore-scripts` via the hook `updatedInput` capability, so the install runs inert; PostToolUse runs `npm rebuild` only after the closure is verified clean, so a rejected package's lifecycle scripts never run. Codex CLI lacks `updatedInput`, so it stays on detect-and-rollback.
@@ -1507,6 +1507,32 @@ Commit ecd3e72 holds this release's code and version. The corrections to this se
 - **WSL1.** The `linux-x64` binary was built the publish way on carenine from ecd3e72, and `stamp --check` said ok in WSL1 with and without `rust/`. The batteries ran at nice 0. On the Linux root: smoke 80/0 (78 s), self-budget 43/0 (123 s), effect-trace-grid 13/0 (720 s) and e2e 134/0 (349 s, 7 skipped rows). On the Windows drive: 80/0 (73 s), 43/0 (123 s), 13/0 (668 s, the second run) and 134/0 (328 s, 12 skipped rows). The skipped rows are the ones v2.19.0 and v2.19.1 skipped. Windows CPU averaged 4 to 23 percent per battery.
 - **One red, then green.** The first effect-trace-grid run on the Windows drive went red on one row: an approved install that should confirm quietly was rolled back with `npm closure OSV batch verification failed; fail-closed`. That row's `advisory.log` holds `ERROR OSV batch query failed status=000`, and the post hook failed about 20 seconds after the pre hook ran. That is the first of the known limits in WSL1 above, seen this time on the Windows drive. The procedure calls for one more run, and it was green.
 - **An independent re-read.** A reviewer who did not write this section read it against the ten commits and the code. Five claims were wider than the code, and they were narrowed before the release.
+
+## v2.21.0 — a daily watch of installed dependencies and host JDKs, OSV asked live on every check and effect-gate run, and an audited `SAFEDEPS_ACCEPT_RISK`
+
+A minor release, because it moves verdicts. OSV is asked live, so an approval can no longer rest on an answer from an earlier run. A re-check entry no provider answered is now an error, not still clean. `SAFEDEPS_ACCEPT_RISK` keeps installs the gate would have rolled back. The version bump changes the core's source stamp, so the binaries are built again. This release step integrates the version and installs it locally. It does not publish it to npm, tag it or push it.
+
+- **A daily watch replaces the opt-in daily re-check.** One `safedeps watch scan` runs the ledger re-check, then judges the lockfiles under the registered project roots, then reports the update status of the host's JDKs. There is no `clean` state: a finding closes only on evidence, and a root that cannot be reached, a lockfile that is gone or a provider that failed keeps the finding as it was, marked `stale_measurement`. The whole run holds one exclusive lock, and `safedeps re-check` now takes that lock first, so a manual re-check and a scheduled scan never run at once.
+- **OSV is asked live, and an answer is the whole answer.** OSV is asked on every check and on every effect-gate run, and `cache/osv/` is no longer read or written. An answer is every page, at most 20, with every advisory it names read as its full record under the `id` and `modified` the answer gave. The post hook's effect gate has one deadline, 25 seconds from its start, and an OSV answer that is cut or not whole rolls the install back, even under `SAFEDEPS_ACCEPT_RISK`.
+- **Re-check reports an entry no provider answered as an error.** The entry is neither still clean nor revoked: it is a row of `errors` with kind `provider_unavailable`, one row per ledger entry. The report is printed, the command exits 1 and the entry stays in the ledger. Before, such an entry was skipped with a warning and the command exited 0.
+- **`SAFEDEPS_ACCEPT_RISK` keeps an npm install a person accepted, with an audit record.** The assignment counts only as a prefix of every npm install in the command, read as written, with one non-blank value, and any other shape is denied before the install runs. Where every problem is an unapproved or vulnerable package, the install is kept with a warning: an entry goes to `~/.safedeps/accepted-risk.jsonl` first, no rebuild runs and the verified baseline does not move. A KEV listing, a check that cannot run, an install-script, source or binary finding, and an audit entry that cannot be written still roll the install back.
+- **Every file a verdict rests on is read once.** The check and the use act on that one read. A CISA KEV catalog is copied once into a directory private to the run, and the core hashes and reads the tree record from before an install from the same bytes. Before, a KEV catalog the rule refused that replaced the file after the check read as no listing, and the package was approved.
+- **Every read a verdict rests on that ran with errexit off is closed.** A jq, curl, npm or find that printed and then exited non-zero no longer reads as success in `check`, `re-check`, `revoke`, `audit`, `gates run` or the effect gate's provider requests. An approval is written only once its entry, its record and its report are all made. A check stopped by anything else answers `check_did_not_finish`, and a ledger whose files could not be listed answers `ledger_unlisted`, both with exit 4.
+- **The deny after a failed reading is narrowed, and the text test reads words.** The deny now holds only where a reading found an install or the command's text reads as an install, so `pipefail` and `npm run` no longer deny a command. The text test now reads the command as a set of words, in no order and with no structure, and a manager's name with one of its install verbs beside it reads as an install. That denies more commands than before, such as a manager in a log line and a verb in a script beside it.
+- **The external `file` command is replaced by a supervised core child.** The child reads image headers directly for ELF, Mach-O and PE images, across up to 20 sorted `.bin` targets and symlinks, without executing them. It gives no loadability or safety guarantee. An inspection that cannot run rolls the install back.
+- **npm before 11.6.0 gets a second resolution.** When a probe fails there because of cyclic optional peer dependencies, the package is pinned to its own version in the probe overrides and resolved again. The closure is judged only if a second run without the pin confirms that npm leaves the lockfile unchanged. Otherwise the report is `npm_closure_resolution_failed`.
+
+Still open:
+
+- Whether the `modified` in OSV's querybatch answer always equals the record's own `modified` is not measured.
+- The post hook does not guarantee an answer before the runtime's 30 seconds in every case. On a confirmed install, `npm query` has a bound of its own, 10 seconds from its start, which can run past the 5 seconds left after the deadline, and `npm rebuild` has none. Neither do the walk and file operations of a rollback.
+- `safedeps check` records a dist-tag such as `latest` as the version itself and does not resolve it to the version it names. Whether the pre hook then lets an install of that tag through is not measured.
+- `advisory.log` is not rotated.
+- The watch's lockfile stage now asks OSV live on every scan, with no one-hour reuse. Its cost is measured after the install.
+
+### How it was checked
+
+The release runs on this commit have not been recorded yet. Their numbers are added here after they run: the release set through the host runner on macOS, the release checks, and in WSL1 the four batteries `RELEASING.md` names on both filesystems plus check-fail-closed on the Linux root.
 
 ---
 

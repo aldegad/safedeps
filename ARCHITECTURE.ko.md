@@ -755,8 +755,8 @@ OSV.dev — 응답 무 / timeout
   • deadline 이 제한하는 것은 판정 전에 다른 process 를 기다리는 시간이다
   • lockfile 과 `node_modules` 순회, rollback 자체의 file 작업은 제한하지
     않는다
-  • 확정된 install 의 `npm query` 와 `npm rebuild` 도 제한하지 않는다.
-    이 둘은 자신의 clock 을 따로 쓴다
+  • 확정된 install 의 `npm query`(시작부터 10초인 자기 한도)와
+    `npm rebuild`(한도 없음)도 제한하지 않는다
   • deadline 뒤, runtime 의 30초 kill 전의 5초가 이들이 쓰는 여유다
   • 이 여유가 모든 tree 에 충분함을 보이는 test 는 없다
   • runtime 의 kill 뒤에는 install 이 판정 없이 남으며, runtime 의

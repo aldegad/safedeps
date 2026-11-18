@@ -43,7 +43,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 |---|---|
 | `v2.0-doc` | `ARCHITECTURE.md` v2 작성·push. |
 | `v2.1-rename` | repo / skill id / path 를 `safedeps` 로 rename; `safedeps migrate` 가 legacy `~/.npm-reorg-guard` state 를 `~/.safedeps` 로 이전 + legacy hook 정리. |
-| `v2.1-providers` | `lib/providers/` — OSV / KEV / GHSA adapter 를 단일 query interface 뒤에, 24h 응답 cache. |
+| `v2.1-providers` | `lib/providers/` — OSV / KEV / GHSA adapter 를 단일 query interface 뒤에, 24h 응답 cache. v2.21.0 이 OSV 응답 cache 를 없앴다. KEV catalog 와 GHSA 응답은 여전히 24h cache 를 쓴다. |
 | `v2.1-ledger` | `lib/ledger/` — approved spec JSON I/O (atomic write, hash, TTL 검사). |
 | `v2.1-cli` | `bin/safedeps` — `check`, `ledger`, `revoke`, `re-check`, `migrate`, `version` 서브커맨드. |
 | `v2.1-guard-patch` | `safedeps-pre-guard.sh` — v1 패턴 차단 위에 ledger enforcement 추가. |
@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.20.0).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.21.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily watch 는 LLM 토큰을 쓰지 않으며 opt-in 이다: `install-safedeps-recheck-agent.mjs` 로 설치한 같은 macOS `launchd` user agent 가 이제 매일 `safedeps --json watch scan` 을 실행한다. ledger re-check 에 더해, 등록된 프로젝트 root 아래의 lockfile 을 판정하고 host JDK 의 업데이트 상태를 보고한다. `~/.safedeps/watch/state.json`, `~/.safedeps/recheck.log`, `~/.safedeps/recheck-alerts.jsonl` 를 쓴다. 새 event, fresh 가 아닌 population, error 가 있는 실행, stale 인 agent runtime, 그리고 re-check 에서 유지한 ledger 알림(새 CVE/KEV/revoke/provider-skip/위조-의심) 시 macOS notification 을 띄운다. busy 인 scan 은 notification 없이 `recheck-alerts.jsonl` 에만 기록한다. 네트워크는 OSV / CISA KEV / GHSA query, OpenJDK Vulnerability Group advisory, Adoptium API, 그리고 npm registry 의 advisory database 에 대한 pnpm, yarn, bun 의 native audit 에만 쓴다.
 
@@ -68,7 +68,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 - **권위를 effect 로 이동**: PostToolUse 가 실제 `package-lock.json` closure 를 읽고, 설치된 모든 `pkg@version` 이 승인된 direct spec 또는 그 `transitive_specs` 안에 있는지 대조한다.
 - **npm full closure 승인**: `safedeps check npm <pkg>@<version>` 이 temp dir 에서 `npm install --package-lock-only --ignore-scripts` 로 script 실행 없는 lockfile 을 만들고 full closure 를 추출한 뒤 OSV `/v1/querybatch` 로 묶어 조회한다.
-- **batch + cache**: OSV batch 응답은 기존 single-package provider 와 같은 pkg@version 24h cache 에 다시 저장한다.
+- **batch + cache**: OSV batch 응답은 기존 single-package provider 와 같은 pkg@version 24h cache 에 다시 저장한다. v2.21.0 이 이 OSV cache 를 없앴다. 이제 OSV 에는 check 마다, effect gate 실행마다 live 로 질의한다.
 - **transitive blind trust 제거**: direct package 가 clean 이어도 transitive 가 미승인 또는 취약이면 승인하지 않는다. 전체 closure 가 clean 이고 ledger 에 기록돼야 한다.
 - **PreToolUse 는 빠른 UX guard 로 강등**: 명령 파싱은 명백한 미승인 install 을 빠르게 막고 기존 bypass 회귀 커버리지를 유지하지만, primary enforcement 는 PostToolUse effect gate 다.
 - **무실행 설치 (Claude Code)**: PreToolUse hook 이 hook `updatedInput` 기능으로 npm install 에 `--ignore-scripts` 를 붙여 rewrite → 설치가 무실행으로 돈다. PostToolUse 는 closure 가 clean 으로 검증된 뒤에만 `npm rebuild` 를 돌려, 거부된 패키지의 lifecycle script 는 한 번도 안 돈다. Codex CLI 는 `updatedInput` 이 없어 detect-and-rollback 을 유지한다.
@@ -1507,6 +1507,32 @@ v2.18.2 를 쓸 때 Bash 가드에 열려 있던 것들이다. Rust 코어는 �
 - **WSL1.** `linux-x64` 바이너리는 carenine 에서 ecd3e72 로 게시 방식으로 빌드했고, WSL1 에서 `stamp --check` 는 `rust/` 가 있을 때와 없을 때 모두 ok 였다. 배터리는 nice 0 으로 돌렸다. Linux 루트에서 smoke 80/0 (78초), self-budget 43/0 (123초), effect-trace-grid 13/0 (720초), e2e 134/0 (349초, 건너뛴 행 7). Windows 드라이브에서 80/0 (73초), 43/0 (123초), 13/0 (668초, 두 번째 실행), 134/0 (328초, 건너뛴 행 12). 건너뛴 행은 v2.19.0 과 v2.19.1 이 건너뛴 것과 같다. Windows CPU 는 배터리마다 평균 4~23 퍼센트였다.
 - **한 번 빨강, 그다음 초록.** Windows 드라이브의 첫 effect-trace-grid 실행은 한 행에서 빨강이었다. 조용히 확정되어야 할 승인된 설치가 `npm closure OSV batch verification failed; fail-closed` 로 롤백됐다. 그 행의 `advisory.log` 에 `ERROR OSV batch query failed status=000` 이 있고, post 훅은 pre 훅이 돈 뒤 약 20초 만에 실패했다. 위의 WSL1 에서 알려진 한계의 첫째이고, 이번에는 Windows 드라이브에서 보였다. 절차가 요구하는 한 번 더 실행은 초록이었다.
 - **독립 재검토.** 이 절을 쓰지 않은 검토자가 이 절을 열 커밋과 코드에 대어 읽었다. 코드보다 넓게 쓴 주장 다섯이 있었고, 릴리스 전에 좁혔다.
+
+## v2.21.0 — 설치된 의존성과 host JDK 를 매일 보는 watch, check 와 effect gate 실행마다 live 로 묻는 OSV, 감사 기록을 남기는 `SAFEDEPS_ACCEPT_RISK`
+
+마이너 릴리스다. 판정을 옮기기 때문이다. OSV 에 live 로 질의하므로, 승인이 더는 이전 실행의 응답에 기댈 수 없다. 어느 provider 도 응답하지 않은 re-check 항목은 이제 still clean 이 아니라 error 다. `SAFEDEPS_ACCEPT_RISK` 는 게이트가 롤백했을 설치를 남긴다. 버전 올림이 코어의 소스 스탬프를 바꾸므로 바이너리는 다시 빌드한다. 이번 릴리스 단계는 이 버전을 통합하고 로컬에 설치한다. npm 게시, 태그, push 는 하지 않는다.
+
+- **daily watch 가 opt-in daily re-check 를 대체한다.** `safedeps watch scan` 한 번은 ledger re-check 를 돌린 뒤, 등록된 프로젝트 root 아래의 lockfile 을 판정하고, 이어서 host JDK 의 업데이트 상태를 보고한다. `clean` 상태가 없어서 finding 은 증거가 있을 때만 닫히고, 도달할 수 없는 root, 사라진 lockfile, 실패한 provider 는 finding 을 그대로 둔 채 `stale_measurement` 로 표시한다. 실행 전체가 exclusive lock 하나를 잡고 `safedeps re-check` 도 이제 그 lock 을 먼저 잡으므로, 수동 re-check 와 예약된 scan 은 동시에 돌지 않는다.
+- **OSV 에는 live 로 질의하고, 응답은 전체 응답이다.** OSV 에는 check 마다, effect gate 실행마다 질의하고, `cache/osv/` 는 더 이상 읽지도 쓰지도 않는다. 응답은 최대 20개까지의 모든 page 이고, 응답이 가리킨 advisory 는 모두 응답이 준 `id` 와 `modified` 아래의 전체 record 로 읽는다. post 훅의 effect gate 는 시작부터 25초인 deadline 하나를 가지며, 잘렸거나 전체가 아닌 OSV 응답은 `SAFEDEPS_ACCEPT_RISK` 가 있어도 설치를 롤백한다.
+- **re-check 는 어느 provider 도 응답하지 않은 항목을 error 로 보고한다.** 그 항목은 still clean 도 revoked 도 아니고, kind 가 `provider_unavailable` 인 `errors` 의 row 이며, ledger 항목마다 row 하나다. report 를 출력하고, 명령은 exit 1 로 끝나고, 항목은 ledger 에 남는다. 전에는 그런 항목을 경고와 함께 건너뛰었고 명령은 exit 0 으로 끝났다.
+- **`SAFEDEPS_ACCEPT_RISK` 는 사람이 받아들인 npm 설치를 감사 기록과 함께 남긴다.** 이 대입은 명령 안의 모든 npm 설치 앞에 붙고, 적힌 그대로 읽히고, 비어 있지 않은 값 하나를 가질 때만 세며, 다른 꼴은 설치가 돌기 전에 거부한다. 모든 문제가 승인되지 않은 패키지이거나 취약한 패키지이면 설치를 경고와 함께 남기는데, 먼저 `~/.safedeps/accepted-risk.jsonl` 에 항목을 쓰고, rebuild 는 돌리지 않으며, 검증된 기준선은 움직이지 않는다. KEV 등재, 돌릴 수 없는 검사, 설치 스크립트나 source 나 바이너리 finding, 쓸 수 없는 감사 항목은 여전히 설치를 롤백한다.
+- **판정이 의존하는 모든 파일은 한 번만 읽는다.** 검사와 사용이 그 한 번의 읽기를 바탕으로 한다. CISA KEV 카탈로그는 실행 전용 디렉터리로 한 번 복사하고, 코어는 설치 전 트리 기록을 같은 바이트에서 해시하고 읽는다. 전에는 rule 이 거부한 KEV 카탈로그가 검사 뒤에 파일을 교체하면 등재 없음으로 읽혔고, 패키지가 승인됐다.
+- **errexit 가 꺼진 채 돌던, 판정이 의존하는 모든 읽기를 닫았다.** 출력한 뒤 0 이 아닌 값으로 끝난 jq, curl, npm, find 는 이제 `check`, `re-check`, `revoke`, `audit`, `gates run`, effect gate 의 provider 요청 어디서도 성공으로 읽히지 않는다. 승인은 항목, 기록, 보고서가 모두 만들어진 뒤에만 쓴다. 다른 이유로 멈춘 check 는 `check_did_not_finish` 로, 파일을 나열하지 못한 ledger 는 `ledger_unlisted` 로 답하고, 둘 다 exit 4 다.
+- **읽기가 실패한 뒤의 거부를 좁혔고, 텍스트 판별은 단어를 읽는다.** 거부는 이제 어느 읽기가 설치를 찾았거나 명령의 텍스트가 설치로 읽힐 때만 서므로, `pipefail` 과 `npm run` 은 더는 명령을 거부하게 하지 않는다. 텍스트 판별은 이제 명령을 순서도 구조도 없는 단어들의 집합으로 읽고, 매니저 이름과 그 옆의 설치 동사 하나가 있으면 설치로 읽는다. 그래서 로그 줄의 매니저와 그 옆 스크립트의 동사처럼, 전보다 더 많은 명령을 거부한다.
+- **외부 `file` 명령을 감독되는 코어 자식 프로세스로 대체했다.** 자식은 ELF, Mach-O, PE 이미지의 헤더를 직접 읽고, 정렬된 `.bin` 대상과 심볼릭 링크를 최대 20개까지 실행 없이 읽는다. 로드 가능성이나 안전성은 보증하지 않는다. 검사를 할 수 없으면 설치를 롤백한다.
+- **npm 11.6.0 이전 버전에는 두 번째 해석을 한다.** 그 버전에서 순환 optional peer 의존성 때문에 probe 가 실패하면, probe overrides 에서 패키지를 자기 버전으로 고정하고 다시 해석한다. closure 는 핀 없는 두 번째 실행이 npm 이 lockfile 을 바꾸지 않음을 확인할 때만 판정한다. 그렇지 않으면 `npm_closure_resolution_failed` 를 보고한다.
+
+아직 열린 것:
+
+- OSV querybatch 응답의 `modified` 가 record 자신의 `modified` 와 항상 같은지는 재지 않았다.
+- post 훅은 모든 경우에 런타임의 30초 전에 답한다고 보증하지 않는다. 확정된 설치에서 `npm query` 는 시작부터 10초인 자기 한도를 가지며, 이는 deadline 뒤 남은 5초를 넘을 수 있고, `npm rebuild` 에는 한도가 없다. 롤백의 순회와 파일 작업에도 한도가 없다.
+- `safedeps check` 는 `latest` 같은 dist-tag 를 버전 그 자체로 기록하고, 그 tag 가 가리키는 버전으로 풀지 않는다. 그 기록으로 pre 훅이 그 tag 의 설치를 통과시키는지는 재지 않았다.
+- `advisory.log` 는 rotate 하지 않는다.
+- watch 의 lockfile stage 는 이제 scan 마다 OSV 에 live 로 질의하고, 한 시간 재사용은 없다. 그 비용은 설치 뒤에 잰다.
+
+### 어떻게 확인했나
+
+이 커밋에 대한 릴리스 실행은 아직 기록하지 않았다. 숫자는 실행한 뒤 여기에 더한다. macOS 에서 호스트 실행기로 돌리는 릴리스 세트, 릴리스 점검, 그리고 WSL1 에서 `RELEASING.md` 가 이름 붙인 배터리 넷을 두 파일시스템 모두에서 돌린 것과 Linux 루트의 check-fail-closed 다.
 
 ---
 

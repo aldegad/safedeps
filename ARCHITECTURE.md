@@ -755,8 +755,8 @@ OSV.dev — no response / timeout
   • the deadline bounds the waiting on other processes before the verdict
   • it does not bound the walks of the lockfiles and `node_modules`, or
     the rollback's own file work
-  • on a confirmed install it does not bound `npm query` and
-    `npm rebuild`, which keep their own clocks
+  • on a confirmed install it does not bound `npm query`, which has
+    its own 10 seconds, and `npm rebuild`, which has no bound
   • the 5 seconds after the deadline, before the runtime's 30-second kill,
     are the room those take
   • no test shows that room is enough for every tree

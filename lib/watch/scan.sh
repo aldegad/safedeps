@@ -12,9 +12,10 @@
 
 SAFEDEPS_WATCH_RECEIPTS_KEEP=100
 SAFEDEPS_WATCH_EVENT_RETENTION_DAYS=30
-# The lockfile stage asks OSV in its own cache: querybatch answers carry advisory
-# ids only, and in the shared cache they would stand in for the full answers a
-# later `safedeps check` reads its fixed versions from.
+# The lockfile stage keeps its provider files in a cache of its own (watch/cache).
+# OSV answers are kept nowhere: every scan asks OSV live. The OSV records it reads
+# are kept there under the (id, modified) the answer gave, with no TTL. What this
+# bounds is the KEV catalog alone; the stage asks GHSA nothing.
 SAFEDEPS_WATCH_CACHE_TTL_SECONDS=3600
 
 safedeps_watch_state_file() {
