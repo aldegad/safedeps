@@ -729,7 +729,7 @@ exit "\${CURL_STUB_EXIT:-0}"
 STUB
 chmod +x "${osv_stub_bin}/curl"
 osv_cache_install() {
-  local name="$1" body="$2" state="$3" url="$4" live="${5:-}" key
+  local name="$1" body="$2" state="$3" url="$4" live="${5:-}" before_post="${6:-}" key
   local dir="${tmp_root}/osv-cache-${name}"
   mkdir -p "${dir}/project"
   printf '{"dependencies":{}}\n' > "${dir}/project/package.json"
@@ -763,6 +763,7 @@ EOF
   else
     printf '%s' "${body}" > "${osv_cache_path}"
   fi
+  [[ -z "${before_post}" ]] || "${before_post}"
   printf '%s\n' "${state}" > "${state_file}"
   local started
   started=$(python3 -c 'import time; print(int(time.time() * 1000))')
@@ -880,6 +881,28 @@ grep -q 'ERROR OSV batch query failed status=000 exit 28 page=2' "${SAFEDEPS_HOM
   || fail "deadline: the record says the second page ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
 (( osv_cache_post_ms < 30000 )) || fail "deadline: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
 (( osv_cache_post_ms >= 23000 )) || fail "deadline: the post hook answered in ${osv_cache_post_ms}ms, before the deadline it was given"
+# The record of an advisory and the KEV catalog end by the same deadline. The
+# batch answers after 18 seconds and the next request is held: the record of
+# the advisory it names, or the KEV catalog, with no catalog kept to fall back
+# on. Each gets the 7 seconds left, not the 15 a record or the catalog may take
+# alone; with those it would end after 33 seconds, past the runtime's 30.
+osv_cache_install deadline-record '' '{"vulnerable":["fixture-parent@1.0.0"],"hold_first_ms":18000,"hold_record_ms":60000}' "${osv_batch_url}"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${osv_cache_post}" \
+  || fail "deadline-record: a record the deadline cut is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back deadline-record
+grep -q 'ERROR OSV record read failed id=CVE-2026-1000 status=000 exit 28' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "deadline-record: the record says the record ran out of time: $(grep 'OSV' "${SAFEDEPS_HOME}/advisory.log")"
+(( osv_cache_post_ms < 30000 )) || fail "deadline-record: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
+(( osv_cache_post_ms >= 23000 )) || fail "deadline-record: the post hook answered in ${osv_cache_post_ms}ms, before the deadline it was given"
+osv_cache_no_kev() { rm -f "${SAFEDEPS_HOME}/cache/kev/known_exploited_vulnerabilities.json"; }
+osv_cache_install deadline-kev '' '{"vulnerable":[],"hold_first_ms":18000,"hold_kev_ms":60000}' "${osv_batch_url}" '' osv_cache_no_kev
+grep -q 'npm closure KEV catalog could not be read; fail-closed' < "${osv_cache_post}" \
+  || fail "deadline-kev: a KEV catalog the deadline cut, with none kept, is no answer: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back deadline-kev
+grep -q 'WARN CISA KEV unavailable and no readable local catalog status=000 exit 28' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "deadline-kev: the record says the catalog ran out of time: $(grep 'KEV' "${SAFEDEPS_HOME}/advisory.log")"
+(( osv_cache_post_ms < 30000 )) || fail "deadline-kev: the post hook answered in ${osv_cache_post_ms}ms, past the runtime's 30 seconds"
+(( osv_cache_post_ms >= 23000 )) || fail "deadline-kev: the post hook answered in ${osv_cache_post_ms}ms, before the deadline it was given"
 
 # npm's answer about the registry an install fetched from ends by the same
 # deadline (Npm::facts), and so does no wait of its own. The lockfile and the
@@ -997,6 +1020,77 @@ else
   unset SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS
 fi
 pass "the effect gate asks OSV whole and reads no answer an earlier run left"
+
+# The sources an install fetched from the public registry are judged against
+# npm's answer only for an install that may be kept (Npm::sources): on a
+# rollback nothing reads that judgment, so with a reason already given it is
+# not made. The pre-guard's npm says the public registry, and the post hook's
+# npm says another one, so a judgment would find the bytes fetched from it and
+# say in advisory.log that the install is kept. OSV names the package: the
+# install is rolled back and advisory.log says nothing of keeping it. The same
+# install with no advisory is kept, and the line is there: the control that
+# this judgment would be seen.
+f1_elsewhere_bin="${tmp_root}/f1-elsewhere-bin"
+mkdir -p "${f1_elsewhere_bin}"
+cat > "${f1_elsewhere_bin}/npm" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  prefix) pwd -P ;;
+  root) printf '%s/node_modules\n' "$(pwd -P)" ;;
+  config) printf '%s\n' '{"registry":"http://127.0.0.1:9/elsewhere/","replace-registry-host":"npmjs"}' ;;
+esac
+exit 0
+STUB
+chmod +x "${f1_elsewhere_bin}/npm"
+f1_sources_home="${SAFEDEPS_HOME}"
+f1_sources() {
+  local name="$1" state="$2" dir="${tmp_root}/f1-sources-${1}"
+  mkdir -p "${dir}/project"
+  printf '{"dependencies":{}}\n' > "${dir}/project/package.json"
+  export SAFEDEPS_HOME="${dir}/home"
+  ./bin/safedeps --json check npm fixture-parent@1.0.0 >/dev/null
+  osv_cache_project="${dir}/project"
+  osv_cache_pre=$(
+    PATH="${f1_bin}:${PATH}" pre_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}","turn_id":"turn-e2e","model":"codex-test"}
+EOF
+  )
+  hook_response_parse "${osv_cache_pre}" quiet || fail "f1-sources-${name}: the pre hook allows the approved spec"
+  cat > "${osv_cache_project}/package-lock.json" <<EOF
+{
+  "name": "f1-sources-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "integrity": "sha512-f1sources${name}parent", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz", "integrity": "sha512-f1sources${name}child"}
+  }
+}
+EOF
+  mkdir -p "${osv_cache_project}/node_modules"
+  cp "${osv_cache_project}/package-lock.json" "${osv_cache_project}/node_modules/.package-lock.json"
+  printf '%s\n' "${state}" > "${state_file}"
+  osv_cache_post=$(
+    PATH="${f1_elsewhere_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${osv_cache_project}"}
+EOF
+  )
+  printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+}
+f1_kept_line='^.*post-verify: kept in .*/f1-sources-[a-z]*/project, fetched from a registry that is not the public npm registry \('
+f1_sources rollback '{"vulnerable":["fixture-parent@1.0.0"]}'
+grep -q 'npm closure contains vulnerable package(s): fixture-parent@1.0.0' < "${osv_cache_post}" \
+  || fail "f1-sources-rollback: OSV names the package and the install rolls back: $(cat "${osv_cache_post}")"
+osv_cache_rolled_back f1-sources-rollback
+! grep -Eq "${f1_kept_line}" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-sources-rollback: with a reason to roll back the sources are not judged against npm's answer: $(grep 'post-verify' "${SAFEDEPS_HOME}/advisory.log")"
+f1_sources kept '{"vulnerable":[]}'
+grep -q 'fixture-parent' "${osv_cache_project}/package-lock.json" \
+  || fail "f1-sources-kept: an install with no advisory is kept: $(cat "${osv_cache_post}")"
+grep -Eq "${f1_kept_line}" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "f1-sources-kept: an install that is kept has its sources judged against npm's answer: $(grep 'post-verify' "${SAFEDEPS_HOME}/advisory.log")"
+export SAFEDEPS_HOME="${f1_sources_home}"
+pass "an install with a reason to roll back is not judged against npm's answer about its sources"
 
 # The effect gate reads the KEV catalog by the rule the CLI reads it by: a file
 # that holds no catalog is a miss, it is downloaded again, and with no catalog to

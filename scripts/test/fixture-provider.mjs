@@ -189,6 +189,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url.startsWith('/osv/v1/vulns/')) {
+    // A record is held before it answers by hold_record_ms.
+    const heldRecord = Number(state().hold_record_ms);
+    if (heldRecord > 0) await new Promise((resolve) => setTimeout(resolve, heldRecord));
     const id = decodeURIComponent(req.url.slice('/osv/v1/vulns/'.length));
     res.setHeader('content-type', 'application/json');
     if (id === recordOther.id) {
@@ -210,6 +213,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url === '/kev.json') {
+    // The catalog is held before it answers by hold_kev_ms.
+    const heldKev = Number(state().hold_kev_ms);
+    if (heldKev > 0) await new Promise((resolve) => setTimeout(resolve, heldKev));
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({
       vulnerabilities: [
