@@ -63,6 +63,13 @@
 //!       Known answers from the modules the hooks share (the digests, the
 //!       JSON writer, how a file's times and inodes are spelled).
 //!
+//! The CLI's one entry, which is on no hook's path either:
+//!
+//!   safedeps-core approvals append <hash> | index
+//!       The approvals store `re-check` reads for provenance
+//!       (approvals.rs): `append` records one approval, its record on
+//!       stdin; `index` prints the hashes the store vouches for.
+//!
 //! `pre-probe`, `post-probe`, `ask-probe`, `ledger`, `state-rotate` and
 //! `json-stream` are measurement entries: each takes data on stdin and calls
 //! the operation a hook calls, and none takes a shell program.
@@ -70,6 +77,7 @@
 // The modules marked `dead_code` carry items the hooks do not all call. The
 // mark dates from when the callers were being moved in, and it has not been
 // revisited.
+mod approvals;
 #[allow(dead_code)]
 mod ask;
 mod callid;
@@ -505,6 +513,9 @@ fn main() {
             }
             None => 2,
         },
+        // The CLI's approvals store. It writes and reads SAFEDEPS_HOME, and
+        // no hook runs it.
+        Some("approvals") => approvals::cli(&args[2..]),
         // Read-only queries: none is on a hook's path, and none takes an
         // argument or an environment variable that changes an answer.
         Some("budget-config") => {
@@ -526,7 +537,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | kat [<path>] | stamp [--check] | version");
+            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals append <hash> | approvals index | kat [<path>] | stamp [--check] | version");
             2
         }
     };

@@ -1,6 +1,6 @@
 //! The few things the hook asks of the system that std does not offer: the
-//! process's umask, a signal to a process group, and a local time with its
-//! zone offset. They are libc's own functions, declared here, so the crate
+//! process's umask, a signal to a process group, a local time with its zone
+//! offset, and a file lock. They are libc's own functions, declared here, so the crate
 //! still names no dependency.
 //!
 //! The rest is how the bash hooks' helper commands print what they read
@@ -37,6 +37,7 @@ extern "C" {
     fn isprint_l(c: i32, locale: *mut std::ffi::c_void) -> i32;
     #[cfg(not(target_os = "macos"))]
     fn iswprint_l(c: u32, locale: *mut std::ffi::c_void) -> i32;
+    fn flock(fd: i32, operation: i32) -> i32;
 }
 
 /// Printable units for the hook shell's printf %q. Darwin's system bash
@@ -90,6 +91,40 @@ pub fn scratch_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
     if unsafe { mkdtemp(bytes.as_mut_ptr().cast()) }.is_null() { return Err(std::io::Error::last_os_error()); }
     bytes.pop();
     Ok(std::ffi::OsString::from_vec(bytes).into())
+}
+
+/// The two locks flock(2) takes. The numbers are the same on macOS and Linux.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileLock {
+    Shared = 1,
+    Exclusive = 2,
+}
+const LOCK_NB: i32 = 4;
+
+/// flock(2) on the open file description of `file`, tried until it is
+/// granted or `wait` has passed. The lock goes when the file is closed, by a
+/// drop or by the end of the process, so a holder that dies leaves no lock
+/// behind, as a lock directory does. A holder that outlasts `wait` is a
+/// `TimedOut` error and never a lock taken anyway.
+pub fn flock_within(file: &std::fs::File, lock: FileLock, wait: std::time::Duration) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let until = std::time::Instant::now() + wait;
+    loop {
+        if unsafe { flock(file.as_raw_fd(), lock as i32 | LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        match e.kind() {
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            std::io::ErrorKind::WouldBlock => {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "another process held the lock past the wait"))
+            }
+            _ => return Err(e),
+        }
+    }
 }
 
 pub const SIGTERM: i32 = 15;
@@ -322,6 +357,7 @@ pub enum WallRole {
     ConfirmWarningsHeader,
     AcceptedRiskHeader,
     AcceptedRiskEntry,
+    ApprovalRecord,
     JournalOpened,
     JournalStage,
     JournalRecoveryHeader,
