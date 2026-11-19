@@ -46,19 +46,29 @@ fn page_token(v:&Value)->Result<Option<W>,()>{
 }
 /// A `modified` as OSV writes one, split into its second and its fraction: an
 /// RFC 3339 date-time, `YYYY-MM-DDTHH:MM:SS` with each field in its range and
-/// the day within its month (a second of 60 is RFC 3339's leap second), then
-/// at most nine fraction digits, then `Z`. OSV's schema writes every time in
-/// UTC, ending in `Z`. So an offset, a lower-case `t` or `z`, a space for the
-/// `T` and a tenth digit are not OSV's form, and none of them is a time here,
-/// even where an offset names the same instant. The CLI reads a time by the
-/// same rule (osv_time).
+/// the day within its month, then at most nine fraction digits, then `Z`.
+/// OSV's schema writes every time in UTC, ending in `Z`. So an offset, a
+/// lower-case `t` or `z`, a space for the `T` and a tenth digit are not OSV's
+/// form, and none of them is a time here, even where an offset names the same
+/// instant. A second of 60 is a time only at 23:59:60 on the last day of its
+/// month. That is where RFC 3339 (section 5.7) puts a leap second: at the end
+/// of a month in which one occurs, in UTC. At any other place the second ends
+/// at 59, so `08:12:60`, `23:58:60` and `23:59:60` in mid-month are not times.
+/// The rule does not narrow the month to June and December. Those are the only
+/// month ends a leap second has used so far, but the standard allows any, and
+/// which month ends get one later is announced weeks ahead, so code cannot
+/// know it. For the same reason it keeps 59 at every month end, where a
+/// subtracted leap second would remove it. The CLI reads a time by the same
+/// rule (osv_time).
 fn osv_time(s:&[u8])->Option<(&[u8],&[u8])>{
     let num=|a:usize,b:usize|s.get(a..b).filter(|d|d.iter().all(u8::is_ascii_digit)).map(|d|d.iter().fold(0u32,|n,c|n*10+u32::from(c-b'0')));
     let (year,month,day,hour,minute,second)=(num(0,4)?,num(5,7)?,num(8,10)?,num(11,13)?,num(14,16)?,num(17,19)?);
     let at=|i:usize,c:u8|s.get(i)==Some(&c);
-    let leap=year%4==0&&(year%100!=0||year%400==0);
-    let days=[31,if leap{29}else{28},31,30,31,30,31,31,30,31,30,31];
-    let fields=(1..=12).contains(&month)&&(1..=days[month as usize-1]).contains(&day)&&hour<24&&minute<60&&second<=60;
+    if !(1..=12).contains(&month){return None}
+    let leap_year=year%4==0&&(year%100!=0||year%400==0);
+    let last=[31,if leap_year{29}else{28},31,30,31,30,31,31,30,31,30,31][month as usize-1];
+    let leap_second=hour==23&&minute==59&&day==last;
+    let fields=(1..=last).contains(&day)&&hour<24&&minute<60&&(second<60||(second==60&&leap_second));
     if !(fields&&at(4,b'-')&&at(7,b'-')&&at(10,b'T')&&at(13,b':')&&at(16,b':')){return None}
     let (z,rest)=s[19..].split_last()?;
     let fraction=match rest{[]=>rest,[b'.',f@..] if (1..=9).contains(&f.len())&&f.iter().all(u8::is_ascii_digit)=>f,_=>return None};
@@ -532,7 +542,22 @@ fn osv_answers_match_cli() {
         ("2026-04-31T00:00:00Z", "2026-04-31T00:00:00Z", false), ("2026-13-01T00:00:00Z", "2026-13-01T00:00:00Z", false),
         ("2026-00-01T00:00:00Z", "2026-00-01T00:00:00Z", false), ("2026-11-00T00:00:00Z", "2026-11-00T00:00:00Z", false),
         ("2026-11-17T24:00:00Z", "2026-11-17T24:00:00Z", false), ("2026-11-17T16:60:00Z", "2026-11-17T16:60:00Z", false),
-        ("2026-11-17T16:00:61Z", "2026-11-17T16:00:61Z", false)];
+        ("2026-11-17T16:00:61Z", "2026-11-17T16:00:61Z", false),
+        // A second of 60 is a time only at 23:59:60 on the last day of its
+        // month: in any month, not only June and December, and on February's
+        // last day by the leap-year rule. Anywhere else it is not a time: at
+        // midday, in mid-month, at another minute or hour, on a 30th that is
+        // not the month's last day, on February 28th of a leap year, on a
+        // February 29th that does not exist. A leap second is not the second
+        // before it either.
+        ("1990-12-31T23:59:60.987654321Z", "1990-12-31T23:59:60.987654Z", true), ("2015-06-30T23:59:60Z", "2015-06-30T23:59:60Z", true),
+        ("2026-04-30T23:59:60.987654321Z", "2026-04-30T23:59:60.987654Z", true), ("2026-11-30T23:59:60.987654321Z", "2026-11-30T23:59:60.987654Z", true),
+        ("2024-02-29T23:59:60.987654321Z", "2024-02-29T23:59:60.987654Z", true), ("2023-02-28T23:59:60.987654321Z", "2023-02-28T23:59:60.987654Z", true),
+        ("2026-04-17T08:12:60.987654321Z", "2026-04-17T08:12:60.987654Z", false), ("2016-12-15T23:59:60.987654321Z", "2016-12-15T23:59:60.987654Z", false),
+        ("2016-12-31T23:58:60.987654321Z", "2016-12-31T23:58:60.987654Z", false), ("2016-12-31T22:59:60.987654321Z", "2016-12-31T22:59:60.987654Z", false),
+        ("2026-12-30T23:59:60.987654321Z", "2026-12-30T23:59:60.987654Z", false), ("2026-01-30T23:59:60.987654321Z", "2026-01-30T23:59:60.987654Z", false),
+        ("2024-02-28T23:59:60.987654321Z", "2024-02-28T23:59:60.987654Z", false), ("2023-02-29T23:59:60.987654321Z", "2023-02-29T23:59:60.987654Z", false),
+        ("2016-12-31T23:59:60.987654321Z", "2016-12-31T23:59:59.987654Z", false)];
     records.extend(times.iter().map(|(at, given, same)| (format!("{{\"id\":\"GHSA-x\",\"modified\":\"{}\"}}", at.replace('\n', "\\n")), *given, *same)));
     for (body, modified, record) in records {
         fs::write(&file, &body).unwrap();

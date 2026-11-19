@@ -215,13 +215,23 @@ safedeps_cache_is_fresh() {
 #                    one.
 #   osv_time         a `modified` as OSV writes one, as [second, fraction]:
 #                    an RFC 3339 date-time, YYYY-MM-DDTHH:MM:SS with each
-#                    field in its range and the day within its month (a
-#                    second of 60 is RFC 3339's leap second), then at most
-#                    nine fraction digits, then `Z`; null for anything else.
-#                    OSV's schema writes every time in UTC, ending in `Z`, so
-#                    an offset, a lower-case `t` or `z`, a space for the `T`
-#                    and a tenth digit are not times here, even where an
-#                    offset names the same instant.
+#                    field in its range and the day within its month, then at
+#                    most nine fraction digits, then `Z`; null for anything
+#                    else. OSV's schema writes every time in UTC, ending in
+#                    `Z`, so an offset, a lower-case `t` or `z`, a space for
+#                    the `T` and a tenth digit are not times here, even where
+#                    an offset names the same instant. A second of 60 is a
+#                    time only at 23:59:60 on the last day of its month. That
+#                    is where RFC 3339 (section 5.7) puts a leap second: at
+#                    the end of a month in which one occurs, in UTC. At any
+#                    other place the second ends at 59, so 08:12:60, 23:58:60
+#                    and 23:59:60 in mid-month are not times. The rule does
+#                    not narrow the month to June and December. Those are the
+#                    only month ends a leap second has used so far, but the
+#                    standard allows any, and which month ends get one later
+#                    is announced weeks ahead, so code cannot know it. For the
+#                    same reason it keeps 59 at every month end, where a
+#                    subtracted leap second would remove it.
 #   osv_same_time($batch)
 #                    the microsecond rule: the record's `modified` is the
 #                    one the batch gave when it is the same time to the
@@ -250,7 +260,7 @@ safedeps_cache_is_fresh() {
 # The core reads by the same rules (osv_answer, page_token, osv_time,
 # osv_same_time and osv_record in rust/src/post/providers.rs), and
 # `osv_answers_match_cli` holds them together.
-SAFEDEPS_OSV_JQ='def osv_answer: type == "object" and (.vulns | type == "array" or . == null); def osv_page_token: .next_page_token as $t | if $t == null then null elif ($t | type) == "string" and ($t | length) > 0 then $t else error("not a page token") end; def osv_digits: explode | reduce .[] as $c (0; . * 10 + $c - 48); def osv_time: if type == "string" and test("\\A[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)([.][0-9]{1,9})?Z\\z") and (.[8:10] | osv_digits) <= ((.[0:4] | osv_digits) as $y | [31, (if $y % 4 == 0 and ($y % 100 != 0 or $y % 400 == 0) then 29 else 28 end), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][(.[5:7] | osv_digits) - 1]) then [.[0:19], (.[19:(length - 1)] | ltrimstr("."))] else null end; def osv_same_time($batch): ($batch | osv_time) as $b | osv_time as $r | if $b == null or $r == null then false else $b[0] == $r[0] and (([6, ($b[1] | length)] | max) as $p | ($b[1] + "000000000")[0:$p] == ($r[1] + "000000000")[0:$p]) end; def osv_record($id; $modified): type == "object" and .id == $id and ($modified == "" or (.modified | osv_same_time($modified)));'
+SAFEDEPS_OSV_JQ='def osv_answer: type == "object" and (.vulns | type == "array" or . == null); def osv_page_token: .next_page_token as $t | if $t == null then null elif ($t | type) == "string" and ($t | length) > 0 then $t else error("not a page token") end; def osv_digits: explode | reduce .[] as $c (0; . * 10 + $c - 48); def osv_time: if type == "string" and test("\\A[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)([.][0-9]{1,9})?Z\\z") and (((.[0:4] | osv_digits) as $y | [31, (if $y % 4 == 0 and ($y % 100 != 0 or $y % 400 == 0) then 29 else 28 end), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][(.[5:7] | osv_digits) - 1]) as $last | (.[8:10] | osv_digits) as $day | $day <= $last and (.[17:19] != "60" or (.[11:16] == "23:59" and $day == $last))) then [.[0:19], (.[19:(length - 1)] | ltrimstr("."))] else null end; def osv_same_time($batch): ($batch | osv_time) as $b | osv_time as $r | if $b == null or $r == null then false else $b[0] == $r[0] and (([6, ($b[1] | length)] | max) as $p | ($b[1] + "000000000")[0:$p] == ($r[1] + "000000000")[0:$p]) end; def osv_record($id; $modified): type == "object" and .id == $id and ($modified == "" or (.modified | osv_same_time($modified)));'
 
 # The answer this prints is the one the rule read, and it is the only copy a
 # verdict reads: the file may hold something else by the time anything opens it

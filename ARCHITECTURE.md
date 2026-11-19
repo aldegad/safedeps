@@ -804,6 +804,16 @@ OSV.dev — an answer that cannot be read
   • so both values must be times as OSV's schema writes them: RFC 3339, UTC,
     an upper-case `T`, at most nine fraction digits, ending in `Z`, each
     field in its range and the day within its month
+  • a second of 60 is a time only at 23:59:60 on the last day of its month;
+    RFC 3339 (section 5.7) puts a leap second there, at the end of a month
+    in which one occurs, and everywhere else the second ends at 59
+  • so `08:12:60`, `23:58:60` and `23:59:60` in mid-month are not times
+  • the rule does not narrow the month to June and December: those are the
+    only month ends a leap second has used so far, but the standard allows
+    any, and which month ends get one later is announced weeks ahead, so
+    code cannot know it
+  • for the same reason 59 stays a time at every month end, where a
+    subtracted leap second would remove it
   • they must have the same date and second, and their fractions must agree
     in the first six digits, each read with zeros after the digits it gives
   • a batch that gives more than six digits is held to all of them
