@@ -808,8 +808,8 @@ record_alias_on_kev() {
 row "npm: a KEV listing named only by the record's alias blocks" record_alias_on_kev
 row "npm: an advisory whose record OSV does not have approves nothing" paged_no_answer npm fixture-record-missing@1.0.0 'OSV record read failed id=GHSA-fixt-gone-0000 status=404'
 row "npm: an advisory whose record is another advisory's approves nothing" paged_no_answer npm fixture-record-other@1.0.0 'OSV record read failed id=GHSA-fixt-othr-0000 status=200'
-# A record is the one querybatch named only when its id and its `modified`
-# both match. A record OSV serves at another `modified` is no answer: it is not
+# A record is the one querybatch named only when it has that id and the same
+# time as that `modified`. A record at another time is no answer: it is not
 # used and not kept. A file kept under the pair that holds another record is
 # not that record either: it is asked for again, left as it was, and a live
 # record that matches replaces it.
