@@ -28,19 +28,31 @@
 //! Isolation: the store lock, flock(2) on the store file itself. A writer
 //! holds LOCK_EX for its whole write and a reader holds LOCK_SH for its whole
 //! read, so a reader never sees a line half written and two writers never
-//! write at once. Under the lock a writer first ends a torn last line, which
-//! a process that died mid-write leaves behind, so its own line starts a line
-//! and the torn one stays one broken line. It then appends its line in one
-//! write and syncs it before it says the line is written. The lock belongs to
-//! the open file and goes when the file is closed, so a process that dies
-//! holding it leaves nothing to clean up. A lock another process holds past
-//! LOCK_WAIT is an error: nothing is written or read without the lock.
+//! write at once. Under the lock a writer first seals a torn last line (below),
+//! then appends its own line in the same write and syncs it before it says
+//! the line is written. The lock belongs to the open file and goes when the
+//! file is closed, so a process that dies holding it leaves nothing to clean
+//! up. A lock another process holds past LOCK_WAIT is an error: nothing is
+//! written or read without the lock.
+//!
+//! The torn-line seal. A write that did not finish leaves a last line with no
+//! newline: its process died, or the write failed after some of its bytes
+//! landed. Those bytes can be anything, a whole record but for its newline
+//! among them, and the write said its line was not written. So no later write
+//! may finish that line. Where the last byte is not a newline, a writer puts
+//! the seal, one NUL byte and a newline, before its own line. A line that
+//! holds a NUL byte vouches for nothing, whatever else it holds, and no line a
+//! writer makes holds one: JSON writes that byte as `\u0000`. So a sealed tail
+//! is one broken line, whatever its bytes are. A seal that does not land whole
+//! leaves a last line that still has no newline, and the next writer seals it
+//! again. The seal is appended like any line: nothing is truncated or
+//! rewritten.
 //!
 //! A line that is not one such object vouches for nothing: a torn line, a
-//! broken one, one written by hand. Each is counted as broken in the answer,
-//! so it is seen. A store that cannot be read is an error, never an empty
-//! store. A store that is not there is an answer, `present: false`, and
-//! vouches for nothing.
+//! sealed one, a broken one, one written by hand. Each is counted as broken in
+//! the answer, so it is seen. A store that cannot be read is an error, never
+//! an empty store. A store that is not there is an answer, `present: false`,
+//! and vouches for nothing.
 
 use crate::{
     jq,
@@ -63,6 +75,9 @@ pub const FILE_NAME: &str = "approvals.jsonl";
 pub const RECORD_PREFIX: &[u8] = b"check approve";
 const HASH_PREFIX: &str = "sha256:";
 const FIELDS: [&str; 4] = ["at", "hash", "via", "record"];
+/// The torn-line seal's byte. A writer ends a torn last line with it and a
+/// newline, and a line that holds it vouches for nothing.
+const SEAL: u8 = 0;
 /// How long a writer or a reader waits for the store lock. A holder writes
 /// one line or reads the file, so ten seconds is far past any honest holder.
 const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -149,16 +164,16 @@ fn open_for_append(dir: &Path) -> io::Result<fs::File> {
     regular(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir))?)
 }
 
-/// Under LOCK_EX: ends a torn last line, then appends `lines` in one write
-/// and syncs them.
+/// Under LOCK_EX: seals a torn last line, then appends `lines` in the same
+/// write and syncs them.
 fn write_locked(file: &fs::File, lines: &[u8]) -> io::Result<()> {
     let len = file.metadata()?.len();
-    let mut out = Vec::with_capacity(lines.len() + 1);
+    let mut out = Vec::with_capacity(lines.len() + 2);
     if len > 0 {
         let mut last = [0u8; 1];
         file.read_exact_at(&mut last, len - 1)?;
         if last[0] != b'\n' {
-            out.push(b'\n');
+            out.extend_from_slice(&[SEAL, b'\n']);
         }
     }
     out.extend_from_slice(lines);
@@ -216,13 +231,16 @@ fn index_within(dir: &Path, wait: Duration) -> io::Result<Index> {
 }
 
 /// The store's bytes as an index. A last line with no newline is a write that
-/// did not finish, and is broken like any other line that is not a record.
+/// did not finish, and a line that holds the seal is one a later writer
+/// sealed: each is broken like any other line that is not a record, whatever
+/// else its bytes are.
 fn read(bytes: &[u8]) -> Index {
     let mut seen = HashSet::new();
     let mut hashes = Vec::new();
     let mut broken = 0;
     for piece in bytes.split_inclusive(|&b| b == b'\n') {
-        match piece.strip_suffix(b"\n").and_then(approved_hash) {
+        let finished = piece.strip_suffix(b"\n").filter(|l| !l.contains(&SEAL));
+        match finished.and_then(approved_hash) {
             Some(h) => {
                 if seen.insert(h.clone()) {
                     hashes.push(h);
@@ -389,28 +407,101 @@ mod tests {
         bytes.extend(String::from_utf8(ok(12, Via::Check)).unwrap().replace("2026-11-19T08:00:00Z", "yesterday").into_bytes());
         bytes.extend(line("2026-11-19T08:00:00Z", &h(13), Via::Check, b"check block ecosystem=npm package=p version=1"));
         bytes.extend(ok(5, Via::Check));
+        let whole15 = ok(15, Via::Check);
+        bytes.extend(sealed(&whole15[..whole15.len() - 1]));
         bytes.extend(&ok(14, Via::Check)[..20]);
         fs::write(path(&d.0), &bytes).unwrap();
         let ix = index(&d.0).unwrap();
-        // Nine lines vouch for nothing: garbage, an empty line, an extra
+        // Ten lines vouch for nothing: garbage, an empty line, an extra
         // field, a missing field, an uppercase hash, an unknown via, a time
-        // that is no time, a record that is no approval and a torn tail. The
-        // repeated h(5) is a record and counts once.
+        // that is no time, a record that is no approval, a whole record a
+        // writer sealed and a torn tail. The repeated h(5) is a record and
+        // counts once.
         assert_eq!(ix.hashes, vec![h(5), h(6), h(10)]);
-        assert_eq!(ix.broken, 9);
+        assert_eq!(ix.broken, 10);
         assert!(ix.present);
     }
 
+    /// A torn tail as the next writer leaves it: the tail, then the seal.
+    fn sealed(tail: &[u8]) -> Vec<u8> {
+        [tail, &[SEAL, b'\n'][..]].concat()
+    }
+
+    /// What the next append left in `dir` after `before`: the seal, then one
+    /// line, a record of `n`. Nothing before it was rewritten.
+    fn sealed_then_record(dir: &Path, before: &[u8], n: u8) {
+        let bytes = fs::read(path(dir)).unwrap();
+        let kept = sealed(before);
+        assert!(bytes.starts_with(&kept), "the next append rewrote what was there or did not seal it");
+        let new = &bytes[kept.len()..];
+        assert_eq!(new.iter().filter(|&&b| b == b'\n').count(), 1);
+        assert_eq!(new.strip_suffix(b"\n").and_then(approved_hash), Some(h(n)));
+    }
+
+    fn unended(l: &[u8]) -> Vec<u8> {
+        l[..l.len() - 1].to_vec()
+    }
+
     #[test]
-    fn a_torn_last_line_stays_one_broken_line_and_the_next_append_starts_its_own() {
+    fn a_whole_record_that_lost_only_its_newline_vouches_for_nothing_after_the_next_append() {
+        // A failed append can land every byte of its line but the newline
+        // (a file size limit one byte short), and it says the line was not
+        // written. The next append must not finish that line.
         let d = scratch();
-        let whole = line("2026-11-19T08:00:00Z", &h(4), Via::Check, &rec(4));
-        fs::write(path(&d.0), &whole[..30]).unwrap();
+        let whole = line("2026-11-19T08:00:00Z", &h(1), Via::Check, &rec(1));
+        let tail = unended(&whole);
+        assert_eq!(approved_hash(&tail), Some(h(1)), "the tail is a whole record but for its newline");
+        fs::write(path(&d.0), &tail).unwrap();
         assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 1 });
-        append(&d.0, &h(3), &rec(3)).unwrap();
+        append(&d.0, &h(2), &rec(2)).unwrap();
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(2)], broken: 1 });
+        sealed_then_record(&d.0, &tail, 2);
+    }
+
+    #[test]
+    fn a_torn_tail_is_sealed_as_one_broken_line_whatever_its_bytes() {
+        let d = scratch();
+        let first = line("2026-11-19T08:00:00Z", &h(1), Via::Check, &rec(1));
+        let whole = line("2026-11-19T08:00:00Z", &h(4), Via::Check, &rec(4));
+        let other = line("2026-11-19T08:00:00Z", &h(5), Via::Migrate, &rec(5));
+        // Every prefix of a record, the last of them the whole record but its
+        // newline; a seal that lost its own newline, once and twice; and
+        // tails that hold a whole record of another hash beside a NUL.
+        let mut tails: Vec<Vec<u8>> = (1..whole.len()).map(|k| whole[..k].to_vec()).collect();
+        tails.push([unended(&whole), vec![SEAL]].concat());
+        tails.push([unended(&whole), vec![SEAL, SEAL]].concat());
+        tails.push([vec![SEAL], unended(&other)].concat());
+        tails.push([unended(&whole), vec![SEAL], unended(&other)].concat());
+        for (i, tail) in tails.iter().enumerate() {
+            assert!(!tail.contains(&b'\n'), "tail {i} holds a newline");
+            let dir = d.0.join(i.to_string());
+            fs::create_dir_all(&dir).unwrap();
+            let before = [&first[..], &tail[..]].concat();
+            fs::write(path(&dir), &before).unwrap();
+            assert_eq!(index(&dir).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 1 }, "tail {i} before");
+            append(&dir, &h(2), &rec(2)).unwrap();
+            assert_eq!(index(&dir).unwrap(), Index { present: true, hashes: vec![h(1), h(2)], broken: 1 }, "tail {i} after");
+            sealed_then_record(&dir, &before, 2);
+            let ended = fs::read(path(&dir)).unwrap();
+            append(&dir, &h(3), &rec(3)).unwrap();
+            let bytes = fs::read(path(&dir)).unwrap();
+            assert!(bytes.starts_with(&ended) && !bytes[ended.len()..].contains(&SEAL), "tail {i}: an ended line was sealed again");
+            assert_eq!(index(&dir).unwrap(), Index { present: true, hashes: vec![h(1), h(2), h(3)], broken: 1 }, "tail {i} later");
+        }
+    }
+
+    #[test]
+    fn no_line_a_writer_makes_holds_the_seal() {
+        let d = scratch();
+        let mut record = rec(1);
+        record.extend((0u8..0x20).chain([0x7f]));
+        append(&d.0, &h(1), &record).unwrap();
         let bytes = fs::read(path(&d.0)).unwrap();
-        assert_eq!(&bytes[..31], [&whole[..30], &b"\n"[..]].concat().as_slice());
-        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(3)], broken: 1 });
+        assert!(!bytes.contains(&SEAL));
+        assert_eq!(bytes.iter().filter(|&&b| b == b'\n').count(), 1);
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
+        let stored = json::parse_one(&bytes[..bytes.len() - 1]).unwrap();
+        assert_eq!(stored.get("record").unwrap().as_bytes(), Some(record));
     }
 
     #[test]
