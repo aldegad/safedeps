@@ -1762,8 +1762,10 @@ row "a check whose core is killed after its rename, where the store vouches for 
 # ---- a revoke that meets a commit -------------------------------------------
 #
 # A revoke rewrites an entry, so it runs under the store lock, as a commit and
-# a settle do. A approved the spec. B stops inside its commit at its approve
-# line, after its rename, holding the lock. A revoke of the spec starts, and
+# a settle do. B looks the spec up and stops at its gate, then A approves the
+# spec: B started before A's approval, so its lookup found nothing and it goes
+# on to commit. B stops inside its commit at its approve line, after its
+# rename, holding the lock. A revoke of the spec starts, and
 # while B holds the lock it does not end and the entry stays B's. Then B's core
 # is killed, and its CLI settles the commit, which puts back the entry A
 # approved. The settle and the revoke then take the lock one after the other,
@@ -1773,6 +1775,10 @@ row "a check whose core is killed after its rename, where the store vouches for 
 revoke_during_commit() {
   local core_pid seen="" b_entry
   pair
+  mkdir "${home_b}/gate"
+  launch "${home_b}"
+  pid_b=$!
+  gated "${home_b}"
   launch "${home_a}"
   pid_a=$!
   rc_a=0
@@ -1780,10 +1786,6 @@ revoke_during_commit() {
   pid_a=""
   stands "${home_a}" "${rc_a}"
   a_entry=$(identity "$(ledger_entries)")
-  mkdir "${home_b}/gate"
-  launch "${home_b}"
-  pid_b=$!
-  gated "${home_b}"
   stall_log "${home_b}"
   : > "${home_b}/gate/go"
   until_true core_below "${pid_b}" >/dev/null || no "B did not reach its commit: $(cat "${home_b}/stderr")"
