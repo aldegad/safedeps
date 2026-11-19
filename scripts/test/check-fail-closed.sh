@@ -1387,7 +1387,31 @@ if [[ -n "\${GATE_DIR:-}" && -d "\${GATE_DIR}" && ! -e "\${GATE_DIR}/passed" && 
 fi
 exec "${real_jq}" "\$@"
 STUB
-chmod +x "${gate_bin}/jq"
+# A check whose advisory.log a row made unwritable at the gate (and marked
+# with GATE_DIR/unlogged) has it writable again at the first step after its
+# commit, the removal of its evidence file: so the approve line alone fails,
+# and the check's own fail-closed line is written.
+cat > "${gate_bin}/rm" <<STUB
+#!/usr/bin/env bash
+if [[ -n "\${GATE_DIR:-}" && -e "\${GATE_DIR}/unlogged" && "\$*" == *safedeps-evidence.* ]]; then
+  chmod 600 "\${SAFEDEPS_HOME}/advisory.log"
+  "${real_rm}" -f "\${GATE_DIR}/unlogged"
+fi
+exec "${real_rm}" "\$@"
+STUB
+chmod +x "${gate_bin}/jq" "${gate_bin}/rm"
+# HOME's approve line will fail: advisory.log unwritable until the commit is
+# done.
+unlogged() {
+  chmod 000 "$1/advisory.log"
+  : > "$1/gate/unlogged"
+}
+# The approve line of HOME's commit met the fault, and the check went on past
+# its commit.
+log_refused() {
+  [[ ! -e "$1/gate/unlogged" ]] || no "$(basename "$1") never made advisory.log writable again"
+  ! grep -q 'check approve(' "$1/advisory.log" || no "$(basename "$1")'s approve line was written: $(grep 'check approve(' "$1/advisory.log")"
+}
 
 # Waits up to a minute for the command to succeed.
 until_true() {
@@ -1489,13 +1513,14 @@ sequential_failure() {
   launch "${home_a}"
   pid_a=$!
   gated "${home_a}"
-  chmod 000 "${home_a}/advisory.log"
+  unlogged "${home_a}"
   : > "${home_a}/gate/go"
   rc_a=0
   wait "${pid_a}" || rc_a=$?
   pid_a=""
   chmod 600 "${home_a}/advisory.log"
   failed_as "${home_a}" "${rc_a}" ledger_write_failed false
+  log_refused "${home_a}"
   [[ -z "$(ledger_entries)" ]] || no "A left its entry: $(ledger_entries)"
   launch "${home_b}"
   pid_b=$!
@@ -1556,7 +1581,7 @@ overlap_without_failure() {
 }
 row "commits that meet: two checks that both succeed both stand" overlap_without_failure
 
-a_cannot_log() { chmod 000 "${home_a}/advisory.log"; }
+a_cannot_log() { unlogged "${home_a}"; }
 overlap_with_failure() {
   overlap a_cannot_log
   chmod 600 "${home_a}/advisory.log"
@@ -1564,6 +1589,7 @@ overlap_with_failure() {
   [[ "$(identity "$(ledger_entries)")" == "${b_entry}" ]] || no "the entry is not the file B put in place"
   failed_as "${home_a}" "${rc_a}" ledger_write_failed true
   [[ "$(store_lines)" == 1 ]] || no "the store holds $(store_lines) lines"
+  log_refused "${home_a}"
 }
 row "commits that meet: a check that fails while another commits leaves the other's records whole" overlap_with_failure
 
@@ -1592,12 +1618,13 @@ reversed() {
   [[ "$(store_lines)" == 1 ]] || no "the store holds $(store_lines) lines"
 }
 
-b_cannot_log() { chmod 000 "${home_b}/advisory.log"; }
+b_cannot_log() { unlogged "${home_b}"; }
 reversed_failure() {
   reversed b_cannot_log
   chmod 600 "${home_b}/advisory.log"
   failed_as "${home_b}" "${rc_b}" ledger_write_failed true
   grep -qF 'safedeps: kept: the approvals store vouches for ' "${home_b}/stderr" || no "B's stderr: $(cat "${home_b}/stderr")"
+  log_refused "${home_b}"
 }
 row "commits that meet: a check that fails after another succeeded leaves the other's records whole" reversed_failure
 
@@ -1653,9 +1680,10 @@ core_killed_after_rename() {
 }
 row "a check whose core is killed after its rename is settled: the entry is taken back, and advisory.log says how the commit ended" core_killed_after_rename
 
+ledger_read_only() { chmod 500 "${ledger}"; }
 take_back_refused() {
   local entry
-  killed_after_rename chmod 500 "${ledger}"
+  killed_after_rename ledger_read_only
   chmod 700 "${ledger}"
   [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
   jq -e '.approved == false and .error == "approvals_store_failed" and .ledger_entry_left == true' <<< "${json}" >/dev/null || no "the report: ${json}"
