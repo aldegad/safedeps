@@ -1565,6 +1565,109 @@ jq -e '.modified == "2026-01-02T00:00:00Z" and .aliases == ["CVE-2026-9999"]' "$
   || fail "the named record replaces the kept file: $(cat "${stale_kept}")"
 pass "SAFEDEPS_ACCEPT_RISK keeps nothing on a record that is not the one OSV named, and the named record's KEV listing is rolled back"
 
+# querybatch names an advisory's `modified` to the microsecond, and its record
+# carries the same time with nine digits, as OSV does (the fixture's PRECISE).
+# That record is the one querybatch named, by the microsecond rule
+# (osv_same_time in rust/src/post/providers.rs). So a closure that holds its
+# package is rolled back as vulnerable, not as an OSV answer that is not whole,
+# and the record is kept under the pair querybatch gave. SAFEDEPS_ACCEPT_RISK
+# keeps that install and records the advisory, and a record of the same form
+# that KEV lists by its alias is rolled back whatever the override says. A
+# record one microsecond later than the time querybatch named is another time:
+# it is no answer and is not kept, and the override keeps nothing. A kept record
+# with nine digits answers again for the six while OSV serves the later one.
+precise_kept="${SAFEDEPS_HOME}/cache/osv-vuln/$(bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv-vuln GHSA-fixt-prec-0000 2026-09-10T03:50:51.191256Z ""').json"
+precise_read_failed='ERROR OSV record read failed id=GHSA-fixt-prec-0000 status=200'
+precise_warned='WARN OSV record kept for id=GHSA-fixt-prec-0000 '
+serve_later() { jq --argjson on "$1" '.serve_later_record = $on' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"; }
+# precise_install NAME PACKAGE [accept]: `npm ci` in a project of its own whose
+# closure gains PACKAGE@1.0.0, with the override when the third word is given.
+precise_install() {
+  local name="$1" package="$2" pre
+  accept_project "${tmp_root}/${name}"
+  accept_before=$(accept_entries)
+  if [[ "${3:-}" == accept ]]; then
+    pre=$(accept_payload "${name}" "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci" "${tmp_root}/${name}" | pre_hook)
+    [[ "$(hook_response_read decision "${pre}")" == allow ]] || fail "${name}: npm ci with the override runs"
+    payload=$(accept_payload "${name}" "$(hook_response_read required-rewrite "${pre}")" "${tmp_root}/${name}")
+  else
+    payload=$(accept_payload "${name}" "npm ci" "${tmp_root}/${name}")
+    pre_hook > /dev/null <<< "${payload}"
+  fi
+  accept_lock "${tmp_root}/${name}" ",
+    \"node_modules/${package}\": {\"version\": \"1.0.0\"}"
+  precise_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+}
+# precise_vulnerable NAME: the install was rolled back for its vulnerable
+# package and not for an OSV answer that is not whole, and the record querybatch
+# named is kept under the pair it gave.
+precise_vulnerable() {
+  grep -q 'suspicious dependency change detected. A rollback ran.' < "${precise_post}" || fail "$1: the vulnerable closure is rolled back: $(cat "${precise_post}")"
+  grep -q 'npm closure contains vulnerable package(s): fixture-precise@1.0.0' < "${precise_post}" \
+    || fail "$1: the rollback names the vulnerable package: $(cat "${precise_post}")"
+  if grep -q 'OSV batch verification failed' < "${precise_post}"; then fail "$1: the rollback says OSV gave no whole answer"; fi
+  if grep -q 'fixture-precise' "${tmp_root}/$1/package-lock.json"; then fail "$1: the lockfile is restored"; fi
+  [[ "$(accept_entries)" == "${accept_before}" ]] || fail "$1: a rollback writes no accepted-risk entry"
+  jq -e '.id == "GHSA-fixt-prec-0000" and .modified == "2026-09-10T03:50:51.191256883Z"' "${precise_kept}" >/dev/null 2>&1 \
+    || fail "$1: the record is kept under the pair querybatch gave: $(ls "${precise_kept%/*}")"
+}
+[[ ! -e "${precise_kept}" ]] || fail "no earlier row keeps the record of GHSA-fixt-prec-0000"
+precise_failed_before=$(log_count "${precise_read_failed}")
+serve_later true
+precise_install precise-later fixture-precise accept
+serve_later false
+grep -q 'suspicious dependency change detected. A rollback ran.' < "${precise_post}" \
+  || fail "a record one microsecond later rolls back under the override: $(cat "${precise_post}")"
+grep -q 'npm closure OSV batch verification failed; fail-closed' < "${precise_post}" || fail "the rollback says OSV gave no whole answer"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${precise_post}" \
+  || fail "the rollback says the override does not cover a record at another time"
+if grep -q 'fixture-precise' "${tmp_root}/precise-later/package-lock.json"; then fail "the lockfile with the unanswered package is restored"; fi
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a rollback for a record at another time writes no accepted-risk entry"
+(( $(log_count "${precise_read_failed}") == precise_failed_before + 1 )) || fail "the record says the record OSV served is not the one named"
+[[ ! -e "${precise_kept}" ]] || fail "a record one microsecond later is not kept: $(cat "${precise_kept}")"
+pass "a record one microsecond later than the time querybatch named is no answer and is not kept, and SAFEDEPS_ACCEPT_RISK keeps nothing"
+
+precise_failed_before=$(log_count "${precise_read_failed}")
+precise_install precise-vulnerable fixture-precise
+precise_vulnerable precise-vulnerable
+(( $(log_count "${precise_read_failed}") == precise_failed_before )) || fail "the record with nine digits is read"
+pass "a record with nine digits for the six querybatch gave is the named record: the closure is rolled back as vulnerable, and the record is kept"
+
+precise_install precise-accepted fixture-precise accept
+grep -qxF 'safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.' \
+  <<< "$(post_message "${precise_post}")" || fail "the kept install is announced as a warning: $(cat "${precise_post}")"
+grep -qF 'npm closure contains vulnerable package(s): fixture-precise@1.0.0 (GHSA-fixt-prec-0000)' <<< "$(post_message "${precise_post}")" \
+  || fail "the accepted problems name the advisory: $(cat "${precise_post}")"
+grep -q 'fixture-precise' "${tmp_root}/precise-accepted/package-lock.json" || fail "the kept install's lockfile is left as the install wrote it"
+[[ "$(accept_entries)" == "$((accept_before + 1))" ]] || fail "the kept install writes one accepted-risk entry"
+tail -n 1 "${accept_audit}" | jq -e --arg r "${accept_reason}" '.reason == $r
+  and ([.packages[] | select(.package == "fixture-precise@1.0.0" and .problem == "vulnerable" and .advisories == ["GHSA-fixt-prec-0000"])] | length) == 1' >/dev/null \
+  || fail "the entry names the vulnerable package and its advisory: $(tail -n 1 "${accept_audit}")"
+pass "SAFEDEPS_ACCEPT_RISK keeps an install whose advisory OSV named to the microsecond, and records the advisory"
+
+cp "${precise_kept}" "${tmp_root}/precise-kept.before"
+precise_failed_before=$(log_count "${precise_read_failed}")
+precise_warned_before=$(log_count "${precise_warned}")
+serve_later true
+precise_install precise-kept-again fixture-precise
+serve_later false
+precise_vulnerable precise-kept-again
+(( $(log_count "${precise_warned}") == precise_warned_before )) || fail "the kept record is read as the named one: $(grep 'OSV record' "${SAFEDEPS_HOME}/advisory.log" | tail -n 3)"
+(( $(log_count "${precise_read_failed}") == precise_failed_before )) || fail "the later record OSV serves is not asked for"
+cmp -s "${precise_kept}" "${tmp_root}/precise-kept.before" || fail "the kept record is left as it was: $(cat "${precise_kept}")"
+pass "a kept record with nine digits answers again for the six querybatch gave, while OSV serves a later one"
+
+precise_install precise-kev fixture-precise-kev accept
+grep -q 'suspicious dependency change detected. A rollback ran.' < "${precise_post}" \
+  || fail "a KEV listing on the alias of a record with nine digits rolls back under the override: $(cat "${precise_post}")"
+grep -q 'npm closure contains KEV-blocked package(s): fixture-precise-kev@1.0.0' < "${precise_post}" || fail "the rollback names the KEV-listed package: $(cat "${precise_post}")"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${precise_post}" \
+  || fail "the rollback says the override does not cover a KEV listing"
+if grep -q 'OSV batch verification failed' < "${precise_post}"; then fail "the rollback says OSV gave no whole answer"; fi
+if grep -q 'fixture-precise-kev' "${tmp_root}/precise-kev/package-lock.json"; then fail "the KEV-listed lockfile is restored"; fi
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a KEV rollback writes no accepted-risk entry"
+pass "SAFEDEPS_ACCEPT_RISK never keeps a package KEV lists by the alias of a record with nine digits"
+
 # On Codex the pre-guard cannot withhold install scripts, so the override does
 # not lift the ledger check for a spec; the post-install override still holds.
 accept_project "${tmp_root}/accept-codex"

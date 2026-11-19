@@ -227,6 +227,32 @@ row_provider_down() {
 }
 row "OSV 503 is provider_unavailable, never clean, and a finding it cannot re-measure stays open and stale" row_provider_down
 
+# querybatch names an advisory's `modified` to the microsecond, and its record
+# carries the same time with nine digits, as OSV does (the fixture cuts the
+# batch's digits past the sixth). The record is the one querybatch named, by
+# the microsecond rule (osv_same_time in lib/providers/providers.sh), so the
+# lockfile reports its finding and is measured, not provider_unavailable.
+row_record_nine_digits() {
+  new_world; register a
+  npm_lock "${d}/p/a" left@1.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-nine-nine-nine '' left 1.0.1 | jq -c '.modified = "2026-09-10T03:50:51.191256883Z"')]"
+  # The condition, measured: the batch names the advisory with six digits and
+  # its record carries nine.
+  local named record
+  named=$(curl -fsS -H 'Content-Type: application/json' -d '{"queries":[{"version":"1.0.0","package":{"name":"left","ecosystem":"npm"}}]}' \
+    "${base}/osv/v1/querybatch" | jq -r '.results[0].vulns[0].modified')
+  record=$(curl -fsS "${base}/osv/v1/vulns/GHSA-nine-nine-nine" | jq -r '.modified')
+  [[ "${named}" == 2026-09-10T03:50:51.191256Z && "${record}" == 2026-09-10T03:50:51.191256883Z ]] \
+    || no "the fixture names ${named} and serves ${record}"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].state == "open" and .[0].advisory == "GHSA-nine-nine-nine" and .[0].package == "left" and .[0].fixed == ["1.0.1"]' > /dev/null \
+    || no "the finding: $(npm_findings)"
+  st '[.. | objects | select(.kind? == "provider_unavailable" or .status? == "provider_unavailable")] | length == 0' \
+    'provider_unavailable' '[.. | objects | select(.kind? == "provider_unavailable" or .status? == "provider_unavailable")]'
+  st '.summary.osv_measured == 1'
+}
+row "a record with nine digits for the six querybatch gave is the named record: the lockfile reports its finding and is not provider_unavailable" row_record_nine_digits
+
 # ---- native audit, resolvers not implemented ---------------------------------------
 row_native_and_unmeasured() {
   new_world; register pn cg

@@ -82,12 +82,41 @@ function staleRecord() {
   };
 }
 
+// querybatch gives a `modified` to the microsecond and /v1/vulns/<id> gives
+// the same time with nine fraction digits. Measured on OSV on 2026-11-19 for
+// GHSA-28wg-ghj8-5hjv: batch `2026-09-10T03:50:51.191256Z`, record
+// `2026-09-10T03:50:51.191256883Z`. The batch cuts the digits past the sixth;
+// it does not round them, or that pair would end in 257. So the batch
+// answers below cut a record's fraction the same way, and a time with six
+// digits or fewer is given as it is.
+function toMicroseconds(time) {
+  return typeof time === 'string' ? time.replace(/(\.[0-9]{6})[0-9]+Z$/, '$1Z') : time;
+}
+// Two advisories whose records carry nine digits, so querybatch names them
+// with six: one KEV lists by its alias and one it does not. With
+// `serve_later_record` set in the state, /v1/vulns/<id> serves either record
+// one microsecond after the time querybatch named, as after OSV changed it.
+// That record is not the one querybatch named.
+const PRECISE = '2026-09-10T03:50:51.191256883Z';
+const LATER = '2026-09-10T03:50:51.191257883Z';
+const preciseIds = new Map([['GHSA-fixt-prec-0000', ['GHSA-fixt-prec-0000']], ['GHSA-fixt-prek-0000', ['CVE-2026-9999']]]);
+function preciseRecord(id) {
+  return {
+    id,
+    modified: state().serve_later_record ? LATER : PRECISE,
+    aliases: preciseIds.get(id),
+    affected: [{ package: { ecosystem: 'npm', name: 'fixture' }, ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }] }] }]
+  };
+}
+
 // The answer to one query. A package named for it below, or listed under the
 // state key of the same name, answers in pages as OSV does (`paged`: a first
 // page with next_page_token and the rest asked again with that token), with a
 // token that is not one (`bad_token`), with no end (`endless`), or names an
 // advisory whose record carries the KEV-listed CVE (`kev_alias`), that has
-// no record (`record_missing`), or that OSV changed (`stale_record`).
+// no record (`record_missing`), that OSV changed (`stale_record`), or whose
+// record carries nine fraction digits (`precise`, and `precise_kev` for the
+// one KEV lists by its alias).
 function osvResponse(packageName, version, pageToken) {
   const key = `${packageName}@${version}`;
   const current = state();
@@ -109,6 +138,12 @@ function osvResponse(packageName, version, pageToken) {
   }
   if (packageName === 'fixture-stale-record' || listed('stale_record')) {
     return { vulns: [staleNamed] };
+  }
+  if (packageName === 'fixture-precise' || listed('precise')) {
+    return { vulns: [{ id: 'GHSA-fixt-prec-0000', modified: PRECISE }] };
+  }
+  if (packageName === 'fixture-precise-kev' || listed('precise_kev')) {
+    return { vulns: [{ id: 'GHSA-fixt-prek-0000', modified: PRECISE }] };
   }
   if ((packageName === 'fixture-paged' || listed('paged')) && pageToken !== 'page-2') {
     return { vulns: [], next_page_token: 'page-2' };
@@ -176,13 +211,13 @@ const server = http.createServer(async (req, res) => {
     const held = state()[queries.some((query) => query.page_token) ? 'hold_next_ms' : 'hold_first_ms'];
     if (Number(held) > 0) await new Promise((resolve) => setTimeout(resolve, Number(held)));
     res.setHeader('content-type', 'application/json');
-    // querybatch names an advisory by its id and `modified` only; the
-    // record is read from /v1/vulns/<id>.
+    // querybatch names an advisory by its id and `modified` only, to the
+    // microsecond; the record is read from /v1/vulns/<id>.
     res.end(JSON.stringify({
       results: queries.map((query) => {
         const answer = osvResponse(query.package?.name || '', query.version || '', query.page_token);
         if (!Array.isArray(answer.vulns)) return answer;
-        return { ...answer, vulns: answer.vulns.map((vuln) => ({ id: vuln.id, modified: vuln.modified })) };
+        return { ...answer, vulns: answer.vulns.map((vuln) => ({ id: vuln.id, modified: toMicroseconds(vuln.modified) })) };
       })
     }));
     return;
@@ -200,6 +235,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (id === staleId) {
       res.end(JSON.stringify(staleRecord()));
+      return;
+    }
+    if (preciseIds.has(id)) {
+      res.end(JSON.stringify(preciseRecord(id)));
       return;
     }
     const record = RECORDS.get(id);

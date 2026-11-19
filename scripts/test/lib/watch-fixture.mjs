@@ -4,6 +4,10 @@
 // querybatch and records, the KEV catalog, GHSA, the OpenJDK advisories index
 // and pages, and the Adoptium API. querybatch answers as OSV does, with ids and
 // `modified` only, so a reader that needs fixed versions has to read the record.
+// It gives `modified` to the microsecond, as OSV does: a record's fraction past
+// six digits is cut, not rounded (measured on OSV on 2026-11-19, record
+// `…51.191256883Z`, batch `…51.191256Z`), and a time with six digits or fewer is
+// given as it is.
 //
 //   node watch-fixture.mjs <port-file> <state-file> <request-log>
 //
@@ -50,6 +54,10 @@ function allRecords(s) {
   return Object.values(s.osv || {}).flat();
 }
 
+function toMicroseconds(time) {
+  return time.replace(/(\.[0-9]{6})[0-9]+Z$/, '$1Z');
+}
+
 const server = http.createServer(async (req, res) => {
   inFlight += 1;
   const s = state();
@@ -69,7 +77,7 @@ const server = http.createServer(async (req, res) => {
       const q = await body(req);
       const results = (q.queries || []).map((query) => {
         const vulns = records(s, query.package?.name || '', query.version || '');
-        return vulns.length ? { vulns: vulns.map((v) => ({ id: v.id, modified: v.modified || '2026-01-01T00:00:00Z' })) } : {};
+        return vulns.length ? { vulns: vulns.map((v) => ({ id: v.id, modified: toMicroseconds(v.modified || '2026-01-01T00:00:00Z') })) } : {};
       });
       return send(res, 200, { results });
     }

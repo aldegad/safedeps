@@ -101,7 +101,8 @@ cat > "${closures}" <<'JSON'
   "fixture-kev-alias@1.0.0": [{"package":"fixture-kev-alias","version":"1.0.0","direct":true}],
   "fixture-record-missing@1.0.0": [{"package":"fixture-record-missing","version":"1.0.0","direct":true}],
   "fixture-record-other@1.0.0": [{"package":"fixture-record-other","version":"1.0.0","direct":true}],
-  "fixture-stale-record@1.0.0": [{"package":"fixture-stale-record","version":"1.0.0","direct":true}]
+  "fixture-stale-record@1.0.0": [{"package":"fixture-stale-record","version":"1.0.0","direct":true}],
+  "fixture-precise@1.0.0": [{"package":"fixture-precise","version":"1.0.0","direct":true}]
 }
 JSON
 closure_with() {
@@ -857,6 +858,74 @@ stale_record_control() {
   ! grep -q 'is not that record' "${home}/advisory.log" || no "a fresh home warned about a kept record"
 }
 row "npm: the record querybatch named, KEV-listed by its alias, blocks and is kept" stale_record_control
+# querybatch names an advisory's `modified` to the microsecond and its record
+# carries the same time with nine digits, as OSV does (the fixture's
+# PRECISE). That record is the one querybatch named, by the microsecond rule
+# (osv_same_time): the advisory counts, and the record is kept under the pair
+# querybatch gave. A record one microsecond later is another time: it is no
+# answer and is not kept. A kept record with nine digits answers again for the
+# six while OSV serves the later one, so the second answer comes from the file.
+precise_id=GHSA-fixt-prec-0000
+precise_batch=2026-09-10T03:50:51.191256Z
+precise_record=2026-09-10T03:50:51.191256883Z
+serve_later() {
+  jq --argjson on "$1" '.serve_later_record = $on' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+}
+precise_file() {
+  printf '%s/cache/osv-vuln/%s.json' "${home}" \
+    "$(SAFEDEPS_HOME="${home}" bash -c 'source lib/providers/providers.sh; safedeps_cache_key osv-vuln "$1" "$2" ""' _ "${precise_id}" "${precise_batch}")"
+}
+# The condition, measured: the fixture's querybatch names the advisory with six
+# digits, and its record carries nine.
+precise_served() {
+  local named record
+  named=$(curl -fsS -H 'Content-Type: application/json' -d '{"queries":[{"version":"1.0.0","package":{"name":"fixture-precise","ecosystem":"npm"}}]}' \
+    "${SAFEDEPS_OSV_BATCH_API_URL}" | jq -r '.results[0].vulns[0].modified')
+  record=$(curl -fsS "${SAFEDEPS_OSV_BATCH_API_URL%/querybatch}/vulns/${precise_id}" | jq -r '.modified')
+  [[ "${named}" == "${precise_batch}" && "${record}" == "$1" ]] || no "the fixture names ${named} and serves ${record}, not ${precise_batch} and $1"
+}
+precise_counts() {
+  [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg id "${precise_id}" --arg m "${precise_record}" '.result == "cve_unpatched" and .approved == false
+    and ([.closure_vulnerabilities[] | select(.package == "fixture-precise") | .vulnerabilities[] | select(.id == $id and .modified == $m)] | length) == 1' \
+    <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+  ! grep -q "OSV record read failed id=${precise_id}" "${home}/advisory.log" || no "advisory.log says the record was not read"
+  jq -e --arg m "${precise_record}" '.modified == $m' "$(precise_file)" >/dev/null 2>&1 \
+    || no "the record is not kept under the pair querybatch gave: $(ls "${home}/cache/osv-vuln" 2>/dev/null)"
+}
+precise_record_named() {
+  fresh_home
+  precise_served "${precise_record}"
+  check_in npm fixture-precise@1.0.0
+  precise_counts
+}
+row "npm: a record with nine digits for the six querybatch gave is the named record: the advisory counts and the record is kept" precise_record_named
+precise_record_later() {
+  trap 'serve_later false' EXIT
+  fresh_home
+  serve_later true
+  precise_served 2026-09-10T03:50:51.191257883Z
+  check_in npm fixture-precise@1.0.0
+  unavailable
+  grep -q "OSV record read failed id=${precise_id} status=200" "${home}/advisory.log" || no "advisory.log does not say the record was not read"
+  [[ -z "$(find "${home}/cache/osv-vuln" -type f 2>/dev/null)" ]] || no "the later record was kept: $(find "${home}/cache/osv-vuln" -type f)"
+}
+row "npm: a record one microsecond later than querybatch named approves nothing and is not kept" precise_record_later
+precise_record_kept() {
+  trap 'serve_later false' EXIT
+  fresh_home
+  check_in npm fixture-precise@1.0.0
+  precise_counts
+  cp "$(precise_file)" "${home}/kept.before"
+  serve_later true
+  precise_served 2026-09-10T03:50:51.191257883Z
+  check_in npm fixture-precise@1.0.0
+  precise_counts
+  ! grep -q 'is not that record' "${home}/advisory.log" || no "the kept record was read as another record: $(grep 'OSV record' "${home}/advisory.log")"
+  cmp -s "$(precise_file)" "${home}/kept.before" || no "the kept record was replaced: $(cat "$(precise_file)")"
+}
+row "npm: a kept record with nine digits answers again for the six querybatch gave, while OSV serves a later one" precise_record_kept
 record_url_not_derived() {
   fresh_home
   check_in npm fixture-unpatched@1.0.0 SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL}?mirror=1"

@@ -557,7 +557,24 @@ fn osv_answers_match_cli() {
         ("2016-12-31T23:58:60.987654321Z", "2016-12-31T23:58:60.987654Z", false), ("2016-12-31T22:59:60.987654321Z", "2016-12-31T22:59:60.987654Z", false),
         ("2026-12-30T23:59:60.987654321Z", "2026-12-30T23:59:60.987654Z", false), ("2026-01-30T23:59:60.987654321Z", "2026-01-30T23:59:60.987654Z", false),
         ("2024-02-28T23:59:60.987654321Z", "2024-02-28T23:59:60.987654Z", false), ("2023-02-29T23:59:60.987654321Z", "2023-02-29T23:59:60.987654Z", false),
-        ("2016-12-31T23:59:60.987654321Z", "2016-12-31T23:59:59.987654Z", false)];
+        ("2016-12-31T23:59:60.987654321Z", "2016-12-31T23:59:59.987654Z", false),
+        // From the validator's probe of 60c646b (14 of its 21 inputs; the other
+        // seven are rows above in value or in shape). The microsecond
+        // boundary for a batch with no digits and with three; a batch with
+        // seven digits held to all seven, also at a leap second. February's
+        // last day by the century rules: 2100 is not a leap year and 2400 is,
+        // so 23:59:60 is a time on 2100-02-28 and 2400-02-29 and not on
+        // 2100-02-29 or 2400-02-28, where 23:59:59 is. A leap second against a
+        // 23:59:60 that is not one, on either side, and against the second
+        // after it; and the same instant written with a negative offset.
+        ("2026-04-17T08:12:39.000001001Z", "2026-04-17T08:12:39Z", false), ("2026-04-17T08:12:39.987001001Z", "2026-04-17T08:12:39.987Z", false),
+        ("2026-04-17T08:12:39.987654421Z", "2026-04-17T08:12:39.9876543Z", false), ("2026-04-17T08:12:39.987654321Z", "2026-04-17T08:12:39.9876543Z", true),
+        ("2016-12-31T23:59:60.120000999Z", "2016-12-31T23:59:60.1200008Z", false),
+        ("2100-02-28T23:59:60.120000999Z", "2100-02-28T23:59:60.12Z", true), ("2400-02-29T23:59:60.120000999Z", "2400-02-29T23:59:60.120000Z", true),
+        ("2100-02-29T23:59:60.120000999Z", "2100-02-29T23:59:60.120000Z", false), ("2400-02-28T23:59:60.120000999Z", "2400-02-28T23:59:60.120000Z", false),
+        ("2400-02-28T23:59:59.120000999Z", "2400-02-28T23:59:59.120000Z", true),
+        ("2016-12-31T23:59:60.120000999Z", "2016-12-30T23:59:60.120000Z", false), ("2016-12-30T23:59:60.120000999Z", "2016-12-31T23:59:60.120000Z", false),
+        ("2017-01-01T00:00:00.120000999Z", "2016-12-31T23:59:60.120000Z", false), ("2016-12-31T18:59:60.120000999-05:00", "2016-12-31T23:59:60.120000Z", false)];
     records.extend(times.iter().map(|(at, given, same)| (format!("{{\"id\":\"GHSA-x\",\"modified\":\"{}\"}}", at.replace('\n', "\\n")), *given, *same)));
     for (body, modified, record) in records {
         fs::write(&file, &body).unwrap();
