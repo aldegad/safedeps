@@ -2,9 +2,13 @@
 """The approvals store through the real native CLI, with real write failures.
 
 A file size limit (RLIMIT_FSIZE, with SIGXFSZ ignored, so the write fails with
-EFBIG instead of killing the process) stops the core's own append at a byte
-the row picks. The core is not changed and no row writes a store byte: what
-the store holds is what the core wrote before its write failed.
+EFBIG instead of killing the process) stops the core's own append after as
+many bytes as the row picks. The core is not changed and no row writes a store
+byte: what the store holds is what the core wrote before its write failed.
+
+Kernels measure the append limit either at the file end or at the descriptor
+offset. A probe outside the core measures the host's behavior, rows branch on
+that measured result, and on an empty store the two behaviors agree.
 
 A host where the limit does not bind cannot show the condition, so each row
 prints a SKIPPED line there, which the host verdict reads as red unless
@@ -26,6 +30,10 @@ ROWS = (
     "an append that sealed the tail and then failed leaves one broken line and no record",
 )
 NO_BIND = "SKIPPED (the file size limit does not bind on this host)"
+# The probe appends 15 bytes to a file of 10 under a limit of 11. How many land
+# says where the host measures the limit.
+PROBE = "import os, sys\nfd = os.open(sys.argv[1], os.O_WRONLY | os.O_APPEND)\ntry:\n    os.write(fd, b'y' * 15)\nexcept OSError:\n    pass\n"
+PROBE_LANDED = {1: "end", 11: "descriptor"}
 
 
 class Failed(Exception):
@@ -44,21 +52,41 @@ def rec(n):
     return ("check approve(clean) ecosystem=npm package=store-p%d version=1.0.0 hash=%s\n" % (n, h(n))).encode()
 
 
-def call(home, args, data=b"", limit=None):
-    env = {key: value for key, value in os.environ.items() if not key.startswith("SAFEDEPS_")}
-    env.update(HOME=str(home.parent / "home"), SAFEDEPS_HOME=str(home))
-
+def limiter(limit):
     def limited():
         resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
         signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    return limited
 
+
+def measured_at(base):
+    """Where this host measures the file size limit of an append: "end" or
+    "descriptor". NoBind when it does not bind."""
+    probe = base / "fsize-probe"
+    probe.write_bytes(b"x" * 10)
+    r = subprocess.run([sys.executable, "-I", "-c", PROBE, str(probe)], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=60, preexec_fn=limiter(11))
+    landed = probe.stat().st_size - 10
+    if r.returncode != 0:
+        raise Failed(f"the probe exited {r.returncode}: {r.stderr!r}")
+    if landed == 15:
+        raise NoBind()
+    if landed not in PROBE_LANDED:
+        raise Failed(f"the probe landed {landed} of 15 bytes under a limit of 11 on a file of 10")
+    return PROBE_LANDED[landed]
+
+
+def call(home, args, data=b"", limit=None):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SAFEDEPS_")}
+    env.update(HOME=str(home.parent / "home"), SAFEDEPS_HOME=str(home))
     r = subprocess.run([CORE, "approvals", *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       env=env, timeout=60, preexec_fn=limited if limit is not None else None)
+                       env=env, timeout=60, preexec_fn=None if limit is None else limiter(limit))
     return r.returncode, r.stdout, r.stderr
 
 
 def store(home):
-    return (home / "approvals.jsonl").read_bytes()
+    f = home / "approvals.jsonl"
+    return f.read_bytes() if f.exists() else b""
 
 
 def index(home):
@@ -75,13 +103,9 @@ def expect_index(home, hashes, broken, when):
         raise Failed(f"{when}: index {json.dumps(got, sort_keys=True)}, want {json.dumps(want, sort_keys=True)}")
 
 
-def append(home, n, limit=None):
-    return call(home, ["append", h(n)], rec(n), limit)
-
-
 def append_ok(home, n, when):
-    before = store(home) if (home / "approvals.jsonl").exists() else b""
-    rc, out, err = append(home, n)
+    before = store(home)
+    rc, out, err = call(home, ["append", h(n)], rec(n))
     if (rc, out, err) != (0, b"", b""):
         raise Failed(f"{when}: append exited {rc} with {err!r}")
     after = store(home)
@@ -90,38 +114,32 @@ def append_ok(home, n, when):
     return after[len(before):]
 
 
-def append_cut(home, n, limit, when):
-    """An append the limit stops at byte `limit` of the store: it must say it
-    did not write, and leave exactly the bytes up to the limit."""
-    before = store(home) if (home / "approvals.jsonl").exists() else b""
-    rc, out, err = append(home, n, limit)
+def append_cut(home, n, landed, at, when):
+    """An append the limit stops after `landed` bytes: it must say it did not
+    write, and leave the bytes before it and exactly `landed` more."""
+    before = store(home)
+    limit = landed if at == "descriptor" else len(before) + landed
+    rc, out, err = call(home, ["append", h(n)], rec(n), limit)
     after = store(home)
-    if rc == 0 and len(after) > limit:
-        raise NoBind()
     if rc != 1 or out or b"not written to " not in err or b"File too large" not in err:
         raise Failed(f"{when}: the cut append exited {rc} with {err!r}")
-    if len(after) != limit or not after.startswith(before):
-        raise Failed(f"{when}: the cut append left {len(after)} bytes, want the {len(before)} before it and up to {limit}")
+    if len(after) != len(before) + landed or not after.startswith(before):
+        raise Failed(f"{when}: the cut append left {len(after)} bytes, want the {len(before)} before it and {landed} more")
     return after[len(before):]
 
 
-def line_length(base):
-    home = base / "measure"
-    return len(append_ok(home, 1, "measuring a line"))
-
-
-def tail_of_whole_record(home, n, length):
-    """Row 1's state: an append cut one byte short of its line."""
-    tail = append_cut(home, n, length - 1, "cut one byte short")
+def tail_of_whole_record(home, n, length, at):
+    """Every row's start: an append cut one byte short of its line."""
+    tail = append_cut(home, n, length - 1, at, "cut one byte short")
     if tail.endswith(b"\n") or json.loads(tail).get("hash") != h(n):
         raise Failed("the cut append did not leave a whole record but its newline")
     expect_index(home, [], 1, "after the cut append")
     return tail
 
 
-def row_whole_record(base, length):
+def row_whole_record(base, length, at):
     home = base / "whole"
-    tail = tail_of_whole_record(home, 1, length)
+    tail = tail_of_whole_record(home, 1, length, at)
     new = append_ok(home, 2, "the next append")
     # The claim first: the failed record vouches for nothing, and is one
     # broken line. Then how: the bytes before stay, then the seal.
@@ -130,10 +148,10 @@ def row_whole_record(base, length):
         raise Failed("the next append did not seal the tail and write its line after it")
 
 
-def row_seal_cut_short(base, length):
+def row_seal_cut_short(base, length, at):
     home = base / "seal-short"
-    tail = tail_of_whole_record(home, 1, length)
-    seal = append_cut(home, 2, length, "an append cut after one byte of its seal")
+    tail = tail_of_whole_record(home, 1, length, at)
+    seal = append_cut(home, 2, 1, at, "an append cut after one byte of its seal")
     if seal != b"\0":
         raise Failed(f"the cut seal is {seal!r}")
     expect_index(home, [], 1, "after the cut seal")
@@ -143,10 +161,10 @@ def row_seal_cut_short(base, length):
         raise Failed("the append after the cut seal did not seal the tail again")
 
 
-def row_sealed_then_failed(base, length):
+def row_sealed_then_failed(base, length, at):
     home = base / "sealed-then-failed"
-    tail = tail_of_whole_record(home, 1, length)
-    seal = append_cut(home, 2, length + 1, "an append cut after its seal")
+    tail = tail_of_whole_record(home, 1, length, at)
+    seal = append_cut(home, 2, 2, at, "an append cut after its seal")
     if seal != b"\0\n":
         raise Failed(f"the append cut after its seal wrote {seal!r}")
     expect_index(home, [], 1, "after the append cut after its seal")
@@ -157,18 +175,20 @@ def row_sealed_then_failed(base, length):
 
 
 def main():
-    done, current = 0, "measuring a line"
+    current = "measuring the limit and a line"
     with tempfile.TemporaryDirectory(prefix="safedeps-approvals-store.") as temp:
         base = Path(temp)
         try:
-            length = line_length(base)
+            at = measured_at(base)
+            print(f"# note: this host measures the file size limit of an append at the {at}"
+                  f"{' of the file' if at == 'end' else ' offset'}")
+            length = len(append_ok(base / "measure", 1, "measuring a line"))
             for name, row in zip(ROWS, (row_whole_record, row_seal_cut_short, row_sealed_then_failed)):
                 current = name
-                row(base, length)
+                row(base, length, at)
                 print(f"ok - {name}")
-                done += 1
         except NoBind:
-            for name in ROWS[done:]:
+            for name in ROWS:
                 print(f"ok - {name} {NO_BIND}")
         except Exception as error:  # every other end of a row is its failure
             print(f"not ok - {current}: {error!r}")
