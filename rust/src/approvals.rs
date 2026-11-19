@@ -770,6 +770,7 @@ fn answer(appended: Result<(), Appended>, store: &Path) -> (i32, Vec<u8>, Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     struct Dir(PathBuf);
     impl Drop for Dir {
@@ -786,6 +787,17 @@ mod tests {
     fn rec(n: u8) -> Vec<u8> {
         format!("check approve(clean) ecosystem=npm package=p{} version=1.0.0 hash={}", n, h(n)).into_bytes()
     }
+    /// A store line another check wrote: the store's own write, under its
+    /// lock, with no entry and no approve line. No command writes a line
+    /// alone; a test uses it to make a store that vouches.
+    fn append(dir: &Path, hash: &str, record: &[u8]) -> Result<(), Appended> {
+        append_within(dir, hash, record, LOCK_WAIT)
+    }
+    fn append_within(dir: &Path, hash: &str, record: &[u8], wait: Duration) -> Result<(), Appended> {
+        let at = os::utc_stamp(os::wall(os::WallRole::ApprovalRecord).seconds());
+        let file = locked(dir, wait)?;
+        write_locked(&file, &line(&at, hash, Via::Check, record))
+    }
     fn not_written(r: Result<(), Appended>) -> io::Error {
         match r {
             Err(Appended::NotWritten(e)) => e,
@@ -796,6 +808,9 @@ mod tests {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
         os::flock_within(&f, lock, Duration::from_secs(1)).unwrap();
         f
+    }
+    fn ino(p: &Path) -> u64 {
+        fs::metadata(p).unwrap().ino()
     }
 
     #[test]
@@ -833,26 +848,11 @@ mod tests {
         let d = scratch();
         fs::create_dir_all(path(&d.0)).unwrap();
         assert!(index(&d.0).is_err());
-        assert!(append(&d.0, &h(1), &rec(1)).is_err());
-    }
-
-    #[test]
-    fn what_is_no_hash_or_no_approval_is_refused_and_writes_nothing() {
-        let d = scratch();
-        for (hash, record) in [
-            ("sha256:".to_string() + &"A".repeat(64), rec(1)),
-            ("sha256:".to_string() + &"0".repeat(63), rec(1)),
-            ("md5:".to_string() + &"0".repeat(64), rec(1)),
-            (String::new(), rec(1)),
-            (h(1), b"check block ecosystem=npm package=p version=1".to_vec()),
-            (h(1), format!("check approve-undone hash={} outcome=exit-1", h(1)).into_bytes()),
-            (h(1), b"check approve ecosystem=npm package=p version=1".to_vec()),
-            (h(1), Vec::new()),
-        ] {
-            let e = not_written(append(&d.0, &hash, &record));
-            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{hash:?}");
-        }
-        assert!(!path(&d.0).exists());
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (hash, r) = (h(1), rec(1));
+        let answer = commit(&d.0, &approval(1, &staged, &entry, &r, &hash), &mut Vec::new());
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+        assert!(staged.exists() && !entry.exists());
     }
 
     #[test]
@@ -973,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_appends_each_land_as_one_whole_line() {
+    fn concurrent_commits_each_land_as_one_whole_line() {
         let d = scratch();
         let threads: Vec<_> = (0..8u8)
             .map(|t| {
@@ -981,7 +981,9 @@ mod tests {
                 std::thread::spawn(move || {
                     for k in 0..25u8 {
                         let n = t * 25 + k;
-                        append(&dir, &h(n), &rec(n)).unwrap();
+                        let (staged, entry) = stage(&dir, n, &format!("entry of {n}"));
+                        let (hash, r) = (h(n), rec(n));
+                        assert_eq!(commit(&dir, &approval(n, &staged, &entry, &r, &hash), &mut Vec::new()), Answer::Approved);
                     }
                 })
             })
@@ -997,20 +999,7 @@ mod tests {
         want.sort();
         assert_eq!(got, want);
         assert_eq!(fs::read(path(&d.0)).unwrap().iter().filter(|&&b| b == b'\n').count(), 200);
-    }
-
-    #[test]
-    fn a_writer_waits_for_the_store_lock() {
-        let d = scratch();
-        let held = holder(&d.0, os::FileLock::Exclusive);
-        let dir = d.0.clone();
-        let writer = std::thread::spawn(move || append(&dir, &h(1), &rec(1)));
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(fs::metadata(path(&d.0)).unwrap().len(), 0, "the writer wrote while another held the lock");
-        assert!(!writer.is_finished());
-        drop(held);
-        writer.join().unwrap().unwrap();
-        assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
+        assert_eq!(logged(&d.0).len(), 200);
     }
 
     #[test]
@@ -1062,10 +1051,6 @@ mod tests {
         drop(file);
         assert_eq!(fs::read(path(&d.0)).unwrap(), whole);
         assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
-        let (code, out, err) = answer(Err(Appended::Unsynced(io::Error::from_raw_os_error(5))), &path(&d.0));
-        assert_eq!((code, out.is_empty()), (3, true));
-        let err = String::from_utf8(err).unwrap();
-        assert!(err.starts_with(&format!("safedeps-core approvals: written to {} and not synced: ", path(&d.0).display())), "{err}");
     }
 
     #[test]
@@ -1077,9 +1062,6 @@ mod tests {
         let r = write_then_sync(&read_only, &whole, |_| panic!("a failed write reached the sync"));
         assert!(matches!(r, Err(Appended::NotWritten(_))), "{r:?}");
         assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
-        let (code, out, err) = answer(r, &path(&d.0));
-        assert_eq!((code, out.is_empty()), (1, true));
-        assert!(err.starts_with(format!("safedeps-core approvals: not written to {}: ", path(&d.0).display()).as_bytes()));
     }
 
     // ---- the commit ----------------------------------------------------------
@@ -1093,13 +1075,20 @@ mod tests {
         let mut k = 0;
         let staged = loop {
             let s = dir.join(format!(".{}.staged{k}", ledger::filename(&h(n))));
-            if !s.exists() {
+            if fs::OpenOptions::new().write(true).create_new(true).open(&s).is_ok() {
                 break s;
             }
             k += 1;
         };
         fs::write(&staged, body).unwrap();
         (staged, entry)
+    }
+    /// An entry of `n` holding `body` at its path, as an earlier check left it.
+    /// Returns the path.
+    fn stand(home: &Path, n: u8, body: &str) -> PathBuf {
+        let (staged, entry) = stage(home, n, body);
+        fs::rename(&staged, &entry).unwrap();
+        entry
     }
     /// advisory.log in `home`, each line without its time.
     fn logged(home: &Path) -> Vec<String> {
@@ -1134,6 +1123,13 @@ mod tests {
     fn efbig(_: &fs::File, _: &[u8]) -> Result<(), Appended> {
         Err(Appended::NotWritten(io::Error::from_raw_os_error(27)))
     }
+    fn eio(_: &fs::File) -> io::Result<Index> {
+        Err(io::Error::from_raw_os_error(5))
+    }
+    /// Neither of a commit's two second names is beside the entry.
+    fn nothing_beside(entry: &Path) -> bool {
+        !prev_of(entry).exists() && fs::symlink_metadata(none_of(entry)).is_err()
+    }
 
     #[test]
     fn a_commit_writes_the_three_records_with_the_store_lock_held_throughout() {
@@ -1148,10 +1144,12 @@ mod tests {
             LOCK_WAIT,
             |file, l| {
                 // The rename and the approve line came first, and the lock
-                // has been held since before them.
+                // has been held since before them. Nothing stood at the path,
+                // and a second name says so.
                 assert!(held_elsewhere(&d.0), "the store lock is not held while the commit writes");
                 assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
                 assert_eq!(logged(&d.0), vec![record(1)]);
+                assert!(none_of(&entry).exists() && !prev_of(&entry).exists(), "no second name says that nothing stood at the path");
                 write_locked(file, l)
             },
             read_locked,
@@ -1160,6 +1158,7 @@ mod tests {
         assert_eq!(answer, Answer::Approved);
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
         assert!(!staged.exists());
+        assert!(nothing_beside(&entry), "a second name outlived the commit");
         assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
         assert_eq!(logged(&d.0), vec![record(1)]);
         assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
@@ -1182,6 +1181,7 @@ mod tests {
         drop(held);
         assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
         assert!(staged.exists() && !entry.exists(), "the entry was put in place without the lock");
+        assert!(nothing_beside(&entry));
         assert!(!d.0.join(ADVISORY_LOG).exists());
         assert_eq!(fs::metadata(path(&d.0)).unwrap().len(), 0);
         assert!(String::from_utf8(err).unwrap().starts_with("safedeps-core approvals: not committed: "));
@@ -1224,6 +1224,7 @@ mod tests {
             assert_eq!(b.join().unwrap(), Answer::Approved);
         });
         assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of B");
+        assert!(nothing_beside(&entry));
         assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
         let undone = format!("check approve-undone hash={} outcome=os-error-27", h(1));
         assert_eq!(logged(&d.0), vec![record(1), undone, record(1)]);
@@ -1231,22 +1232,33 @@ mod tests {
 
     #[test]
     fn a_rename_that_fails_puts_nothing_in_place_and_takes_nothing_back() {
-        let d = scratch();
-        let (staged, entry) = stage(&d.0, 1, "entry of 1");
-        fs::write(&entry, "an entry that was there").unwrap();
-        fs::remove_file(&staged).unwrap();
-        let (hash, r) = (h(1), rec(1));
-        let mut err = Vec::new();
-        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, not_now, read_locked, &mut err);
-        assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched));
-        assert_eq!(fs::read_to_string(&entry).unwrap(), "an entry that was there");
-        assert!(!prev_of(&entry).exists(), "the second name of the entry that was there stayed");
-        assert!(logged(&d.0).is_empty());
-        assert!(String::from_utf8(err).unwrap().contains("could not be put in place"));
+        for stood in [true, false] {
+            let d = scratch();
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            if stood {
+                fs::write(&entry, "an entry that was there").unwrap();
+            }
+            fs::remove_file(&staged).unwrap();
+            let (hash, r) = (h(1), rec(1));
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, not_now, read_locked, &mut err);
+            assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched));
+            if stood {
+                assert_eq!(fs::read_to_string(&entry).unwrap(), "an entry that was there");
+            } else {
+                assert!(!entry.exists());
+            }
+            assert!(nothing_beside(&entry), "a second name stayed after a rename that failed");
+            assert!(logged(&d.0).is_empty());
+            assert!(String::from_utf8(err).unwrap().contains("could not be put in place"));
+        }
     }
 
     #[test]
-    fn an_approve_line_that_fails_takes_the_entry_back_unless_the_store_vouches() {
+    fn an_approve_line_that_fails_takes_this_checks_entry_away_whoever_vouches() {
+        // Where nothing stood at the path, nothing stands there after, even
+        // where the store vouches for the hash with another check's line: an
+        // entry of a check that answered failure is no approval to find.
         for vouched in [false, true] {
             let d = scratch();
             if vouched {
@@ -1259,32 +1271,26 @@ mod tests {
             let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, not_now, read_locked, &mut err);
             let err = String::from_utf8(err).unwrap();
             assert!(err.contains("the approve line could not be written"), "{err}");
-            if vouched {
-                assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Kept));
-                assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
-                assert!(err.contains(&format!("safedeps: kept: the approvals store vouches for {}", h(1))), "{err}");
-            } else {
-                assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Removed));
-                assert!(!entry.exists());
-            }
+            assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Removed), "vouched={vouched}");
+            assert!(!entry.exists(), "vouched={vouched}: this check's entry stands");
+            assert!(!staged.exists() && nothing_beside(&entry));
             assert_eq!(index(&d.0).unwrap().hashes, if vouched { vec![h(1)] } else { Vec::new() });
         }
     }
 
     #[test]
-    fn a_take_back_where_the_store_vouches_puts_back_the_entry_that_stood_there() {
-        use std::os::unix::fs::MetadataExt;
+    fn a_take_back_puts_back_the_entry_that_stood_there_unless_the_store_says_it_is_no_approval() {
         // (where the commit fails, the store vouches) -> what stands at the end
         for (at_store, vouched) in [(false, true), (true, true), (false, false), (true, false)] {
             let d = scratch();
             if vouched {
                 append(&d.0, &h(1), &rec(1)).unwrap();
             }
-            let (earlier, entry) = stage(&d.0, 1, "the entry A approved");
-            fs::rename(&earlier, &entry).unwrap();
-            let before = fs::metadata(&entry).unwrap().ino();
-            // A commit that ended left its second name, holding other bytes.
+            let entry = stand(&d.0, 1, "the entry A approved");
+            let before = ino(&entry);
+            // A commit that ended left its second names, holding other bytes.
             fs::write(prev_of(&entry), "left by a commit that ended").unwrap();
+            fs::write(none_of(&entry), "").unwrap();
             if !at_store {
                 fs::create_dir_all(d.0.join(ADVISORY_LOG)).unwrap();
             }
@@ -1294,27 +1300,26 @@ mod tests {
             let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, efbig, read_locked, &mut err);
             let failure = if at_store { Failure::Store } else { Failure::LedgerWrite };
             if vouched {
-                assert_eq!(answer, Answer::NotApproved(failure, Entry::Kept), "at_store={at_store}");
+                assert_eq!(answer, Answer::NotApproved(failure, Entry::Restored), "at_store={at_store}");
                 assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
-                assert_eq!(fs::metadata(&entry).unwrap().ino(), before, "the entry put back is not the file that stood there");
-                assert!(String::from_utf8(err).unwrap().contains("the one that stood there before this check is back"));
+                assert_eq!(ino(&entry), before, "the entry put back is not the file that stood there");
             } else {
                 assert_eq!(answer, Answer::NotApproved(failure, Entry::Removed), "at_store={at_store}");
                 assert!(!entry.exists());
             }
-            assert!(!staged.exists() && !prev_of(&entry).exists(), "the commit left a file behind");
+            assert!(!staged.exists() && nothing_beside(&entry), "the commit left a file behind");
         }
         // A commit that approves replaces the entry, and keeps nothing aside.
         let d = scratch();
-        let (earlier, entry) = stage(&d.0, 1, "the entry A approved");
-        fs::rename(&earlier, &entry).unwrap();
+        let entry = stand(&d.0, 1, "the entry A approved");
         let (staged, _) = stage(&d.0, 1, "the entry B wrote");
         let (hash, r) = (h(1), rec(1));
         let answer = commit(&d.0, &approval(1, &staged, &entry, &r, &hash), &mut Vec::new());
         assert_eq!(answer, Answer::Approved);
         assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry B wrote");
-        assert!(!prev_of(&entry).exists());
+        assert!(nothing_beside(&entry));
         assert_eq!(prev_of(&entry).file_name().unwrap().to_str().unwrap(), format!(".{}.prev", ledger::filename(&h(1))));
+        assert_eq!(none_of(&entry).file_name().unwrap().to_str().unwrap(), format!(".{}.none", ledger::filename(&h(1))));
     }
 
     #[test]
@@ -1345,32 +1350,46 @@ mod tests {
             );
             let err = String::from_utf8(err).unwrap();
             assert!(err.starts_with(&format!("safedeps-core approvals: not written to {}: ", path(&d.0).display())), "{err}");
-            let how = "outcome=os-error-27";
-            if vouched {
-                assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Kept));
-                assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
-                assert_eq!(logged(&d.0), vec![record(1), format!("check approve-kept hash={} {how}", h(1))]);
-            } else {
-                assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed));
-                assert!(!entry.exists());
-                assert_eq!(logged(&d.0), vec![record(1), format!("check approve-undone hash={} {how}", h(1))]);
-                assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: usize::from(torn) });
-            }
+            assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed), "vouched={vouched}");
+            assert!(!entry.exists() && nothing_beside(&entry));
+            assert_eq!(logged(&d.0), vec![record(1), format!("check approve-undone hash={} outcome=os-error-27", h(1))]);
+            let ix = index(&d.0).unwrap();
+            assert_eq!(ix.hashes, if vouched { vec![h(1)] } else { Vec::new() });
+            assert_eq!(ix.broken, usize::from(torn));
         }
     }
 
     #[test]
-    fn a_store_that_cannot_be_read_back_is_in_doubt_and_the_entry_goes() {
-        let d = scratch();
-        append(&d.0, &h(1), &rec(1)).unwrap();
-        let (staged, entry) = stage(&d.0, 1, "entry of 1");
-        let (hash, r) = (h(1), rec(1));
-        let mut err = Vec::new();
-        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, efbig, |_| Err(io::Error::from_raw_os_error(5)), &mut err);
-        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Removed));
-        assert!(!entry.exists());
-        assert!(String::from_utf8(err).unwrap().contains("safedeps: in-doubt: the approvals store could not be read back"));
-        assert_eq!(logged(&d.0), vec![record(1), format!("check approve-in-doubt hash={} outcome=os-error-27", h(1))]);
+    fn a_take_back_the_store_cannot_be_read_for_puts_back_the_entry_that_stood_there() {
+        // The store could not be read, so nothing says the entry that stood
+        // at the path is no approval: it comes back, the same file. This
+        // check's entry goes.
+        for (at_store, stood) in [(true, true), (true, false), (false, true), (false, false)] {
+            let d = scratch();
+            let entry = if stood { stand(&d.0, 1, "the entry A approved") } else { d.0.join("approved-specs").join(ledger::filename(&h(1))) };
+            let before = stood.then(|| ino(&entry));
+            if !at_store {
+                fs::create_dir_all(d.0.join(ADVISORY_LOG)).unwrap();
+            }
+            let (staged, _) = stage(&d.0, 1, "the entry B wrote");
+            let (hash, r) = (h(1), rec(1));
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, efbig, eio, &mut err);
+            let failure = if at_store { Failure::InDoubt } else { Failure::LedgerWrite };
+            if stood {
+                assert_eq!(answer, Answer::NotApproved(failure, Entry::Restored), "at_store={at_store}");
+                assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+                assert_eq!(Some(ino(&entry)), before, "the entry that stood there is not back");
+            } else {
+                assert_eq!(answer, Answer::NotApproved(failure, Entry::Removed), "at_store={at_store}");
+                assert!(!entry.exists());
+            }
+            assert!(!staged.exists() && nothing_beside(&entry), "the take-back left a file behind");
+            assert!(String::from_utf8(err).unwrap().contains("safedeps: in-doubt: the approvals store could not be read back"));
+            if at_store {
+                assert_eq!(logged(&d.0), vec![record(1), format!("check approve-in-doubt hash={} outcome=os-error-27", h(1))]);
+            }
+        }
     }
 
     #[test]
@@ -1391,6 +1410,7 @@ mod tests {
         assert!(String::from_utf8(err).unwrap().starts_with(&format!("safedeps: unsynced: the approvals store line of {} was written and not synced (os-error-5).", h(1))));
         assert_eq!(logged(&d.0), vec![record(1), format!("check approve-unsynced hash={} outcome=os-error-5", h(1))]);
         assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+        assert!(nothing_beside(&entry));
         assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
     }
 
@@ -1427,65 +1447,269 @@ mod tests {
         );
     }
 
+    // ---- the settle ------------------------------------------------------------
+
+    /// What stood at the path before a commit that ended, as its second names
+    /// say. `Stood`: an entry, kept at `.prev`. `Nothing`: `.none`. `Neither`:
+    /// no second name, as after a later commit or revoke of the same entry.
+    #[derive(Clone, Copy, Debug)]
+    enum Mark {
+        Stood,
+        Nothing,
+        Neither,
+    }
+
     #[test]
-    fn a_settle_takes_back_under_the_lock_and_is_in_doubt_where_the_store_vouches() {
-        // (store vouches, an entry at the path) -> answer, what is left, line
-        for (vouched, present) in [(false, true), (false, false), (true, true), (true, false)] {
+    fn a_settle_takes_back_what_the_ended_commit_put_in_place_and_nothing_else() {
+        // (mark, store vouches) -> answer, what is at the path, line
+        use Mark::*;
+        for (mark, vouched) in [(Stood, false), (Stood, true), (Nothing, false), (Nothing, true), (Neither, false), (Neither, true)] {
             let d = scratch();
             if vouched {
                 append(&d.0, &h(1), &rec(1)).unwrap();
             }
-            let (staged, entry) = stage(&d.0, 1, "entry of 1");
-            if present {
-                fs::rename(&staged, &entry).unwrap();
+            let (earlier, entry) = stage(&d.0, 1, "the entry A approved");
+            let earlier_ino = ino(&earlier);
+            match mark {
+                Stood => fs::hard_link(&earlier, prev_of(&entry)).unwrap(),
+                Nothing => fs::write(none_of(&entry), "").unwrap(),
+                Neither => {}
             }
+            fs::remove_file(&earlier).unwrap();
+            // The commit that ended put its entry in place; under Neither it
+            // is the entry a later commit left.
+            fs::write(&entry, "the entry at the path").unwrap();
             let mut err = Vec::new();
             let answer = settle(&d.0, &h(1), &entry, "signal-9", &mut err);
             let line = |word: &str| vec![format!("check approve-{word} hash={} outcome=signal-9", h(1))];
-            match (vouched, present) {
-                (false, _) => {
-                    assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed));
-                    assert!(!entry.exists());
-                    assert_eq!(logged(&d.0), line("undone"));
+            let failure = if vouched { Failure::InDoubt } else { Failure::Store };
+            match (mark, vouched) {
+                (Stood, true) => {
+                    assert_eq!(answer, Answer::NotApproved(failure, Entry::Restored));
+                    assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+                    assert_eq!(ino(&entry), earlier_ino);
                 }
-                (true, true) => {
-                    assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Kept));
-                    assert!(entry.exists());
-                    assert_eq!(logged(&d.0), line("kept"));
+                (Stood, false) | (Nothing, _) => {
+                    assert_eq!(answer, Answer::NotApproved(failure, Entry::Removed), "{mark:?} vouched={vouched}");
+                    assert!(!entry.exists(), "{mark:?} vouched={vouched}: the ended commit's entry stands");
                 }
-                (true, false) => {
-                    assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed));
-                    assert!(logged(&d.0).is_empty());
+                (Neither, _) => {
+                    assert_eq!(answer, Answer::NotApproved(failure, Entry::Untouched), "vouched={vouched}");
+                    assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry at the path", "a settle took back an entry another commit left");
                 }
             }
+            assert!(nothing_beside(&entry), "{mark:?} vouched={vouched}: a second name stayed");
+            assert_eq!(logged(&d.0), line(if vouched { "in-doubt" } else { "undone" }), "{mark:?} vouched={vouched}");
             assert!(!held_elsewhere(&d.0));
         }
-        // The commit kept the entry that stood there aside, and the settle puts
-        // it back where the store vouches.
-        let d = scratch();
-        append(&d.0, &h(1), &rec(1)).unwrap();
-        let (staged, entry) = stage(&d.0, 1, "the entry A approved");
-        fs::hard_link(&staged, prev_of(&entry)).unwrap();
-        fs::write(&entry, "the entry the ended commit wrote").unwrap();
-        let answer = settle(&d.0, &h(1), &entry, "signal-9", &mut Vec::new());
-        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Kept));
-        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
-        assert!(!prev_of(&entry).exists());
+        // A settle that cannot take the lock takes nothing back.
         let d = scratch();
         let held = holder(&d.0, os::FileLock::Exclusive);
         let (_, entry) = stage(&d.0, 1, "entry of 1");
         let mut err = Vec::new();
         let answer = settle_with(&d.0, &h(1), &entry, "exit-1", Duration::from_millis(100), read_locked, &mut err);
         drop(held);
-        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Untouched));
+        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Unsettled));
         assert!(String::from_utf8(err).unwrap().starts_with(&format!("safedeps: in-doubt: the commit of {} ended with exit-1", h(1))));
+        // A settle that cannot read the store puts back the entry that stood
+        // there, as a commit does.
+        let d = scratch();
+        let (earlier, entry) = stage(&d.0, 1, "the entry A approved");
+        fs::hard_link(&earlier, prev_of(&entry)).unwrap();
+        fs::remove_file(&earlier).unwrap();
+        fs::write(&entry, "the entry the ended commit wrote").unwrap();
+        let answer = settle_with(&d.0, &h(1), &entry, "signal-9", LOCK_WAIT, eio, &mut Vec::new());
+        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Restored));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+        assert!(nothing_beside(&entry));
+    }
+
+    // ---- the revoke ------------------------------------------------------------
+
+    /// A revoke of the entry at `entry` as the CLI makes it: a second name for
+    /// the file it read (`seen`), and the revoked entry staged beside.
+    fn seen_and_staged(home: &Path, n: u8, entry: &Path, body: &str) -> (PathBuf, PathBuf) {
+        let seen = entry.with_file_name(format!(".{}.seen", ledger::filename(&h(n))));
+        fs::hard_link(entry, &seen).unwrap();
+        let (staged, _) = stage(home, n, body);
+        (seen, staged)
+    }
+    fn revocation<'a>(n: u8, hash: &'a str, staged: &'a Path, entry: &'a Path, seen: &'a Path) -> Revoke<'a> {
+        assert_eq!(hash, h(n));
+        Revoke { hash, staged, entry, seen }
+    }
+
+    #[test]
+    fn a_revoke_puts_its_entry_in_place_only_where_the_entry_is_the_file_it_read() {
+        // The entry the revoke read stands: it is replaced.
+        let d = scratch();
+        let entry = stand(&d.0, 1, "the entry A approved");
+        let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry A approved, revoked");
+        let staged_ino = ino(&staged);
+        let hash = h(1);
+        let mut err = Vec::new();
+        assert_eq!(revoke(&d.0, &revocation(1, &hash, &staged, &entry, &seen), &mut err), Revoked::Revoked);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved, revoked");
+        assert_eq!(ino(&entry), staged_ino);
+        assert!(!staged.exists() && seen.exists(), "the revoke removed a file the CLI owns");
+        assert!(!held_elsewhere(&d.0));
+        // Another file stands at the path, or none does: nothing is put in
+        // place, and the answer is that the entry changed.
+        for replaced in [true, false] {
+            let d = scratch();
+            let entry = stand(&d.0, 1, "the entry A approved");
+            let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry A approved, revoked");
+            if replaced {
+                stand(&d.0, 1, "the entry B approved");
+            } else {
+                fs::remove_file(&entry).unwrap();
+            }
+            let mut err = Vec::new();
+            assert_eq!(revoke(&d.0, &revocation(1, &hash, &staged, &entry, &seen), &mut err), Revoked::Changed, "replaced={replaced}");
+            if replaced {
+                assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry B approved");
+            } else {
+                assert!(!entry.exists());
+            }
+            assert!(staged.exists(), "the revoke removed a file the CLI owns");
+        }
+    }
+
+    #[test]
+    fn a_revoke_that_cannot_lock_or_rename_puts_nothing_in_place() {
+        let d = scratch();
+        let entry = stand(&d.0, 1, "the entry A approved");
+        let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry A approved, revoked");
+        let hash = h(1);
+        let held = holder(&d.0, os::FileLock::Exclusive);
+        let mut err = Vec::new();
+        let r = revocation(1, &hash, &staged, &entry, &seen);
+        let answer = revoke_with(&d.0, &r, Duration::from_millis(100), |_, _| panic!("a revoke renamed without the lock"), &mut err);
+        drop(held);
+        assert_eq!(answer, Revoked::NotRevoked);
+        assert!(String::from_utf8(err).unwrap().starts_with("safedeps-core approvals: not revoked: "));
+        let mut err = Vec::new();
+        let answer = revoke_with(&d.0, &r, LOCK_WAIT, |_, _| Err(io::Error::from_raw_os_error(13)), &mut err);
+        assert_eq!(answer, Revoked::NotRevoked);
+        assert!(String::from_utf8(err).unwrap().contains("could not be put in place"));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+        assert!(staged.exists());
+    }
+
+    #[test]
+    fn a_revoke_waits_for_a_commit_that_holds_the_lock() {
+        // B holds the lock inside its commit, after its rename. A revoke of
+        // the same entry waits; B then fails, and its take-back puts back the
+        // entry A approved. The revoke finds that the entry is not the file
+        // it read, and puts nothing in place.
+        let d = scratch();
+        append(&d.0, &h(1), &rec(1)).unwrap();
+        let entry = stand(&d.0, 1, "the entry A approved");
+        let (staged_b, _) = stage(&d.0, 1, "the entry B wrote");
+        let (hash, r) = (h(1), rec(1));
+        let (in_b, b_done) = (std::sync::Barrier::new(2), std::sync::atomic::AtomicBool::new(false));
+        std::thread::scope(|s| {
+            let revoker = s.spawn(|| {
+                in_b.wait();
+                // B's entry is in place: the revoke reads it.
+                let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry B wrote, revoked");
+                let answer = revoke(&d.0, &revocation(1, &hash, &staged, &entry, &seen), &mut Vec::new());
+                assert!(b_done.load(std::sync::atomic::Ordering::SeqCst), "the revoke ran while B held the lock");
+                answer
+            });
+            let answer = commit_with(
+                &d.0,
+                &approval(1, &staged_b, &entry, &r, &hash),
+                LOCK_WAIT,
+                |file, l| {
+                    in_b.wait();
+                    std::thread::sleep(Duration::from_millis(300));
+                    assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry B wrote", "the revoke put its entry in place inside B's commit");
+                    b_done.store(true, std::sync::atomic::Ordering::SeqCst);
+                    efbig(file, l)
+                },
+                read_locked,
+                &mut Vec::new(),
+            );
+            assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Restored));
+            assert_eq!(revoker.join().unwrap(), Revoked::Changed);
+        });
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+        assert!(nothing_beside(&entry));
+    }
+
+    #[test]
+    fn a_commit_waits_for_a_revoke_and_its_take_back_puts_the_revoked_entry_back() {
+        // A revoke holds the lock and is about to put its entry in place. B
+        // commits the same entry meanwhile: B waits, then fails at its store
+        // line, and its take-back puts back the entry that stood there before
+        // it, which is the revoked one.
+        let d = scratch();
+        append(&d.0, &h(1), &rec(1)).unwrap();
+        let entry = stand(&d.0, 1, "the entry A approved");
+        let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry A approved, revoked");
+        let revoked_ino = ino(&staged);
+        let (staged_b, _) = stage(&d.0, 1, "the entry B wrote");
+        let (hash, r) = (h(1), rec(1));
+        let in_revoke = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            let b = s.spawn(|| {
+                in_revoke.wait();
+                commit_with(&d.0, &approval(1, &staged_b, &entry, &r, &hash), LOCK_WAIT, efbig, read_locked, &mut Vec::new())
+            });
+            let answer = revoke_with(
+                &d.0,
+                &revocation(1, &hash, &staged, &entry, &seen),
+                LOCK_WAIT,
+                |from, to| {
+                    in_revoke.wait();
+                    let end = std::time::Instant::now() + Duration::from_secs(1);
+                    while !b.is_finished() && std::time::Instant::now() < end {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    assert!(!b.is_finished() && staged_b.exists(), "B committed while the revoke held the lock");
+                    fs::rename(from, to)
+                },
+                &mut Vec::new(),
+            );
+            assert_eq!(answer, Revoked::Revoked);
+            assert_eq!(b.join().unwrap(), Answer::NotApproved(Failure::Store, Entry::Restored));
+        });
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved, revoked");
+        assert_eq!(ino(&entry), revoked_ino, "the entry at the end is not the file the revoke put in place");
+        assert!(nothing_beside(&entry));
+    }
+
+    #[test]
+    fn a_revoke_of_what_an_ended_commit_left_stands_and_its_settle_takes_nothing_back() {
+        // A commit ended after its rename: the entry A approved is kept
+        // aside, the ended commit's entry is at the path. A revoke of that
+        // entry puts its own in place, so the settle that follows takes
+        // nothing back and the revoked entry stays.
+        let d = scratch();
+        append(&d.0, &h(1), &rec(1)).unwrap();
+        let (earlier, entry) = stage(&d.0, 1, "the entry A approved");
+        fs::hard_link(&earlier, prev_of(&entry)).unwrap();
+        fs::remove_file(&earlier).unwrap();
+        fs::write(&entry, "the entry the ended commit wrote").unwrap();
+        let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry the ended commit wrote, revoked");
+        let hash = h(1);
+        assert_eq!(revoke(&d.0, &revocation(1, &hash, &staged, &entry, &seen), &mut Vec::new()), Revoked::Revoked);
+        assert!(nothing_beside(&entry), "the ended commit's second name outlived the revoke");
+        let answer = settle(&d.0, &h(1), &entry, "signal-9", &mut Vec::new());
+        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Untouched));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry the ended commit wrote, revoked");
+    }
+
+    // ---- the command lines -----------------------------------------------------
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
     fn the_commit_and_settle_command_lines() {
-        fn args(a: &[&str]) -> Vec<String> {
-            a.iter().map(|s| s.to_string()).collect()
-        }
         let d = scratch();
         let (staged, entry) = stage(&d.0, 1, "entry of 1");
         let (s, e) = (staged.to_str().unwrap(), entry.to_str().unwrap());
@@ -1516,32 +1740,69 @@ mod tests {
             assert_eq!((code, out.is_empty()), (2, true), "{ended:?}");
         }
         assert_eq!(run(&d.0, &args(&["settle", h2, e, "signal-9"]), b"").0, 2);
-        let (code, out, err) = run(&d.0, &args(&["settle", h1, e, "signal-9"]), b"");
-        assert_eq!((code, String::from_utf8(out).unwrap()), (1, "not-approved approvals_store_in_doubt kept\n".to_string()));
-        assert!(String::from_utf8(err).unwrap().starts_with("safedeps: kept: "));
+        // The commit answered, so no second name is left: the settle takes
+        // nothing back, and the store vouches.
+        let (code, out, _) = run(&d.0, &args(&["settle", h1, e, "signal-9"]), b"");
+        assert_eq!((code, String::from_utf8(out).unwrap()), (1, "not-approved approvals_store_in_doubt untouched\n".to_string()));
+        assert!(entry.exists());
+        fs::write(none_of(&entry), "").unwrap();
+        let (code, out, _) = run(&d.0, &args(&["settle", h1, e, "signal-9"]), b"");
+        assert_eq!((code, String::from_utf8(out).unwrap()), (1, "not-approved approvals_store_in_doubt removed\n".to_string()));
+        assert!(!entry.exists());
         for bad in [&["commit", h1, s][..], &["settle", h1, e][..]] {
             assert_eq!(run(&d.0, &args(bad), b""), (2, Vec::new(), USAGE.as_bytes().to_vec()), "{bad:?}");
         }
     }
 
     #[test]
-    fn the_command_line() {
+    fn the_revoke_command_line() {
         let d = scratch();
-        fn args(a: &[&str]) -> Vec<String> {
-            a.iter().map(|s| s.to_string()).collect()
+        let entry = stand(&d.0, 1, "the entry A approved");
+        let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry A approved, revoked");
+        let (s, e, v) = (staged.to_str().unwrap(), entry.to_str().unwrap(), seen.to_str().unwrap());
+        let (one, two) = (h(1), h(2));
+        let (h1, h2) = (one.as_str(), two.as_str());
+        let other = d.0.join(ledger::filename(h1));
+        let elsewhere = d.0.join(".elsewhere");
+        let refused: [&[&str]; 8] = [
+            &["revoke", "sha256:x", s, e, v],
+            &["revoke", h2, s, e, v],
+            &["revoke", h1, elsewhere.to_str().unwrap(), e, v],
+            &["revoke", h1, s, other.to_str().unwrap(), v],
+            &["revoke", h1, s, e, elsewhere.to_str().unwrap()],
+            &["revoke", h1, e, e, v],
+            &["revoke", h1, s, e, s],
+            &["revoke", h1, s, e, e],
+        ];
+        for a in refused {
+            let (code, out, err) = run(&d.0, &args(a), b"");
+            assert_eq!((code, out.is_empty()), (2, true), "{a:?}");
+            assert!(err.starts_with(b"safedeps-core approvals: not revoked: "), "{a:?}");
         }
-        let mut input = rec(1);
+        assert!(!path(&d.0).exists() && staged.exists());
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+        let replaced = stand(&d.0, 1, "the entry B approved");
+        assert_eq!(run(&d.0, &args(&["revoke", h1, s, e, v]), b""), (1, b"changed\n".to_vec(), Vec::new()));
+        fs::remove_file(&seen).unwrap();
+        fs::hard_link(&replaced, &seen).unwrap();
+        assert_eq!(run(&d.0, &args(&["revoke", h1, s, e, v]), b""), (0, b"revoked\n".to_vec(), Vec::new()));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved, revoked");
+        assert_eq!(run(&d.0, &args(&["revoke", h1, s, e]), b""), (2, Vec::new(), USAGE.as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn the_index_command_line_and_no_line_written_alone() {
+        let d = scratch();
+        append(&d.0, &h(1), &rec(1)).unwrap();
+        let mut input = rec(2);
         input.push(b'\n');
-        assert_eq!(run(&d.0, &args(&["append", h(1).as_str()]), &input), (0, Vec::new(), Vec::new()));
-        assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
-        let stored = fs::read(path(&d.0)).unwrap();
-        assert_eq!(json::parse_one(&stored[..stored.len() - 1]).unwrap().get("record").unwrap().as_bytes(), Some(rec(1)));
-        let (code, out, err) = run(&d.0, &args(&["append", "sha256:x"]), &input);
-        assert_eq!((code, out.is_empty(), err.starts_with(b"safedeps-core approvals: not written: ")), (2, true, true));
-        let bads: [&[&str]; 5] = [&["append"], &["append", "a", "b"], &["index", "x"], &["nothing"], &[]];
+        let two = h(2);
+        // No command writes a store line apart from a commit.
+        let bads: [&[&str]; 5] = [&["append", two.as_str()], &["append"], &["index", "x"], &["nothing"], &[]];
         for bad in bads {
-            assert_eq!(run(&d.0, &args(bad), b""), (2, Vec::new(), USAGE.as_bytes().to_vec()), "{bad:?}");
+            assert_eq!(run(&d.0, &args(bad), &input), (2, Vec::new(), USAGE.as_bytes().to_vec()), "{bad:?}");
         }
+        assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
         let (code, out, err) = run(&d.0, &args(&["index"]), b"");
         assert_eq!((code, err), (0, Vec::new()));
         assert_eq!(String::from_utf8(out).unwrap(), format!("{{\"present\":true,\"hashes\":{{\"{}\":true}},\"broken\":0}}\n", h(1)));
@@ -1551,5 +1812,6 @@ mod tests {
         let (code, out, err) = run(&d.0.join("dir"), &args(&["index"]), b"");
         assert_eq!((code, out.is_empty()), (1, true));
         assert!(String::from_utf8(err).unwrap().contains("could not be read"));
+        assert!(!USAGE.contains("append"));
     }
 }

@@ -2,15 +2,19 @@
 """The approvals store through the real native CLI, with real write failures.
 
 A file size limit (RLIMIT_FSIZE, with SIGXFSZ ignored, so the write fails with
-EFBIG instead of killing the process) stops the core's own append after as
-many bytes as the row picks. The core is not changed and no row writes a store
-byte: what the store holds is what the core wrote before its write failed.
+EFBIG instead of killing the process) stops the store line of the core's own
+commit after as many bytes as the row picks. The core is not changed and no
+row writes a store byte: what the store holds is what the core wrote before
+its write failed. A commit is the one command that writes a store line, and it
+writes the approve line to advisory.log first. The limit binds every regular
+file the process writes, so each row's advisory.log is a symbolic link to
+/dev/null, which no limit binds, and the limit cuts the store line alone.
 
 Kernels measure the append limit either at the file end or at the descriptor
 offset. A probe outside the core measures the host's behavior, rows branch on
 that measured result, and on an empty store the two behaviors agree.
 
-The last row kills a process that holds the store lock while four appends
+The last row kills a process that holds the store lock while four commits
 wait for it, on a torn tail the core left and, as its control, on a whole line
 (a validator's counterexample, kept as a row). The holder takes the lock and
 writes nothing.
@@ -31,10 +35,10 @@ from pathlib import Path
 
 CORE = sys.argv[1]
 ROWS = (
-    "a failed append that wrote all of its line but the newline is not provenance after the next append",
-    "a seal cut short leaves the tail unended, and the next append seals it again",
-    "an append that sealed the tail and then failed leaves one broken line and no record",
-    "appends that wait while the lock holder is killed seal a torn tail once, and each lands whole",
+    "a failed commit whose store line landed all but its newline is not provenance after the next commit",
+    "a seal cut short leaves the tail unended, and the next commit seals it again",
+    "a commit that sealed the tail and then failed leaves one broken line and no record",
+    "commits that wait while the lock holder is killed seal a torn tail once, and each lands whole",
 )
 NO_BIND = "SKIPPED (the file size limit does not bind on this host)"
 # The probe appends 15 bytes to a file of 10 under a limit of 11. How many land
@@ -100,6 +104,27 @@ def call(home, args, data=b"", limit=None):
     return r.returncode, r.stdout, r.stderr
 
 
+def ledger_dir(home):
+    """HOME's ledger, and its advisory.log a link to /dev/null."""
+    d = home / "approved-specs"
+    d.mkdir(parents=True, exist_ok=True)
+    log = home / "advisory.log"
+    if not log.is_symlink():
+        log.symlink_to(os.devnull)
+    return d
+
+
+def staged(home, n):
+    """A staged entry of n beside its path, as the CLI leaves one for a commit:
+    the commit's arguments after the hash."""
+    d = ledger_dir(home)
+    entry = d / (h(n).replace(":", "-", 1) + ".json")
+    fd, path = tempfile.mkstemp(prefix="." + entry.name + ".", dir=d)
+    os.write(fd, b'{"entry": %d}\n' % n)
+    os.close(fd)
+    return [path, str(entry)]
+
+
 def store(home):
     f = home / "approvals.jsonl"
     return f.read_bytes() if f.exists() else b""
@@ -119,80 +144,87 @@ def expect_index(home, hashes, broken, when):
         raise Failed(f"{when}: index {json.dumps(got, sort_keys=True)}, want {json.dumps(want, sort_keys=True)}")
 
 
-def append_ok(home, n, when):
+def commit_ok(home, n, when):
     before = store(home)
-    rc, out, err = call(home, ["append", h(n)], rec(n))
-    if (rc, out, err) != (0, b"", b""):
-        raise Failed(f"{when}: append exited {rc} with {err!r}")
+    staged_file, entry = staged(home, n)
+    rc, out, err = call(home, ["commit", h(n), staged_file, entry], rec(n))
+    if (rc, out, err) != (0, b"approved\n", b""):
+        raise Failed(f"{when}: the commit exited {rc} with {out!r} {err!r}")
+    if os.path.exists(staged_file) or not os.path.exists(entry):
+        raise Failed(f"{when}: the commit did not put its entry in place")
     after = store(home)
     if not after.startswith(before):
-        raise Failed(f"{when}: the append did not keep the bytes before it")
+        raise Failed(f"{when}: the commit did not keep the store's bytes before it")
     return after[len(before):]
 
 
-def append_cut(home, n, landed, at, when):
-    """An append the limit stops after `landed` bytes: it must say it did not
-    write, and leave the bytes before it and exactly `landed` more."""
+def commit_cut(home, n, landed, at, when):
+    """A commit whose store line the limit stops after `landed` bytes: it must
+    say the store did not take it, take its entry back, and leave the store's
+    bytes before it and exactly `landed` more."""
     before = store(home)
     limit = landed if at == "descriptor" else len(before) + landed
-    rc, out, err = call(home, ["append", h(n)], rec(n), limit)
+    staged_file, entry = staged(home, n)
+    rc, out, err = call(home, ["commit", h(n), staged_file, entry], rec(n), limit)
     after = store(home)
-    if rc != 1 or out or b"not written to " not in err or b"File too large" not in err:
-        raise Failed(f"{when}: the cut append exited {rc} with {err!r}")
+    if (rc, out) != (1, b"not-approved approvals_store_failed removed\n") or b"not written to " not in err or b"File too large" not in err:
+        raise Failed(f"{when}: the cut commit exited {rc} with {out!r} {err!r}")
+    if os.path.exists(staged_file) or os.path.exists(entry):
+        raise Failed(f"{when}: the cut commit left its entry")
     if len(after) != len(before) + landed or not after.startswith(before):
-        raise Failed(f"{when}: the cut append left {len(after)} bytes, want the {len(before)} before it and {landed} more")
+        raise Failed(f"{when}: the cut commit left {len(after)} bytes, want the {len(before)} before it and {landed} more")
     return after[len(before):]
 
 
 def tail_of_whole_record(home, n, length, at):
-    """Every row's start: an append cut one byte short of its line."""
-    tail = append_cut(home, n, length - 1, at, "cut one byte short")
+    """Every row's start: a commit whose store line is cut one byte short."""
+    tail = commit_cut(home, n, length - 1, at, "cut one byte short")
     if tail.endswith(b"\n") or json.loads(tail).get("hash") != h(n):
-        raise Failed("the cut append did not leave a whole record but its newline")
-    expect_index(home, [], 1, "after the cut append")
+        raise Failed("the cut commit did not leave a whole record but its newline")
+    expect_index(home, [], 1, "after the cut commit")
     return tail
 
 
 def row_whole_record(base, length, at):
     home = base / "whole"
     tail = tail_of_whole_record(home, 1, length, at)
-    new = append_ok(home, 2, "the next append")
+    new = commit_ok(home, 2, "the next commit")
     # The claim first: the failed record vouches for nothing, and is one
     # broken line. Then how: the bytes before stay, then the seal.
-    expect_index(home, [h(2)], 1, "after the next append")
+    expect_index(home, [h(2)], 1, "after the next commit")
     if store(home) != tail + new or not new.startswith(b"\0\n") or new[2:].count(b"\n") != 1:
-        raise Failed("the next append did not seal the tail and write its line after it")
+        raise Failed("the next commit did not seal the tail and write its line after it")
 
 
 def row_seal_cut_short(base, length, at):
     home = base / "seal-short"
     tail = tail_of_whole_record(home, 1, length, at)
-    seal = append_cut(home, 2, 1, at, "an append cut after one byte of its seal")
+    seal = commit_cut(home, 2, 1, at, "a commit cut after one byte of its seal")
     if seal != b"\0":
         raise Failed(f"the cut seal is {seal!r}")
     expect_index(home, [], 1, "after the cut seal")
-    new = append_ok(home, 3, "the append after the cut seal")
-    expect_index(home, [h(3)], 1, "after the append after the cut seal")
+    new = commit_ok(home, 3, "the commit after the cut seal")
+    expect_index(home, [h(3)], 1, "after the commit after the cut seal")
     if not new.startswith(b"\0\n") or store(home) != tail + b"\0" + new:
-        raise Failed("the append after the cut seal did not seal the tail again")
+        raise Failed("the commit after the cut seal did not seal the tail again")
 
 
 def row_sealed_then_failed(base, length, at):
     home = base / "sealed-then-failed"
     tail = tail_of_whole_record(home, 1, length, at)
-    seal = append_cut(home, 2, 2, at, "an append cut after its seal")
+    seal = commit_cut(home, 2, 2, at, "a commit cut after its seal")
     if seal != b"\0\n":
-        raise Failed(f"the append cut after its seal wrote {seal!r}")
-    expect_index(home, [], 1, "after the append cut after its seal")
-    new = append_ok(home, 3, "the append after it")
-    expect_index(home, [h(3)], 1, "after the append after it")
+        raise Failed(f"the commit cut after its seal wrote {seal!r}")
+    expect_index(home, [], 1, "after the commit cut after its seal")
+    new = commit_ok(home, 3, "the commit after it")
+    expect_index(home, [h(3)], 1, "after the commit after it")
     if new.startswith(b"\0") or store(home) != tail + b"\0\n" + new:
-        raise Failed("an append after an ended line sealed it again")
+        raise Failed("a commit after an ended line sealed it again")
 
 
-def appends_while_held(home):
-    """WAITERS append while a holder keeps the store lock; then the holder is
-    killed, and each append must answer written. Every process runs from the
+def commits_while_held(home):
+    """WAITERS commit while a holder keeps the store lock; then the holder is
+    killed, and each commit must answer approved. Every process runs from the
     scratch directory, and the holder ends when this script does: its stdin
     closes."""
     holder = subprocess.Popen([sys.executable, "-I", "-c", HOLDER, str(home / "approvals.jsonl")], stdin=subprocess.PIPE,
@@ -202,22 +234,24 @@ def appends_while_held(home):
         if holder.stdout.readline() != b"held\n":
             raise Failed(f"the holder did not take the lock: {holder.stderr.read()!r}")
         before = store(home)
+        stages = []
         for n in WAITERS:
-            p = subprocess.Popen([CORE, "approvals", "append", h(n)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stages.append(staged(home, n))
+            p = subprocess.Popen([CORE, "approvals", "commit", h(n), *stages[-1]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, env=core_env(home), cwd=home.parent)
             p.stdin.write(rec(n))
             p.stdin.close()
             p.stdin = None
             writers.append(p)
         time.sleep(0.3)
-        if store(home) != before:
-            raise Failed("an append wrote while another process held the lock")
+        if store(home) != before or not all(os.path.exists(s) for s, _ in stages):
+            raise Failed("a commit wrote or put its entry in place while another process held the lock")
         holder.kill()
         holder.communicate(timeout=10)
         for n, p in zip(WAITERS, writers):
             out, err = p.communicate(timeout=60)
-            if (p.returncode, out, err) != (0, b"", b""):
-                raise Failed(f"the append of {n} after the holder died exited {p.returncode} with {err!r}")
+            if (p.returncode, out, err) != (0, b"approved\n", b""):
+                raise Failed(f"the commit of {n} after the holder died exited {p.returncode} with {out!r} {err!r}")
         return before, store(home)
     finally:
         for p in (holder, *writers):
@@ -228,21 +262,21 @@ def appends_while_held(home):
 
 def row_held_then_killed(base, length, at):
     # A torn tail the core left (cut one byte short), then a holder of the
-    # lock killed while four appends wait. One seal, whatever the order.
+    # lock killed while four commits wait. One seal, whatever the order.
     home = base / "held-torn"
     tail_of_whole_record(home, 1, length, at)
-    before, after = appends_while_held(home)
-    expect_index(home, [h(n) for n in WAITERS], 1, "after the appends that waited on a torn tail")
+    before, after = commits_while_held(home)
+    expect_index(home, [h(n) for n in WAITERS], 1, "after the commits that waited on a torn tail")
     if not after.startswith(before) or after.count(b"\0") != 1 or after[len(before):].count(b"\n") != 5:
-        raise Failed("the appends that waited did not seal the torn tail exactly once and land one line each")
+        raise Failed("the commits that waited did not seal the torn tail exactly once and land one line each")
     # The control: the same with a whole line first. Nothing is sealed, and
     # the line before stays a record.
     home = base / "held-whole"
-    append_ok(home, 1, "the whole line before the holder")
-    before, after = appends_while_held(home)
-    expect_index(home, [h(1), *(h(n) for n in WAITERS)], 0, "after the appends that waited on a whole line")
+    commit_ok(home, 1, "the whole line before the holder")
+    before, after = commits_while_held(home)
+    expect_index(home, [h(1), *(h(n) for n in WAITERS)], 0, "after the commits that waited on a whole line")
     if not after.startswith(before) or b"\0" in after or after[len(before):].count(b"\n") != 4:
-        raise Failed("the appends that waited on a whole line sealed it or did not land one line each")
+        raise Failed("the commits that waited on a whole line sealed it or did not land one line each")
 
 
 def main():
@@ -253,7 +287,7 @@ def main():
             at = measured_at(base)
             print(f"# note: this host measures the file size limit of an append at the {at}"
                   f"{' of the file' if at == 'end' else ' offset'}")
-            length = len(append_ok(base / "measure", 1, "measuring a line"))
+            length = len(commit_ok(base / "measure", 1, "measuring a line"))
             for name, row in zip(ROWS, (row_whole_record, row_seal_cut_short, row_sealed_then_failed, row_held_then_killed)):
                 current = name
                 row(base, length, at)

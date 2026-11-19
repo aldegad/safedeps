@@ -1293,16 +1293,16 @@ unreadable_store_is_no_cache_hit() {
 }
 row "a store that cannot be read vouches for nothing: no cache hit, and the commit it refuses leaves the entry as it was" unreadable_store_is_no_cache_hit
 
-# The core of the check started as PID, found among its processes by what it
-# runs.
+# The core of the command started as PID, found among its processes by what it
+# runs: `safedeps-core approvals VERB`, a commit unless VERB is given.
 core_below() {
-  local p
+  local p verb="${2:-commit}"
   for p in $(pgrep -P "$1" 2>/dev/null); do
-    if [[ "$(ps -o args= -p "${p}" 2>/dev/null)" == *"safedeps-core approvals commit"* ]]; then
+    if [[ "$(ps -o args= -p "${p}" 2>/dev/null)" == *"safedeps-core approvals ${verb}"* ]]; then
       printf '%s\n' "${p}"
       return 0
     fi
-    core_below "${p}" && return 0
+    core_below "${p}" "${verb}" && return 0
   done
   return 1
 }
@@ -1354,9 +1354,11 @@ row "a check whose core is killed while it waits for the store lock puts nothing
 #
 # Two checks of one spec, A and B, whose commits meet. A commit holds the store
 # lock from before its rename to after its take-back, so two commits never
-# overlap; and where the store vouches for the hash a take-back puts back the
-# entry that stood at the path, so a failed check never removes or rewrites an
-# approval another check made. The cases: one fails and the other then
+# overlap; and a take-back puts the path back as it was before the commit: the
+# commit's own entry goes, and the entry that stood there comes back unless
+# the store says it is no approval. So a failed check never removes or
+# rewrites an approval another check made, and leaves no entry of its own. The
+# cases: one fails and the other then
 # succeeds (sequential), both succeed while their commits meet (overlap), one
 # fails while the other commits (overlap with failure), the earlier one
 # succeeds and the later one, which looked the spec up first, fails
@@ -1426,7 +1428,7 @@ pair() {
   local root
   root=$(mktemp -d "${tmp_root}/pair.XXXXXX")
   home_a="${root}/a" home_b="${root}/b" ledger="${root}/approved-specs"
-  pid_a="" pid_b="" drain_pid=""
+  pid_a="" pid_b="" drain_pid="" revoke_pid=""
   mkdir -p "${home_a}" "${home_b}" "${ledger}"
   : > "${home_a}/advisory.log"
   : > "${home_b}/advisory.log"
@@ -1444,7 +1446,7 @@ descendants() {
 reap_pair() {
   local gate pid
   for gate in "${home_a}/gate" "${home_b}/gate"; do [[ ! -d "${gate}" ]] || : > "${gate}/go"; done
-  for pid in ${pid_a} ${pid_b} ${drain_pid}; do
+  for pid in ${pid_a} ${pid_b} ${drain_pid} ${revoke_pid}; do
     # shellcheck disable=SC2046  # one pid a word
     kill -KILL $(descendants "${pid}") "${pid}" 2>/dev/null || true
   done
@@ -1496,13 +1498,13 @@ stands() {
   vouched "${home_a}" | grep -qxF "${hash}" || no "the store does not vouch for ${hash}"
 }
 # The check of HOME, which ended with RC, approved nothing for FAILURE, and its
-# report says what stands at the entry's path (kept, or neither).
+# report names no entry: whatever stands at the path is not this check's.
 failed_as() {
-  local home="$1" rc="$2" failure="$3" kept="$4" json
+  local home="$1" rc="$2" failure="$3" json
   json=$(cat "${home}/out")
   [[ "${rc}" == 4 ]] || no "$(basename "${home}") exits ${rc}: ${json} $(cat "${home}/stderr")"
-  jq -e --arg failure "${failure}" --argjson kept "${kept}" \
-    '.approved == false and .error == $failure and (.ledger_entry_kept == true) == $kept and (has("ledger_entry_left") | not)' <<< "${json}" >/dev/null \
+  jq -e --arg failure "${failure}" \
+    '.approved == false and .error == $failure and (has("ledger_entry_kept") or has("ledger_entry_left") | not)' <<< "${json}" >/dev/null \
     || no "$(basename "${home}")'s report: ${json}"
   [[ -z "$(find "${ledger}" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${ledger}")"
 }
@@ -1519,7 +1521,7 @@ sequential_failure() {
   wait "${pid_a}" || rc_a=$?
   pid_a=""
   chmod 600 "${home_a}/advisory.log"
-  failed_as "${home_a}" "${rc_a}" ledger_write_failed false
+  failed_as "${home_a}" "${rc_a}" ledger_write_failed
   log_refused "${home_a}"
   [[ -z "$(ledger_entries)" ]] || no "A left its entry: $(ledger_entries)"
   launch "${home_b}"
@@ -1587,7 +1589,7 @@ overlap_with_failure() {
   chmod 600 "${home_a}/advisory.log"
   stands "${home_b}" "${rc_b}" "${home_b}/advisory.drained"
   [[ "$(identity "$(ledger_entries)")" == "${b_entry}" ]] || no "the entry is not the file B put in place"
-  failed_as "${home_a}" "${rc_a}" ledger_write_failed true
+  failed_as "${home_a}" "${rc_a}" ledger_write_failed
   [[ "$(store_lines)" == 1 ]] || no "the store holds $(store_lines) lines"
   log_refused "${home_a}"
 }
@@ -1622,8 +1624,7 @@ b_cannot_log() { unlogged "${home_b}"; }
 reversed_failure() {
   reversed b_cannot_log
   chmod 600 "${home_b}/advisory.log"
-  failed_as "${home_b}" "${rc_b}" ledger_write_failed true
-  grep -qF 'safedeps: kept: the approvals store vouches for ' "${home_b}/stderr" || no "B's stderr: $(cat "${home_b}/stderr")"
+  failed_as "${home_b}" "${rc_b}" ledger_write_failed
   log_refused "${home_b}"
 }
 row "commits that meet: a check that fails after another succeeded leaves the other's records whole" reversed_failure
@@ -1632,17 +1633,50 @@ store_read_only() { chmod 400 "$(store_of "${home_a}")"; }
 reversed_store_refuses() {
   reversed store_read_only
   chmod 600 "$(store_of "${home_a}")"
-  failed_as "${home_b}" "${rc_b}" approvals_store_failed false
+  failed_as "${home_b}" "${rc_b}" approvals_store_failed
   ! grep -q 'check approve' "${home_b}/advisory.log" || no "B's advisory.log has a line of its commit"
 }
 row "commits that meet: a check the store refuses after another succeeded approves nothing, and the other's records stand" reversed_store_refuses
 
-# A check whose core is killed after its rename, holding the store lock while it
-# waits to write its approve line. BEFORE runs first, and the CLI settles the
-# commit.
-killed_after_rename() {
-  local core_pid
+# The store vouches for the spec and no entry stands: A approved it, and its
+# entry was removed by hand. B then fails at its approve line. Nothing stood at
+# the path before B, so nothing stands there after it, though the store
+# vouches: an entry of a check that answered failure is no approval to find.
+vouched_without_entry() {
+  local hash
   pair
+  launch "${home_a}"
+  pid_a=$!
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  stands "${home_a}" "${rc_a}"
+  hash=$(jq -r '.spec_hash' "${home_a}/out")
+  rm -f -- "$(ledger_entries)"
+  mkdir "${home_b}/gate"
+  launch "${home_b}"
+  pid_b=$!
+  gated "${home_b}"
+  unlogged "${home_b}"
+  : > "${home_b}/gate/go"
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  chmod 600 "${home_b}/advisory.log"
+  failed_as "${home_b}" "${rc_b}" ledger_write_failed
+  log_refused "${home_b}"
+  [[ -z "$(ledger_entries)" ]] || no "B's entry stands where nothing stood before it: $(ledger_entries)"
+  vouched "${home_a}" | grep -qxF "${hash}" || no "the store no longer vouches for ${hash}"
+}
+row "a check that fails where the store vouches for the spec and no entry stood leaves no entry" vouched_without_entry
+
+# A check whose core is killed after its rename, holding the store lock while it
+# waits to write its approve line. PRELUDE runs before the check, FAULT while
+# its core holds the lock, and the CLI settles the commit.
+killed_after_rename() {
+  local prelude="$1" fault="$2" core_pid
+  pair
+  "${prelude}"
   mkdir "${home_a}/gate"
   launch "${home_a}"
   pid_a=$!
@@ -1658,7 +1692,7 @@ try:
 except BlockingIOError:
     sys.exit(0)
 sys.exit(1)' "$(store_of "${home_a}")" || no "the commit put its entry in place without holding the store lock"
-  "$@"
+  "${fault}"
   unstall_log "${home_a}"
   kill -KILL "${core_pid}"
   rc=0
@@ -1666,14 +1700,19 @@ sys.exit(1)' "$(store_of "${home_a}")" || no "the commit put its entry in place 
   pid_a=""
   home="${home_a}"
   json=$(cat "${home}/out")
-  undone_hash=$(sed -n 's/^\[[^]]*\] check approve-undone hash=\(sha256:[0-9a-f]\{64\}\) outcome=signal-9$/\1/p' "${home}/advisory.log")
-  [[ -n "${undone_hash}" ]] || no "advisory.log has no undone line: $(cat "${home}/advisory.log")"
   ! grep -q 'check approve(' "${home}/advisory.log" || no "advisory.log has an approve line the commit never wrote"
-  [[ -z "$(vouched "${home_a}")" ]] || no "the store vouches for $(vouched "${home_a}")"
+}
+# advisory.log says how the settle ended the commit (WORD), and of which hash:
+# into settled_hash.
+settled_as() {
+  settled_hash=$(sed -n "s/^\[[^]]*\] check approve-$1 hash=\(sha256:[0-9a-f]\{64\}\) outcome=signal-9\$/\1/p" "${home}/advisory.log")
+  [[ -n "${settled_hash}" ]] || no "advisory.log has no $1 line: $(cat "${home}/advisory.log")"
 }
 
 core_killed_after_rename() {
-  killed_after_rename :
+  killed_after_rename : :
+  settled_as undone
+  [[ -z "$(vouched "${home_a}")" ]] || no "the store vouches for $(vouched "${home_a}")"
   [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
   jq -e '.approved == false and .error == "approvals_store_failed" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' <<< "${json}" >/dev/null || no "the report: ${json}"
   [[ -z "$(find "${ledger}" -mindepth 1 2>/dev/null)" ]] || no "the ledger holds: $(ls -a "${ledger}")"
@@ -1683,17 +1722,109 @@ row "a check whose core is killed after its rename is settled: the entry is take
 ledger_read_only() { chmod 500 "${ledger}"; }
 take_back_refused() {
   local entry
-  killed_after_rename ledger_read_only
+  killed_after_rename : ledger_read_only
   chmod 700 "${ledger}"
+  settled_as undone
   [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
   jq -e '.approved == false and .error == "approvals_store_failed" and .ledger_entry_left == true' <<< "${json}" >/dev/null || no "the report: ${json}"
   entry=$(ledger_entries)
-  [[ "${entry}" == "${ledger}/${undone_hash/:/-}.json" ]] || no "the entry is gone, so nothing was refused: $(ls -a "${ledger}")"
+  [[ "${entry}" == "${ledger}/${settled_hash/:/-}.json" ]] || no "the entry is gone, so nothing was refused: $(ls -a "${ledger}")"
   grep -qF "safedeps: undo-failed: the ledger entry ${entry} could not be removed." "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
-  [[ "$(log_at "${home}" "check approve-undo-failed hash=${undone_hash} entry=${entry}")" -gt "$(log_at "${home}" "check approve-undone hash=${undone_hash} outcome=signal-9")" ]] \
+  [[ "$(log_at "${home}" "check approve-undo-failed hash=${settled_hash} entry=${entry}")" -gt "$(log_at "${home}" "check approve-undone hash=${settled_hash} outcome=signal-9")" ]] \
     || no "no undo-failed line after the undone line: $(cat "${home}/advisory.log")"
 }
 row "a take-back the ledger refuses is undo-failed: named, and the report says the entry stayed" take_back_refused
+
+# The store vouches for the spec and no entry stands: B approved it, and its
+# entry was removed by hand. A's core is killed after its rename, and the CLI
+# settles the commit. Nothing stood at the path before A, so nothing stands
+# there after it. The store vouches, and nothing says whose line vouches, so A
+# is in doubt.
+b_approved_then_removed() {
+  launch "${home_b}"
+  pid_b=$!
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  stands "${home_b}" "${rc_b}"
+  rm -f -- "$(ledger_entries)"
+}
+vouched_core_killed() {
+  killed_after_rename b_approved_then_removed :
+  settled_as in-doubt
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.approved == false and .error == "approvals_store_in_doubt" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' <<< "${json}" >/dev/null || no "the report: ${json}"
+  [[ -z "$(find "${ledger}" -mindepth 1 2>/dev/null)" ]] || no "the ledger holds: $(ls -a "${ledger}")"
+  vouched "${home_a}" | grep -qxF "${settled_hash}" || no "the store no longer vouches for ${settled_hash}"
+}
+row "a check whose core is killed after its rename, where the store vouches for the spec and no entry stood, leaves no entry and is in doubt" vouched_core_killed
+
+# ---- a revoke that meets a commit -------------------------------------------
+#
+# A revoke rewrites an entry, so it runs under the store lock, as a commit and
+# a settle do. A approved the spec. B stops inside its commit at its approve
+# line, after its rename, holding the lock. A revoke of the spec starts, and
+# while B holds the lock it does not end and the entry stays B's. Then B's core
+# is killed, and its CLI settles the commit, which puts back the entry A
+# approved. The settle and the revoke then take the lock one after the other,
+# in either order, and the entry at the end is revoked. That the commit waits
+# for a revoke that holds the lock is rust-core's: no step of a revoke under
+# the lock can be stopped from here.
+revoke_during_commit() {
+  local core_pid seen="" b_entry
+  pair
+  launch "${home_a}"
+  pid_a=$!
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  stands "${home_a}" "${rc_a}"
+  a_entry=$(identity "$(ledger_entries)")
+  mkdir "${home_b}/gate"
+  launch "${home_b}"
+  pid_b=$!
+  gated "${home_b}"
+  stall_log "${home_b}"
+  : > "${home_b}/gate/go"
+  until_true core_below "${pid_b}" >/dev/null || no "B did not reach its commit: $(cat "${home_b}/stderr")"
+  until_true b_in_place || no "B did not put its entry in place: $(cat "${home_b}/stderr")"
+  core_pid=$(core_below "${pid_b}") || no "no core holds B's commit"
+  b_entry=$(identity "$(ledger_entries)")
+  ( cd "${tmp_root}" && exec env SAFEDEPS_HOME="${home_a}" SAFEDEPS_LEDGER_DIR="${ledger}" \
+      "${ROOT_DIR}/bin/safedeps" --json revoke pypi fixture-clean@1.0.0 > "${home_a}/revoke.out" 2> "${home_a}/revoke.err" < /dev/null ) &
+  revoke_pid=$!
+  # Two seconds is far past what a revoke takes when nothing holds the lock.
+  for _ in $(seq 1 3000); do
+    kill -0 "${revoke_pid}" 2>/dev/null || break
+    if [[ -z "${seen}" ]]; then
+      core_below "${revoke_pid}" revoke >/dev/null && seen=${SECONDS}
+    elif (( SECONDS - seen >= 2 )); then
+      break
+    fi
+    sleep 0.02
+  done
+  kill -0 "${revoke_pid}" 2>/dev/null || no "the revoke ended while B held the store lock: $(cat "${home_a}/revoke.out" "${home_a}/revoke.err")"
+  [[ -n "${seen}" ]] || no "the revoke never reached its core: $(cat "${home_a}/revoke.err")"
+  [[ "$(identity "$(ledger_entries)")" == "${b_entry}" ]] || no "the entry changed while B held the store lock"
+  unstall_log "${home_b}"
+  kill -KILL "${core_pid}"
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  rc=0
+  wait "${revoke_pid}" || rc=$?
+  revoke_pid=""
+  [[ "${rc}" == 0 ]] || no "the revoke exits ${rc}: $(cat "${home_a}/revoke.out" "${home_a}/revoke.err")"
+  jq -e '.command == "revoke" and .revoked == true' "${home_a}/revoke.out" >/dev/null || no "the revoke's report: $(cat "${home_a}/revoke.out")"
+  [[ "$(ledger_entries | grep -c .)" == 1 ]] || no "the ledger holds: $(ls -a "${ledger}")"
+  jq -e '(.revoked_at // null) != null' "$(ledger_entries)" >/dev/null || no "the entry at the end is not revoked: $(cat "$(ledger_entries)")"
+  [[ -z "$(find "${ledger}" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${ledger}")"
+  [[ "${rc_b}" == 4 ]] || no "B exits ${rc_b}: $(cat "${home_b}/out")"
+  jq -e '.approved == false and .error == "approvals_store_in_doubt" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' "${home_b}/out" >/dev/null \
+    || no "B's report: $(cat "${home_b}/out")"
+}
+b_in_place() { [[ -n "$(ledger_entries)" && "$(identity "$(ledger_entries)")" != "${a_entry}" ]]; }
+row "a revoke while a commit holds the store lock waits for it, and the entry at the end is revoked" revoke_during_commit
 
 core_missing() {
   local tree
@@ -2528,7 +2659,21 @@ revoke_faulted() {
 row "a revoked entry jq printed and failed on is not reported revoked" revoke_faulted 'revoked_reason: $reason'
 row "a revoked entry jq failed on before printing is not reported revoked" revoke_faulted 'revoked_reason: $reason' STUB_BEFORE=1
 row "a revoke with no clock is not reported revoked" revoke_faulted '%Y-%m-%dT%H:%M:%SZ' STUB_TOOL_ONLY=date
-row "a revoked entry that could not be written is not reported revoked" revoke_faulted 'approved-specs' STUB_TOOL_ONLY=mv STUB_BEFORE=1
+# A ledger the revoke cannot write in: nothing is staged, and the entry is as
+# it was.
+revoke_unwritable() {
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  chmod 500 "${home}/approved-specs"
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" ./bin/safedeps --json revoke pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  chmod 700 "${home}/approved-specs"
+  [[ "${rc}" != 0 ]] || no "the revoke exits 0: ${json}"
+  [[ -z "${json}" ]] || jq -e '.revoked != true' <<< "${json}" >/dev/null || no "the report says revoked: ${json}"
+  jq -e '(.revoked_at // null) == null' "${home}"/approved-specs/*.json >/dev/null || no "the entry was revoked"
+  [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${home}/approved-specs")"
+}
+row "a revoked entry that could not be written is not reported revoked" revoke_unwritable
 misses_run() {
   local closure index
   closure=$(mktemp "${tmp_root}/closure.XXXXXX")
