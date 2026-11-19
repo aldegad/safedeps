@@ -109,35 +109,47 @@ intent to finish it, and do not report one finished while any step is open.
    `status` and read `agent_runtime_stale: false` and a runtime version
    equal to the one in `package.json`. Until then that host's agent runs
    the old copy, and its scan says so with `agent_runtime_stale: true`.
-8. **Push.** `git push origin main`.
-9. **Tag and publish the GitHub release.** An annotated tag `vX.Y.Z` on the
-   pushed commit, pushed, and `gh release create vX.Y.Z --notes-file <notes>`.
-   Pushing the tag starts nothing: step 10 publishes to npm by hand.
-   The notes cover every user-visible change since the previous tag (derive them
-   from `git log <previous-tag>..vX.Y.Z` and the ROADMAP section): security
-   fixes first, each with what could get past before and how it is verified
-   now, then fixes, then anything a user has to do. Then read it back:
-   `gh release view vX.Y.Z --json isDraft,isPrerelease,tagName` must show
-   `false`, `false` and the tag, and `gh release view --json tagName` (the
-   latest release) must name it. A draft is not a release: users and
-   `releases/latest` never see it.
-10. **Publish to npm, from our own hosts.** npm's trusted publishing and its
-    provenance attestations need a cloud-hosted CI runner (GitHub-hosted,
-    GitLab.com shared or CircleCI cloud), and our hosts are not one. So a
-    version published here names the owner's npm account as its publisher and
-    carries no provenance. Do not pass `--provenance`.
+8. **Tag the release locally.** An annotated tag `vX.Y.Z` on the main
+   checkout's head after step 7: `git tag -a vX.Y.Z -m "safedeps X.Y.Z"`.
+   Do not push it. Nothing has left the machine yet, and nothing does until
+   every block of step 10 before "Push and release" has passed. A check
+   that fails before the push is undone by deleting its directory and the
+   local tag, with `git tag -d vX.Y.Z`. A tag that was never pushed is
+   gone. Step 10 pushes the tag by its name, never with `--tags`.
+9. **Write the GitHub release notes.** Write the notes to a file now. Step
+   10 publishes them. Keep the file outside the main checkout, because the
+   push block of step 10 stops on an untracked file there.
+   The notes cover every user-visible change since the previous tag (derive
+   them from `git log <previous-tag>..vX.Y.Z` and the ROADMAP section):
+   security fixes first, each with what could get past before and how it is
+   verified now, then fixes, then anything a user has to do. When the
+   publisher or the provenance differs from the previous version's, the
+   notes say so in one line.
+10. **Build, check and pack, then push and publish, from our own hosts.**
+    npm's trusted publishing and its provenance attestations need a
+    cloud-hosted CI runner (GitHub-hosted, GitLab.com shared or CircleCI
+    cloud), and our hosts are not one. So a version published here names the
+    owner's npm account as its publisher and carries no provenance. Do not
+    pass `--provenance`.
 
     A remote macOS host (step 7)
     builds, with the toolchain pinned below and nowhere else, and holds no npm
     credential. The publishing machine, an Apple silicon Mac with the owner's
     npm login, `jq` and npm, runs no compiler. Both start from one archive of
-    the tag, `rust/` included. Each block below runs as one bash script with
-    `set -euo pipefail` and `V=X.Y.Z`, so a failed line stops it.
+    the local tag, `rust/` included. The same archive goes to WSL1 and to the
+    Intel host of the Intel check below. Each block below runs as one bash
+    script with `set -euo pipefail` and `V=X.Y.Z`, so a failed line stops it.
 
-    - **Archive** (publishing machine, main checkout, after step 9):
+    Every check that can be undone comes before anything that cannot. The
+    build, the checks and the pack come first. A check that fails there is
+    undone by deleting its directory and the local tag. The push, the tag
+    push, the GitHub release and the npm publish cannot be undone. They come
+    last, one after the other within minutes.
+
+    - **Archive** (publishing machine, main checkout, after step 8):
       `git archive --format=tar.gz -o "$R/safedeps-v$V.tar.gz" "v$V"`, where
-      `$R` is a new empty directory. Copy the archive to the build host and
-      to WSL1.
+      `$R` is a new empty directory. Copy the archive to the build host, to
+      WSL1 and to the Intel host.
     - **Build** (build host, in a new empty directory holding the archive):
 
       ```bash
@@ -147,21 +159,51 @@ intent to finish it, and do not report one finished while any step is open.
       RUSTUP_TOOLCHAIN=1.94.0 scripts/build-core.sh --publish --sums native.sha256 \
         --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-musl
       [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
-      if arch -x86_64 /usr/bin/true 2>/dev/null; then
-        arch -x86_64 ./bin/native/darwin-x64/safedeps-core version
-        arch -x86_64 ./bin/native/darwin-x64/safedeps-core stamp
-      else
-        echo "this host cannot run x86_64 programs: darwin-x64 was built and not run"
-      fi
       COPYFILE_DISABLE=1 tar -czf ../native.tar.gz bin/native native.sha256
       ```
 
       `build-core.sh` runs the `darwin-arm64` binary and checks its stamp
-      against the tag's `rust/` before it places it. Bring `native.tar.gz` to
-      `$R` on the publishing machine and to WSL1.
+      against the tag's `rust/` before it places it. The build does not run
+      the `darwin-x64` binary. That is the Intel check below, and it is not
+      optional. Bring `native.tar.gz` to `$R` on the publishing machine, to
+      WSL1 and to the Intel host.
+    - **Apple silicon check** (build host, in a new empty directory holding
+      the archive and `native.tar.gz`):
+
+      ```bash
+      mkdir pkg && tar -xzf "safedeps-v$V.tar.gz" -C pkg && tar -xzf native.tar.gz -C pkg && cd pkg
+      ( cd bin/native && shasum -a 256 -c ../../native.sha256 )
+      rm -rf bin/native/darwin-x64
+      [ "$(uname -m)" = arm64 ]
+      core=./bin/native/darwin-arm64/safedeps-core
+      [ "$("$core" version)" = "safedeps-core $V" ]
+      stamp=$("$core" stamp); [ "${stamp%% *}" = publish ]
+      [ "$("$core" stamp --check 2>&1)" = ok ]
+      unset SAFEDEPS_TEST_CORE
+      PATH="/bin:$PATH" bash scripts/test/smoke.sh
+      ```
+
+      It runs the bytes that ship, the ones in `native.tar.gz`, through
+      `stamp --check` and the smoke battery. The smoke battery reaches the
+      core through the entry shim, the way an installed hook does.
+
+      The block unsets `SAFEDEPS_TEST_CORE` before the battery. When that
+      variable is set, the battery's core reader runs the binary it names
+      instead of the one in the tree, and skips the stamp check. The battery
+      could then pass on bytes that do not ship.
+
+      The block also checks that it runs as arm64 (`uname -m`). The entry
+      shim picks the binary from the machine bash reports. A bash that has
+      only an x86_64 build, such as one earlier on PATH, would run under
+      Rosetta, and the shim would pick `darwin-x64`. The check would then
+      smoke the x64 binary and pass without a word. So the block deletes
+      `darwin-x64` from its copy, and a path that would pick it fails
+      instead of passing. `PATH="/bin:$PATH"` makes the battery's `bash` the
+      system one.
     - **Linux check** (WSL1, the distribution of step 5, in a new empty
-      directory holding both files). The package ships this binary, and no
-      other host runs it before the publish:
+      directory on the Linux root holding both files, at nice 0). The package
+      ships this binary, and no other host runs it before the publish. The
+      smoke battery runs here too:
 
       ```bash
       mkdir pkg && tar -xzf "safedeps-v$V.tar.gz" -C pkg && tar -xzf native.tar.gz -C pkg && cd pkg
@@ -170,14 +212,55 @@ intent to finish it, and do not report one finished while any step is open.
       [ "$("$core" version)" = "safedeps-core $V" ]
       stamp=$("$core" stamp); [ "${stamp%% *}" = publish ]
       [ "$("$core" stamp --check 2>&1)" = ok ]
+      unset SAFEDEPS_TEST_CORE
+      bash scripts/test/smoke.sh
       ```
 
-    - **Check the package** (publishing machine, in `$R`):
+      As in the Apple silicon check, the block unsets `SAFEDEPS_TEST_CORE`
+      before the battery.
+
+    - **Intel check** (the Intel host, in a new empty directory holding both
+      files):
+
+      ```bash
+      for t in jq node; do command -v "$t" >/dev/null || { echo "$t is not on PATH" >&2; exit 1; }; done
+      mkdir pkg && tar -xzf "safedeps-v$V.tar.gz" -C pkg && tar -xzf native.tar.gz -C pkg && cd pkg
+      ( cd bin/native && shasum -a 256 -c ../../native.sha256 )
+      rm -rf bin/native/darwin-arm64
+      [ "$(uname -m)" = x86_64 ]
+      core=./bin/native/darwin-x64/safedeps-core
+      [ "$("$core" version)" = "safedeps-core $V" ]
+      stamp=$("$core" stamp); [ "${stamp%% *}" = publish ]
+      [ "$("$core" stamp --check 2>&1)" = ok ]
+      unset SAFEDEPS_TEST_CORE
+      PATH="/bin:$PATH" bash scripts/test/smoke.sh
+      ```
+
+      The Intel host is an Intel Mac. Where none can be reached, it is an
+      Apple silicon Mac under Rosetta. On an Intel Mac the block runs as it
+      is. Under Rosetta, start the script with `arch -x86_64 /bin/bash`.
+      The entry shim picks the binary from the machine bash reports
+      (`BASH_VERSINFO`). Under Rosetta, a bash that has only an arm64 build,
+      such as one earlier on PATH, would run natively and pick
+      `darwin-arm64` without a word. So the block deletes `darwin-arm64`
+      from its copy, and a path that would pick it fails instead of passing.
+      `PATH="/bin:$PATH"` makes the battery's `bash` the system one, which
+      has an x86_64 build.
+
+      Before anything else, the block checks that `jq` and `node` are on
+      PATH, and names the one that is missing. An Intel host may not have
+      them on its default PATH. The cause then shows by name, not as a
+      failure deep in the battery. As in the Apple silicon check, the block
+      unsets `SAFEDEPS_TEST_CORE` before the battery.
+
+      If no host can run the `darwin-x64` binary, do not publish.
+    - **Check the package and pack** (publishing machine, in `$R`):
 
       ```bash
       mkdir pkg && tar -xzf "safedeps-v$V.tar.gz" -C pkg && tar -xzf native.tar.gz -C pkg && cd pkg
+      sums="$PWD/native.sha256"
       [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
-      ( cd bin/native && shasum -a 256 -c ../../native.sha256 )
+      ( cd bin/native && shasum -a 256 -c "$sums" )
       chmod 755 bin/native/*/safedeps-core
       core=./bin/native/darwin-arm64/safedeps-core
       stamp=$("$core" stamp); [ "${stamp%% *}" = publish ]
@@ -187,28 +270,83 @@ intent to finish it, and do not report one finished while any step is open.
       [ "$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -n 1)" = "$V" ]
       [ "$("$core" version)" = "safedeps-core $V" ]
       [ "$(jq '(.dependencies // {}) + (.optionalDependencies // {}) + (.peerDependencies // {}) | length' package.json)" = 0 ]
-      npm pack --dry-run --json > ../pack.json
+      [ "$(npm config get provenance)" = false ]
+      npm pack --json --pack-destination .. > ../pack.json
+      tgz="aldegad-safedeps-$V.tgz"
+      [ "$(jq -r '.[0].filename' ../pack.json)" = "$tgz" ]
       for p in darwin-arm64 darwin-x64 linux-x64; do
         [ "$(jq -r --arg f "bin/native/$p/safedeps-core" '[.[0].files[] | select(.path == $f) | .mode] | if length == 1 then .[0] else "none" end' ../pack.json)" = 493 ]
+        tar -tvzf "../$tgz" "package/bin/native/$p/safedeps-core" | grep -q '^-rwxr-xr-x'
       done
       [ "$(jq '.[0].files | map(.path) | any(startswith("rust/"))' ../pack.json)" = false ]
-      [ "$(npm config get provenance)" = false ]
+      mkdir ../packed && tar -xzf "../$tgz" -C ../packed
+      ( cd ../packed/package/bin/native && shasum -a 256 -c "$sums" )
+      ( cd .. && shasum -a 256 "$tgz" > tarball.sha256 )
+      jq -r '.[0].integrity' ../pack.json > ../tarball.integrity
+      cat ../tarball.sha256 ../tarball.integrity
       ```
 
-    - **Publish** (publishing machine, in `$R/pkg`, by hand, because npm asks
-      for the second factor). `npm whoami` must print an account that
-      `npm owner ls @aldegad/safedeps` lists; if it prints none, `npm login`
-      first (a browser login by default). Then `npm publish`, and answer
-      npm's one-time password challenge. Nothing is installed: the package
-      has no dependencies and no lockfile. What is packed is this tree, the
-      tag's files and the binaries the build made.
+      It runs the package checks, then `npm pack` once. It writes the
+      tarball's sha256 to `tarball.sha256` and npm's integrity value to
+      `tarball.integrity`. It unpacks the tarball and checks the three
+      binaries against the build's digests and their mode. This tarball is
+      what is published. Do not pack again.
+    - **Sign in** (publishing machine, by hand). `npm whoami` must print an
+      account that `npm owner ls @aldegad/safedeps` lists; if it prints
+      none, `npm login` first (a browser login by default). This comes
+      before the push, because a login can be undone and the steps after it
+      cannot. Those steps then follow each other within minutes, while the
+      person with the second factor is there.
+    - **Push and release** (publishing machine, main checkout, only after
+      every block above has passed), with `NOTES` set to the notes file of
+      step 9:
+
+      ```bash
+      [ -z "$(git status --porcelain)" ]
+      [ "$(git rev-parse HEAD)" = "$(git rev-parse "v$V^{commit}")" ]
+      [ -s "$NOTES" ]
+      gh auth status >/dev/null
+      remote_tag=$(git ls-remote --tags origin "refs/tags/v$V"); [ -z "$remote_tag" ]
+      git push --atomic origin main "refs/tags/v$V"
+      gh release create "v$V" --notes-file "$NOTES"
+      [ "$(gh release view "v$V" --json isDraft,isPrerelease,tagName --jq '"\(.isDraft) \(.isPrerelease) \(.tagName)"')" = "false false v$V" ]
+      [ "$(gh release view --json tagName --jq .tagName)" = "v$V" ]
+      ```
+
+      These are the first commands that cannot be undone. Before any push,
+      the block checks five things: the checkout is clean, its head is the
+      tagged commit, the notes file is not empty, `gh` is logged in, and the
+      tag is not on origin yet. `gh release create` runs after the push and
+      needs the notes file and the login. With the checks first, an empty
+      notes file or a missing login stops the block before anything is
+      public. Main and the tag then go in one atomic push
+      (`git push --atomic`). Either both reach origin or neither does. The
+      tag is pushed by its name. Pushing the tag starts nothing: no workflow
+      runs from it. Then the block reads the release back:
+      `gh release view vX.Y.Z --json isDraft,isPrerelease,tagName` must show
+      `false`, `false` and the tag, and `gh release view --json tagName` (the
+      latest release) must name it. A draft is not a release: users and
+      `releases/latest` never see it.
+    - **Publish** (publishing machine, in `$R`, by hand, because npm asks
+      for the second factor):
+
+      ```bash
+      shasum -a 256 -c tarball.sha256
+      npm publish "./aldegad-safedeps-$V.tgz"
+      ```
+
+      Answer npm's one-time password challenge. The block checks the tarball
+      against `tarball.sha256` and publishes that file. npm takes a tarball
+      as a path that starts with `./`. Nothing is installed: the package
+      has no dependencies and no lockfile. What is published is the tarball
+      the pack made: the tag's files and the binaries the build made.
     - **Read the release back** (publishing machine, in `$R/pkg`). The
       registry can answer 404 for minutes after a publish, so each try asks the version document and the package
       document with a fresh query string and no-cache, for up to 20 minutes:
 
       ```bash
       name=@aldegad/safedeps base=https://registry.npmjs.org/@aldegad%2fsafedeps
-      sums="$PWD/native.sha256"
+      sums="$PWD/native.sha256" tgz="../aldegad-safedeps-$V.tgz"
       unconfirmed() { echo "$name@$V was published, but the read-back failed: $1. Do not publish it again; read 'npm view $name@$V' and fix forward in the next patch." >&2; exit 1; }
       meta="" deadline=$(( $(date +%s) + 1200 )) try=0
       while [ -z "$meta" ]; do
@@ -223,11 +361,13 @@ intent to finish it, and do not report one finished while any step is open.
       done
       jq -r '"publisher: \(._npmUser.name // "none"), trusted publisher: \(._npmUser.trustedPublisher.id // "none"), provenance: \(.dist.attestations.provenance.predicateType // "none")"' <<<"$meta"
       [ "$(jq -r '._npmUser.name // empty' <<<"$meta")" = "$(npm whoami)" ] || unconfirmed "the registry names another publisher"
-      npm pack --dry-run --json | jq -r '.[0].files[].path' | sort > ../local.txt || unconfirmed "npm pack --dry-run of this tree did not list its files"
+      [ "$(jq -r '.dist.integrity // empty' <<<"$meta")" = "$(cat ../tarball.integrity)" ] || unconfirmed "the registry names another integrity than the packed tarball's"
+      tar -tzf "$tgz" | sed 's#^package/##' | sort > ../local.txt || unconfirmed "the packed tarball did not list"
       url=$(jq -r '.dist.tarball // empty' <<<"$meta"); [ -n "$url" ] || unconfirmed "the registry names no dist.tarball"
       curl -sSfL --retry 10 --retry-delay 15 --retry-all-errors -o ../published.tgz "$url" || unconfirmed "$url did not download"
+      [ "$(shasum -a 256 ../published.tgz | cut -d ' ' -f 1)" = "$(cut -d ' ' -f 1 ../tarball.sha256)" ] || unconfirmed "the published tarball is not the bytes that were packed"
       tar -tzf ../published.tgz | sed 's#^package/##' | sort > ../published.txt || unconfirmed "the tarball did not list as a gzip tar"
-      diff -u ../local.txt ../published.txt || unconfirmed "the published file list differs from npm pack --dry-run of this tree"
+      diff -u ../local.txt ../published.txt || unconfirmed "the published file list differs from the packed tarball"
       for p in darwin-arm64 darwin-x64 linux-x64; do
         tar -tvzf ../published.tgz "package/bin/native/$p/safedeps-core" | grep -q '^-rwxr-xr-x' || unconfirmed "bin/native/$p/safedeps-core is not mode 755 in the tarball"
       done
@@ -235,6 +375,11 @@ intent to finish it, and do not report one finished while any step is open.
       ( cd ../published/package/bin/native && shasum -a 256 -c "$sums" ) || unconfirmed "a published binary is not the bytes the build made"
       [ "$(../published/package/bin/native/darwin-arm64/safedeps-core version)" = "safedeps-core $V" ] || unconfirmed "the published darwin-arm64 binary does not say safedeps-core $V"
       ```
+
+      The block checks that the registry's integrity value is the packed
+      tarball's, and that the downloaded tarball's sha256 is the one written
+      at the pack. The file list it compares comes from the packed tarball,
+      not from a new `npm pack --dry-run`.
 
     Then confirm it by hand: `npm view @aldegad/safedeps version` is X.Y.Z.
     A failure at `npm publish` is a login, second-factor or permission
