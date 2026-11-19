@@ -32,16 +32,50 @@
 //! then appends its own line in the same write and syncs it before it says
 //! the line is written. The lock belongs to the open file and goes when the
 //! file is closed, so a process that dies holding it leaves nothing to clean
-//! up. A lock another process holds past LOCK_WAIT is an error: nothing is
-//! written or read without the lock.
+//! up: the next writer or reader takes it at once. A lock another process
+//! holds past LOCK_WAIT is an error: nothing is written or read without the
+//! lock.
+//!
+//! The commit. An approval is three records: the ledger entry the hook reads,
+//! the `check approve(...)` line in advisory.log a person reads, and the line
+//! here that re-check and the cache lookup read. `commit` writes all three for
+//! `safedeps check`, and it holds the store lock from before the first until
+//! after the last, take-back included. So two commits never overlap, whatever
+//! hash each approves, and a reader never sees an entry whose store line is
+//! still to come. The CLI makes the entry and validates it in a staged file
+//! beside the entry's path; the commit only renames that file into place and,
+//! on a take-back, removes it. It never builds or reads an entry's bytes, so
+//! the ledger's format keeps one writer, the CLI.
+//!
+//! Under the lock, in this order: the entry already at the path, if there is
+//! one, kept aside under a second name; the rename; the approve line; the
+//! store line. The store line is the commit point. A rename that fails puts
+//! nothing in place, so it takes nothing back. A failure after the rename
+//! takes the entry back, and the store read under the same lock decides how.
+//! Where the store vouches for the hash, whoever's line it is, the entry that
+//! stood at the path before this commit is put back, the same file, so a
+//! failed check never takes away or rewrites an approval another check made
+//! and reported, a revoked entry included. Where nothing stood there, this
+//! commit's entry stays: no entry the store vouches for is removed (`kept`).
+//! Where the store does not vouch, the entry is removed. Where the store
+//! cannot be read, the entry is removed and the answer is `in-doubt`: it lets
+//! no entry stand that nothing may vouch for.
 //!
 //! An append answers one of three things: Ok, and the two of `Appended`.
-//! Written: the line is in the store and synced. Not written: the line is not there, or only a torn
-//! piece of it is, which the next writer seals as one broken line. Written, not
-//! synced: every byte of the line landed and a reader sees it, but the sync
-//! failed, so nothing says it is on the disk. The CLI does not take the third
-//! for the first or the second: it reads the store back (`index`), and what the
-//! store vouches for decides (`sf_check_commit` in bin/safedeps).
+//! Written: the line is in the store and synced. Not written: the line is not
+//! there, or only a torn piece of it is, which the next writer seals as one
+//! broken line. Written, not synced: every byte of the line landed and a reader
+//! sees it, but the sync failed, so nothing says it is on the disk. A commit
+//! knows which of the three its own append answered. So it never takes a line
+//! another check wrote for its own: not written is a failure, whatever the
+//! store vouches for. Written, not synced is an approval that stands, named
+//! `unsynced`.
+//!
+//! A commit whose process ended before it answered took its lock with it, and
+//! the CLI settles it (`settle`): under the lock, the same take-back, with
+//! advisory.log told how the commit ended. A store that vouches for the hash
+//! then may vouch with the commit's own line or another's, and nothing tells
+//! which, so the check answers that it is in doubt and the entry stays.
 //!
 //! The torn-line seal. A write that did not finish leaves a last line with no
 //! newline: its process died, or the write failed after some of its bytes
@@ -71,7 +105,10 @@ use std::{
     collections::HashSet,
     fs,
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, FileExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -293,20 +330,373 @@ fn index_json(ix: &Index) -> String {
     ]))
 }
 
-const USAGE: &str = "usage: safedeps-core approvals append <hash> (the record on stdin) | index\n";
+/// The store, read through `file`, a descriptor that already holds the store
+/// lock. A second open of the store would wait on that lock.
+fn read_locked(file: &fs::File) -> io::Result<Index> {
+    let len = usize::try_from(file.metadata()?.len()).map_err(|_| invalid("the approvals store is too large to read"))?;
+    let mut bytes = vec![0u8; len];
+    file.read_exact_at(&mut bytes, 0)?;
+    Ok(read(&bytes))
+}
 
-/// `safedeps-core approvals append <hash>`, the record on stdin (one
-/// trailing newline is not part of it): exit 0 when the line is written, 1
-/// when it is not, 3 when it is written and not synced, 2 for a hash or a
-/// record that is not one.
+const ADVISORY_LOG: &str = "advisory.log";
+/// What remove(2) answers where a directory on the path is not a directory,
+/// the same number on macOS and Linux: no entry can stand there.
+const ENOTDIR: i32 = 20;
+
+/// What a commit that did not approve left at the ledger entry's path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Entry {
+    /// The commit put nothing in place, and it removed nothing.
+    Untouched,
+    /// No entry is at the path after the take-back.
+    Removed,
+    /// An entry is at the path and stays, because the store vouches for the
+    /// hash.
+    Kept,
+    /// An entry was to go and is still at the path: undo-failed.
+    Left,
+}
+
+impl Entry {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Untouched => "untouched",
+            Self::Removed => "removed",
+            Self::Kept => "kept",
+            Self::Left => "left",
+        }
+    }
+}
+
+/// Why a commit did not approve, in the word the check's report uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Failure {
+    /// The entry could not be put in place, or its approve line could not be
+    /// written. No store line was written.
+    LedgerWrite,
+    /// The store could not be opened and locked, and nothing was written; or
+    /// the store did not take the line, and a read of it decided the
+    /// take-back.
+    Store,
+    /// Whether the store holds the approval is not known: the store could not
+    /// be read to decide the take-back, or a commit that ended before it
+    /// answered left a hash the store vouches for.
+    InDoubt,
+}
+
+impl Failure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LedgerWrite => "ledger_write_failed",
+            Self::Store => "approvals_store_failed",
+            Self::InDoubt => "approvals_store_in_doubt",
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum Answer {
+    Approved,
+    NotApproved(Failure, Entry),
+}
+
+/// One approval to commit: the entry's `hash`, the `staged` file the CLI made
+/// and validated beside the entry's path `entry`, and `record`, its approve
+/// line.
+pub struct Approval<'a> {
+    pub hash: &'a str,
+    pub staged: &'a Path,
+    pub entry: &'a Path,
+    pub record: &'a [u8],
+}
+
+/// The entry's path ends in the file name the ledger gives `hash`, so a
+/// take-back never removes another hash's entry.
+fn entry_for(hash: &str, entry: &Path) -> io::Result<()> {
+    if !is_hash(hash) {
+        return Err(invalid("the hash is not sha256: and 64 lowercase hex digits"));
+    }
+    if entry.file_name().map(OsStrExt::as_bytes) != Some(ledger::filename(hash).as_bytes()) {
+        return Err(invalid("the entry's path does not end in its hash's file name"));
+    }
+    Ok(())
+}
+
+/// An approval a commit acts on. The staged file sits in the entry's own
+/// directory, so the rename never leaves it.
+fn checked(a: &Approval) -> io::Result<()> {
+    entry_for(a.hash, a.entry)?;
+    if !a.record.starts_with(RECORD_PREFIX) {
+        return Err(invalid("the record is not an approval (it does not start with `check approve(`)"));
+    }
+    if a.staged.file_name().is_none() || a.staged.parent() != a.entry.parent() || a.staged == a.entry {
+        return Err(invalid("the staged entry is not a file beside the entry's path"));
+    }
+    Ok(())
+}
+
+fn note(err: &mut Vec<u8>, line: String) {
+    err.extend_from_slice(line.as_bytes());
+    err.push(b'\n');
+}
+
+/// How a failed I/O operation ended, in an advisory line's `outcome=`: the
+/// error the kernel returned.
+fn outcome(e: &io::Error) -> String {
+    match e.raw_os_error() {
+        Some(code) => format!("os-error-{code}"),
+        None => "no-os-code".to_string(),
+    }
+}
+
+/// How a commit process ended, as the CLI read its status: `exit-N` or
+/// `signal-N`.
+fn is_ended(s: &str) -> bool {
+    s.split_once('-').is_some_and(|(how, n)| {
+        matches!(how, "exit" | "signal") && (1..=3).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// One advisory.log line as the CLI writes one (`sf_advisory_log`):
+/// `[<UTC time>] <text>`.
+fn log_line(log: &Path, at: &str, text: &[u8]) -> io::Result<()> {
+    let mut l = Vec::with_capacity(at.len() + text.len() + 4);
+    l.push(b'[');
+    l.extend_from_slice(at.as_bytes());
+    l.extend_from_slice(b"] ");
+    l.extend_from_slice(text);
+    l.push(b'\n');
+    let mut f = fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log)?;
+    f.write_all(&l)
+}
+
+fn log_now(log: &Path, text: String) {
+    let at = os::utc_stamp(os::wall(os::WallRole::AdvisoryHeader).seconds());
+    let _ = log_line(log, &at, text.as_bytes());
+}
+
+/// The store, opened and locked for a commit or a settle. The lock goes with
+/// the file.
+fn locked(dir: &Path, wait: Duration) -> io::Result<fs::File> {
+    let file = open_for_append(dir)?;
+    os::flock_within(&file, os::FileLock::Exclusive, wait)?;
+    Ok(file)
+}
+
+/// The second name a commit keeps the entry already at the path under, in the
+/// entry's own directory: it starts with a dot and does not end in `.json`, so
+/// no ledger reader lists it.
+fn prev_of(entry: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(entry.file_name().unwrap_or_default());
+    name.push(".prev");
+    entry.with_file_name(name)
+}
+
+/// Under the lock, before the rename: the entry at the path, if there is one,
+/// kept aside as a second name for the same file, so a take-back can put it
+/// back as it was. A second name a commit that ended left is removed first.
+fn keep_prev(entry: &Path, prev: &Path) -> io::Result<()> {
+    match fs::remove_file(prev) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    match fs::hard_link(entry, prev) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+/// The take-back of `entry`, under the store lock `file` holds. The store,
+/// read through `file`, decides. It vouches for `hash`: the entry kept aside
+/// at `prev` is put back, or, where none was, the entry at the path stays
+/// (`Kept`). It does not, or it cannot be read: the entry is removed, and the
+/// one kept aside goes with it, as the rename already took it from the path.
+/// `ended` says how the commit ended where advisory.log holds its approve line
+/// or may: the take-back then says there what it did. Returns what is left at
+/// the path, and whether the store could be read.
+fn take_back(
+    file: &fs::File,
+    hash: &str,
+    entry: &Path,
+    read: impl FnOnce(&fs::File) -> io::Result<Index>,
+    ended: Option<&str>,
+    log: &Path,
+    err: &mut Vec<u8>,
+) -> (Entry, bool) {
+    let prev = prev_of(entry);
+    let vouched = read(file).map(|ix| ix.hashes.iter().any(|h| h == hash));
+    match &vouched {
+        Ok(true) => {
+            let put_back = fs::symlink_metadata(&prev).is_ok() && fs::rename(&prev, entry).is_ok();
+            if !put_back && fs::symlink_metadata(entry).is_err() {
+                return (Entry::Removed, true);
+            }
+            let which = if put_back { "the one that stood there before this check is back" } else { "this check's stays" };
+            note(err, format!("safedeps: kept: the approvals store vouches for {hash}, so the ledger entry {} is not removed: {which}. This check does not report it as its approval.", entry.display()));
+            if let Some(how) = ended {
+                log_now(log, format!("check approve-kept hash={hash} outcome={how}"));
+            }
+            return (Entry::Kept, true);
+        }
+        Ok(false) => {
+            if let Some(how) = ended {
+                log_now(log, format!("check approve-undone hash={hash} outcome={how}"));
+            }
+        }
+        Err(e) => {
+            note(err, format!("safedeps: in-doubt: the approvals store could not be read back ({e}). The approval of {hash} is taken back, and the store may vouch for it."));
+            if let Some(how) = ended {
+                log_now(log, format!("check approve-in-doubt hash={hash} outcome={how}"));
+            }
+        }
+    }
+    let _ = fs::remove_file(entry);
+    let _ = fs::remove_file(&prev);
+    match fs::symlink_metadata(entry) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(ENOTDIR) => (Entry::Removed, vouched.is_ok()),
+        _ => {
+            note(err, format!("safedeps: undo-failed: the ledger entry {} could not be removed. Whatever it holds stays where the hook reads it, and no approval stands behind it.", entry.display()));
+            log_now(log, format!("check approve-undo-failed hash={hash} entry={}", entry.display()));
+            (Entry::Left, vouched.is_ok())
+        }
+    }
+}
+
+/// Commits one approval for `safedeps check`: under the store lock, the
+/// rename of the staged entry, the approve line in advisory.log and the store
+/// line, and the take-back when one of them fails. What it cannot rule out it
+/// names on `err`: `unsynced`, `kept`, `in-doubt`, `undo-failed`.
+pub fn commit(dir: &Path, a: &Approval, err: &mut Vec<u8>) -> Answer {
+    commit_with(dir, a, LOCK_WAIT, write_locked, read_locked, err)
+}
+
+fn commit_with(
+    dir: &Path,
+    a: &Approval,
+    wait: Duration,
+    write: impl FnOnce(&fs::File, &[u8]) -> Result<(), Appended>,
+    read: impl FnOnce(&fs::File) -> io::Result<Index>,
+    err: &mut Vec<u8>,
+) -> Answer {
+    let file = match locked(dir, wait) {
+        Ok(f) => f,
+        Err(e) => {
+            note(err, format!("safedeps-core approvals: not committed: {} could not be opened and locked: {e}", path(dir).display()));
+            return Answer::NotApproved(Failure::Store, Entry::Untouched);
+        }
+    };
+    // From here to the answer the store lock is held. It goes with `file`.
+    let prev = prev_of(a.entry);
+    if let Err(e) = keep_prev(a.entry, &prev) {
+        note(err, format!("safedeps-core approvals: not committed: the ledger entry {} could not be kept aside at {}: {e}", a.entry.display(), prev.display()));
+        return Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched);
+    }
+    if let Err(e) = fs::rename(a.staged, a.entry) {
+        let _ = fs::remove_file(&prev);
+        note(err, format!("safedeps-core approvals: not committed: the ledger entry {} could not be put in place: {e}", a.entry.display()));
+        return Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched);
+    }
+    let at = os::utc_stamp(os::wall(os::WallRole::ApprovalRecord).seconds());
+    let log = dir.join(ADVISORY_LOG);
+    if let Err(e) = log_line(&log, &at, a.record) {
+        note(err, format!("safedeps-core approvals: not committed: the approve line could not be written to {}: {e}", log.display()));
+        let (entry, _) = take_back(&file, a.hash, a.entry, read, None, &log, err);
+        return Answer::NotApproved(Failure::LedgerWrite, entry);
+    }
+    match write(&file, &line(&at, a.hash, Via::Check, a.record)) {
+        Ok(()) => {
+            let _ = fs::remove_file(&prev);
+            Answer::Approved
+        }
+        Err(Appended::Unsynced(e)) => {
+            let _ = fs::remove_file(&prev);
+            let how = outcome(&e);
+            note(err, format!("safedeps: unsynced: the approvals store line of {} was written and not synced ({how}). The approval stands, and nothing confirms that its line is on the disk.", a.hash));
+            log_now(&log, format!("check approve-unsynced hash={} outcome={how}", a.hash));
+            Answer::Approved
+        }
+        Err(Appended::NotWritten(e)) => {
+            note(err, format!("safedeps-core approvals: not written to {}: {e}", path(dir).display()));
+            let how = outcome(&e);
+            let (entry, read) = take_back(&file, a.hash, a.entry, read, Some(how.as_str()), &log, err);
+            Answer::NotApproved(if read { Failure::Store } else { Failure::InDoubt }, entry)
+        }
+    }
+}
+
+/// Settles a commit whose process ended (`ended`, `exit-N` or `signal-N`)
+/// after it renamed its entry into place and before it answered: under the
+/// store lock, the commit's take-back. The CLI asks only where the staged file
+/// is gone, so the rename happened. A store that vouches for the hash may
+/// vouch with the commit's own line, so that answer is in doubt, and the
+/// entry is not removed.
+pub fn settle(dir: &Path, hash: &str, entry: &Path, ended: &str, err: &mut Vec<u8>) -> Answer {
+    settle_with(dir, hash, entry, ended, LOCK_WAIT, read_locked, err)
+}
+
+fn settle_with(
+    dir: &Path,
+    hash: &str,
+    entry: &Path,
+    ended: &str,
+    wait: Duration,
+    read: impl FnOnce(&fs::File) -> io::Result<Index>,
+    err: &mut Vec<u8>,
+) -> Answer {
+    let file = match locked(dir, wait) {
+        Ok(f) => f,
+        Err(e) => {
+            note(err, format!("safedeps: in-doubt: the commit of {hash} ended with {ended}, and {} could not be opened and locked to settle it: {e}", path(dir).display()));
+            return Answer::NotApproved(Failure::InDoubt, Entry::Untouched);
+        }
+    };
+    let (left, read) = take_back(&file, hash, entry, read, Some(ended), &dir.join(ADVISORY_LOG), err);
+    let failure = if read && left != Entry::Kept { Failure::Store } else { Failure::InDoubt };
+    Answer::NotApproved(failure, left)
+}
+
+/// A commit's or a settle's answer as the command gives it: `approved` and
+/// exit 0, or `not-approved <failure> <entry>` and exit 1.
+fn answer_line(answer: &Answer) -> (i32, Vec<u8>) {
+    match answer {
+        Answer::Approved => (0, b"approved\n".to_vec()),
+        Answer::NotApproved(f, e) => (1, format!("not-approved {} {}\n", f.as_str(), e.as_str()).into_bytes()),
+    }
+}
+
+const USAGE: &str = "usage: safedeps-core approvals append <hash> (the record on stdin) | commit <hash> <staged> <entry> (the record on stdin) | settle <hash> <entry> <exit-N|signal-N> | index\n";
+
+/// `safedeps-core approvals commit <hash> <staged> <entry>`, the record on
+/// stdin (one trailing newline is not part of it): the approval committed
+/// (`commit`), and its answer on stdout, `approved` and exit 0 or
+/// `not-approved <failure> <entry>` and exit 1. Exit 2 for an argument that is
+/// not one, and nothing is written.
+/// `safedeps-core approvals settle <hash> <entry> <exit-N|signal-N>`: a commit
+/// whose process ended before it answered, settled (`settle`), and the same
+/// answer, always exit 1.
+/// `safedeps-core approvals append <hash>`, the record on stdin: the store
+/// line alone, under the store lock. Exit 0 when the line is written, 1 when
+/// it is not, 3 when it is written and not synced, 2 for a hash or a record
+/// that is not one. No check calls it: it is the store's own write, which the
+/// approvals-store battery cuts with a file size limit.
 /// `safedeps-core approvals index`: the index on stdout and exit 0, or exit 1
 /// when the store cannot be read.
 pub fn cli(args: &[String]) -> i32 {
     os::set_umask(0o077);
     let mut stdin = Vec::new();
-    if args.first().map(String::as_str) == Some("append") && io::stdin().read_to_end(&mut stdin).is_err() {
-        eprintln!("safedeps-core approvals: not written: the record could not be read from stdin");
-        return 1;
+    match args.first().map(String::as_str) {
+        Some("append") if io::stdin().read_to_end(&mut stdin).is_err() => {
+            eprintln!("safedeps-core approvals: not written: the record could not be read from stdin");
+            return 1;
+        }
+        Some("commit") if io::stdin().read_to_end(&mut stdin).is_err() => {
+            eprintln!("safedeps-core approvals: not committed: the record could not be read from stdin");
+            println!("not-approved {} {}", Failure::LedgerWrite.as_str(), Entry::Untouched.as_str());
+            return 1;
+        }
+        _ => {}
     }
     let (code, out, err) = run(&state::guard_dir(), args, &stdin);
     let _ = io::stderr().write_all(&err);
@@ -325,6 +715,31 @@ fn run(dir: &Path, args: &[String], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
         ["append", hash] => {
             let record = stdin.strip_suffix(b"\n").unwrap_or(stdin);
             answer(append(dir, hash, record), &store)
+        }
+        ["commit", hash, staged, entry] => {
+            let a = Approval {
+                hash,
+                staged: Path::new(staged),
+                entry: Path::new(entry),
+                record: stdin.strip_suffix(b"\n").unwrap_or(stdin),
+            };
+            if let Err(e) = checked(&a) {
+                return (2, Vec::new(), format!("safedeps-core approvals: not committed: {e}\n").into_bytes());
+            }
+            let mut err = Vec::new();
+            let (code, out) = answer_line(&commit(dir, &a, &mut err));
+            (code, out, err)
+        }
+        ["settle", hash, entry, ended] => {
+            if let Err(e) = entry_for(hash, Path::new(entry)) {
+                return (2, Vec::new(), format!("safedeps-core approvals: not settled: {e}\n").into_bytes());
+            }
+            if !is_ended(ended) {
+                return (2, Vec::new(), b"safedeps-core approvals: not settled: how the commit ended is not exit-N or signal-N\n".to_vec());
+            }
+            let mut err = Vec::new();
+            let (code, out) = answer_line(&settle(dir, hash, Path::new(entry), ended, &mut err));
+            (code, out, err)
         }
         ["index"] => match index(dir) {
             Ok(ix) => (0, format!("{}\n", index_json(&ix)).into_bytes(), Vec::new()),
@@ -665,6 +1080,448 @@ mod tests {
         let (code, out, err) = answer(r, &path(&d.0));
         assert_eq!((code, out.is_empty()), (1, true));
         assert!(err.starts_with(format!("safedeps-core approvals: not written to {}: ", path(&d.0).display()).as_bytes()));
+    }
+
+    // ---- the commit ----------------------------------------------------------
+
+    /// A staged entry of `n` holding `body`, beside its path in the ledger
+    /// under `home`. Returns the staged file and the entry's path.
+    fn stage(home: &Path, n: u8, body: &str) -> (PathBuf, PathBuf) {
+        let dir = home.join("approved-specs");
+        fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join(ledger::filename(&h(n)));
+        let mut k = 0;
+        let staged = loop {
+            let s = dir.join(format!(".{}.staged{k}", ledger::filename(&h(n))));
+            if !s.exists() {
+                break s;
+            }
+            k += 1;
+        };
+        fs::write(&staged, body).unwrap();
+        (staged, entry)
+    }
+    /// advisory.log in `home`, each line without its time.
+    fn logged(home: &Path) -> Vec<String> {
+        fs::read_to_string(home.join(ADVISORY_LOG))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| {
+                assert!(l.starts_with('[') && l.as_bytes().get(21..23) == Some(b"] ".as_slice()), "not a CLI line: {l}");
+                assert!(ledger::epoch(&l[1..21]).is_some(), "no time: {l}");
+                l[23..].to_string()
+            })
+            .collect()
+    }
+    fn record(n: u8) -> String {
+        String::from_utf8(rec(n)).unwrap()
+    }
+    fn approval<'a>(n: u8, staged: &'a Path, entry: &'a Path, record: &'a [u8], hash: &'a str) -> Approval<'a> {
+        assert_eq!(hash, h(n));
+        Approval { hash, staged, entry, record }
+    }
+    fn held_elsewhere(home: &Path) -> bool {
+        let other = fs::File::open(path(home)).unwrap();
+        match os::flock_within(&other, os::FileLock::Exclusive, Duration::ZERO) {
+            Ok(()) => false,
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => true,
+            Err(e) => panic!("the lock check failed: {e}"),
+        }
+    }
+    fn not_now(_: &fs::File, _: &[u8]) -> Result<(), Appended> {
+        panic!("the store line was written after an earlier step failed")
+    }
+    fn efbig(_: &fs::File, _: &[u8]) -> Result<(), Appended> {
+        Err(Appended::NotWritten(io::Error::from_raw_os_error(27)))
+    }
+
+    #[test]
+    fn a_commit_writes_the_three_records_with_the_store_lock_held_throughout() {
+        let d = scratch();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (hash, r) = (h(1), rec(1));
+        let a = approval(1, &staged, &entry, &r, &hash);
+        let mut err = Vec::new();
+        let answer = commit_with(
+            &d.0,
+            &a,
+            LOCK_WAIT,
+            |file, l| {
+                // The rename and the approve line came first, and the lock
+                // has been held since before them.
+                assert!(held_elsewhere(&d.0), "the store lock is not held while the commit writes");
+                assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+                assert_eq!(logged(&d.0), vec![record(1)]);
+                write_locked(file, l)
+            },
+            read_locked,
+            &mut err,
+        );
+        assert_eq!(answer, Answer::Approved);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        assert!(!staged.exists());
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+        assert_eq!(logged(&d.0), vec![record(1)]);
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
+        let stored = fs::read(path(&d.0)).unwrap();
+        let v = json::parse_one(&stored[..stored.len() - 1]).unwrap();
+        // One reading of the clock stamps the store line and the approve line.
+        let line = fs::read_to_string(d.0.join(ADVISORY_LOG)).unwrap();
+        assert_eq!(v.get("at").unwrap().as_str(), Some(&line[1..21]));
+        assert!(!held_elsewhere(&d.0), "the lock outlived the commit");
+    }
+
+    #[test]
+    fn a_commit_takes_the_lock_before_it_puts_anything_in_place() {
+        let d = scratch();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (hash, r) = (h(1), rec(1));
+        let held = holder(&d.0, os::FileLock::Exclusive);
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), Duration::from_millis(100), not_now, read_locked, &mut err);
+        drop(held);
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+        assert!(staged.exists() && !entry.exists(), "the entry was put in place without the lock");
+        assert!(!d.0.join(ADVISORY_LOG).exists());
+        assert_eq!(fs::metadata(path(&d.0)).unwrap().len(), 0);
+        assert!(String::from_utf8(err).unwrap().starts_with("safedeps-core approvals: not committed: "));
+    }
+
+    #[test]
+    fn commits_of_one_hash_never_overlap_and_a_failed_one_leaves_the_next_whole() {
+        // A holds the lock and fails at its store line; B commits the same
+        // hash meanwhile. B waits, puts nothing in place until A is done, and
+        // its records stand at the end.
+        let d = scratch();
+        let (staged_a, entry) = stage(&d.0, 1, "entry of A");
+        let (staged_b, _) = stage(&d.0, 1, "entry of B");
+        let (hash, r) = (h(1), rec(1));
+        let (in_a, a_done) = (std::sync::Barrier::new(2), std::sync::atomic::AtomicBool::new(false));
+        std::thread::scope(|s| {
+            let b = s.spawn(|| {
+                in_a.wait();
+                let mut err = Vec::new();
+                let answer = commit(&d.0, &approval(1, &staged_b, &entry, &r, &hash), &mut err);
+                assert!(a_done.load(std::sync::atomic::Ordering::SeqCst), "B committed while A held the lock");
+                answer
+            });
+            let mut err = Vec::new();
+            let answer = commit_with(
+                &d.0,
+                &approval(1, &staged_a, &entry, &r, &hash),
+                LOCK_WAIT,
+                |file, l| {
+                    in_a.wait();
+                    std::thread::sleep(Duration::from_millis(300));
+                    assert!(staged_b.exists(), "B put its entry in place inside A's commit");
+                    a_done.store(true, std::sync::atomic::Ordering::SeqCst);
+                    efbig(file, l)
+                },
+                read_locked,
+                &mut err,
+            );
+            assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed));
+            assert_eq!(b.join().unwrap(), Answer::Approved);
+        });
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of B");
+        assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
+        let undone = format!("check approve-undone hash={} outcome=os-error-27", h(1));
+        assert_eq!(logged(&d.0), vec![record(1), undone, record(1)]);
+    }
+
+    #[test]
+    fn a_rename_that_fails_puts_nothing_in_place_and_takes_nothing_back() {
+        let d = scratch();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        fs::write(&entry, "an entry that was there").unwrap();
+        fs::remove_file(&staged).unwrap();
+        let (hash, r) = (h(1), rec(1));
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, not_now, read_locked, &mut err);
+        assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "an entry that was there");
+        assert!(!prev_of(&entry).exists(), "the second name of the entry that was there stayed");
+        assert!(logged(&d.0).is_empty());
+        assert!(String::from_utf8(err).unwrap().contains("could not be put in place"));
+    }
+
+    #[test]
+    fn an_approve_line_that_fails_takes_the_entry_back_unless_the_store_vouches() {
+        for vouched in [false, true] {
+            let d = scratch();
+            if vouched {
+                append(&d.0, &h(1), &rec(1)).unwrap();
+            }
+            fs::create_dir_all(d.0.join(ADVISORY_LOG)).unwrap();
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            let (hash, r) = (h(1), rec(1));
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, not_now, read_locked, &mut err);
+            let err = String::from_utf8(err).unwrap();
+            assert!(err.contains("the approve line could not be written"), "{err}");
+            if vouched {
+                assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Kept));
+                assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+                assert!(err.contains(&format!("safedeps: kept: the approvals store vouches for {}", h(1))), "{err}");
+            } else {
+                assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Removed));
+                assert!(!entry.exists());
+            }
+            assert_eq!(index(&d.0).unwrap().hashes, if vouched { vec![h(1)] } else { Vec::new() });
+        }
+    }
+
+    #[test]
+    fn a_take_back_where_the_store_vouches_puts_back_the_entry_that_stood_there() {
+        use std::os::unix::fs::MetadataExt;
+        // (where the commit fails, the store vouches) -> what stands at the end
+        for (at_store, vouched) in [(false, true), (true, true), (false, false), (true, false)] {
+            let d = scratch();
+            if vouched {
+                append(&d.0, &h(1), &rec(1)).unwrap();
+            }
+            let (earlier, entry) = stage(&d.0, 1, "the entry A approved");
+            fs::rename(&earlier, &entry).unwrap();
+            let before = fs::metadata(&entry).unwrap().ino();
+            // A commit that ended left its second name, holding other bytes.
+            fs::write(prev_of(&entry), "left by a commit that ended").unwrap();
+            if !at_store {
+                fs::create_dir_all(d.0.join(ADVISORY_LOG)).unwrap();
+            }
+            let (staged, _) = stage(&d.0, 1, "the entry B wrote");
+            let (hash, r) = (h(1), rec(1));
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, efbig, read_locked, &mut err);
+            let failure = if at_store { Failure::Store } else { Failure::LedgerWrite };
+            if vouched {
+                assert_eq!(answer, Answer::NotApproved(failure, Entry::Kept), "at_store={at_store}");
+                assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+                assert_eq!(fs::metadata(&entry).unwrap().ino(), before, "the entry put back is not the file that stood there");
+                assert!(String::from_utf8(err).unwrap().contains("the one that stood there before this check is back"));
+            } else {
+                assert_eq!(answer, Answer::NotApproved(failure, Entry::Removed), "at_store={at_store}");
+                assert!(!entry.exists());
+            }
+            assert!(!staged.exists() && !prev_of(&entry).exists(), "the commit left a file behind");
+        }
+        // A commit that approves replaces the entry, and keeps nothing aside.
+        let d = scratch();
+        let (earlier, entry) = stage(&d.0, 1, "the entry A approved");
+        fs::rename(&earlier, &entry).unwrap();
+        let (staged, _) = stage(&d.0, 1, "the entry B wrote");
+        let (hash, r) = (h(1), rec(1));
+        let answer = commit(&d.0, &approval(1, &staged, &entry, &r, &hash), &mut Vec::new());
+        assert_eq!(answer, Answer::Approved);
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry B wrote");
+        assert!(!prev_of(&entry).exists());
+        assert_eq!(prev_of(&entry).file_name().unwrap().to_str().unwrap(), format!(".{}.prev", ledger::filename(&h(1))));
+    }
+
+    #[test]
+    fn a_store_line_not_written_is_no_approval_whoever_vouches() {
+        // vouched: the store already vouches for the hash with another line.
+        // torn: the failed write left a piece of its own line.
+        for (vouched, torn) in [(false, false), (false, true), (true, false)] {
+            let d = scratch();
+            if vouched {
+                append(&d.0, &h(1), &rec(1)).unwrap();
+            }
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            let (hash, r) = (h(1), rec(1));
+            let mut err = Vec::new();
+            let answer = commit_with(
+                &d.0,
+                &approval(1, &staged, &entry, &r, &hash),
+                LOCK_WAIT,
+                |file, l| {
+                    if torn {
+                        let mut w: &fs::File = file;
+                        w.write_all(&l[..l.len() / 2]).unwrap();
+                    }
+                    efbig(file, l)
+                },
+                read_locked,
+                &mut err,
+            );
+            let err = String::from_utf8(err).unwrap();
+            assert!(err.starts_with(&format!("safedeps-core approvals: not written to {}: ", path(&d.0).display())), "{err}");
+            let how = "outcome=os-error-27";
+            if vouched {
+                assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Kept));
+                assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+                assert_eq!(logged(&d.0), vec![record(1), format!("check approve-kept hash={} {how}", h(1))]);
+            } else {
+                assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed));
+                assert!(!entry.exists());
+                assert_eq!(logged(&d.0), vec![record(1), format!("check approve-undone hash={} {how}", h(1))]);
+                assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: usize::from(torn) });
+            }
+        }
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_read_back_is_in_doubt_and_the_entry_goes() {
+        let d = scratch();
+        append(&d.0, &h(1), &rec(1)).unwrap();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (hash, r) = (h(1), rec(1));
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), LOCK_WAIT, efbig, |_| Err(io::Error::from_raw_os_error(5)), &mut err);
+        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Removed));
+        assert!(!entry.exists());
+        assert!(String::from_utf8(err).unwrap().contains("safedeps: in-doubt: the approvals store could not be read back"));
+        assert_eq!(logged(&d.0), vec![record(1), format!("check approve-in-doubt hash={} outcome=os-error-27", h(1))]);
+    }
+
+    #[test]
+    fn a_store_line_written_and_not_synced_is_an_approval_named_unsynced() {
+        let d = scratch();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (hash, r) = (h(1), rec(1));
+        let mut err = Vec::new();
+        let answer = commit_with(
+            &d.0,
+            &approval(1, &staged, &entry, &r, &hash),
+            LOCK_WAIT,
+            |file, l| write_then_sync(file, l, |_| Err(io::Error::from_raw_os_error(5))),
+            |_| panic!("an approval read the store back"),
+            &mut err,
+        );
+        assert_eq!(answer, Answer::Approved);
+        assert!(String::from_utf8(err).unwrap().starts_with(&format!("safedeps: unsynced: the approvals store line of {} was written and not synced (os-error-5).", h(1))));
+        assert_eq!(logged(&d.0), vec![record(1), format!("check approve-unsynced hash={} outcome=os-error-5", h(1))]);
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+        assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
+    }
+
+    #[test]
+    fn a_take_back_the_ledger_refuses_is_left_and_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let dir = entry.parent().unwrap().to_path_buf();
+        let (hash, r) = (h(1), rec(1));
+        let mut err = Vec::new();
+        let answer = commit_with(
+            &d.0,
+            &approval(1, &staged, &entry, &r, &hash),
+            LOCK_WAIT,
+            |file, l| {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+                efbig(file, l)
+            },
+            read_locked,
+            &mut err,
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Left));
+        assert!(entry.exists());
+        assert!(String::from_utf8(err).unwrap().contains(&format!("safedeps: undo-failed: the ledger entry {} could not be removed.", entry.display())));
+        assert_eq!(
+            logged(&d.0),
+            vec![
+                record(1),
+                format!("check approve-undone hash={} outcome=os-error-27", h(1)),
+                format!("check approve-undo-failed hash={} entry={}", h(1), entry.display()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_settle_takes_back_under_the_lock_and_is_in_doubt_where_the_store_vouches() {
+        // (store vouches, an entry at the path) -> answer, what is left, line
+        for (vouched, present) in [(false, true), (false, false), (true, true), (true, false)] {
+            let d = scratch();
+            if vouched {
+                append(&d.0, &h(1), &rec(1)).unwrap();
+            }
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            if present {
+                fs::rename(&staged, &entry).unwrap();
+            }
+            let mut err = Vec::new();
+            let answer = settle(&d.0, &h(1), &entry, "signal-9", &mut err);
+            let line = |word: &str| vec![format!("check approve-{word} hash={} outcome=signal-9", h(1))];
+            match (vouched, present) {
+                (false, _) => {
+                    assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed));
+                    assert!(!entry.exists());
+                    assert_eq!(logged(&d.0), line("undone"));
+                }
+                (true, true) => {
+                    assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Kept));
+                    assert!(entry.exists());
+                    assert_eq!(logged(&d.0), line("kept"));
+                }
+                (true, false) => {
+                    assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Removed));
+                    assert!(logged(&d.0).is_empty());
+                }
+            }
+            assert!(!held_elsewhere(&d.0));
+        }
+        // The commit kept the entry that stood there aside, and the settle puts
+        // it back where the store vouches.
+        let d = scratch();
+        append(&d.0, &h(1), &rec(1)).unwrap();
+        let (staged, entry) = stage(&d.0, 1, "the entry A approved");
+        fs::hard_link(&staged, prev_of(&entry)).unwrap();
+        fs::write(&entry, "the entry the ended commit wrote").unwrap();
+        let answer = settle(&d.0, &h(1), &entry, "signal-9", &mut Vec::new());
+        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Kept));
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "the entry A approved");
+        assert!(!prev_of(&entry).exists());
+        let d = scratch();
+        let held = holder(&d.0, os::FileLock::Exclusive);
+        let (_, entry) = stage(&d.0, 1, "entry of 1");
+        let mut err = Vec::new();
+        let answer = settle_with(&d.0, &h(1), &entry, "exit-1", Duration::from_millis(100), read_locked, &mut err);
+        drop(held);
+        assert_eq!(answer, Answer::NotApproved(Failure::InDoubt, Entry::Untouched));
+        assert!(String::from_utf8(err).unwrap().starts_with(&format!("safedeps: in-doubt: the commit of {} ended with exit-1", h(1))));
+    }
+
+    #[test]
+    fn the_commit_and_settle_command_lines() {
+        fn args(a: &[&str]) -> Vec<String> {
+            a.iter().map(|s| s.to_string()).collect()
+        }
+        let d = scratch();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (s, e) = (staged.to_str().unwrap(), entry.to_str().unwrap());
+        let (one, two) = (h(1), h(2));
+        let (h1, h2) = (one.as_str(), two.as_str());
+        let mut input = rec(1);
+        input.push(b'\n');
+        let other = d.0.join(ledger::filename(h1));
+        let elsewhere = d.0.join(".staged");
+        let refused: [(&[&str], &[u8]); 6] = [
+            (&["commit", "sha256:x", s, e], &input),
+            (&["commit", h2, s, e], &input),
+            (&["commit", h1, s, e], b"check approve-undone hash=x\n"),
+            (&["commit", h1, elsewhere.to_str().unwrap(), e], &input),
+            (&["commit", h1, s, other.to_str().unwrap()], &input),
+            (&["commit", h1, e, e], &input),
+        ];
+        for (a, input) in refused {
+            let (code, out, err) = run(&d.0, &args(a), input);
+            assert_eq!((code, out.is_empty()), (2, true), "{a:?}");
+            assert!(err.starts_with(b"safedeps-core approvals: not committed: "), "{a:?}");
+        }
+        assert!(!path(&d.0).exists() && !d.0.join(ADVISORY_LOG).exists() && staged.exists() && !entry.exists());
+        assert_eq!(run(&d.0, &args(&["commit", h1, s, e]), &input), (0, b"approved\n".to_vec(), Vec::new()));
+        assert_eq!(logged(&d.0), vec![record(1)]);
+        for ended in ["exit-", "signal-1234", "kill-9", "exit-x", "exit9", ""] {
+            let (code, out, _) = run(&d.0, &args(&["settle", h1, e, ended]), b"");
+            assert_eq!((code, out.is_empty()), (2, true), "{ended:?}");
+        }
+        assert_eq!(run(&d.0, &args(&["settle", h2, e, "signal-9"]), b"").0, 2);
+        let (code, out, err) = run(&d.0, &args(&["settle", h1, e, "signal-9"]), b"");
+        assert_eq!((code, String::from_utf8(out).unwrap()), (1, "not-approved approvals_store_in_doubt kept\n".to_string()));
+        assert!(String::from_utf8(err).unwrap().starts_with("safedeps: kept: "));
+        for bad in [&["commit", h1, s][..], &["settle", h1, e][..]] {
+            assert_eq!(run(&d.0, &args(bad), b""), (2, Vec::new(), USAGE.as_bytes().to_vec()), "{bad:?}");
+        }
     }
 
     #[test]

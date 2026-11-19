@@ -315,7 +315,14 @@ safedeps_ledger_check() {
   jq -c --arg hash "${expected_hash}" '{approved: true, reason: "hit", hash: $hash, spec: .}' <<< "${entry}"
 }
 
-safedeps_ledger_atomic_write() {
+# Writes the entry on stdin to a new file beside TARGET and prints the file's
+# path, or fails and leaves nothing. What it leaves is the entry whole and
+# valid (safedeps_ledger_validate_json), under a name no ledger reader lists:
+# it starts with a dot and does not end in .json. Nothing in the ledger changes
+# until the file is renamed into place: by safedeps_ledger_atomic_write, or by
+# an approval's commit under the approvals store lock (`safedeps-core
+# approvals commit`, sf_check_commit in bin/safedeps).
+safedeps_ledger_stage() {
   local target_path="$1"
   local target_dir
   local target_base
@@ -336,6 +343,15 @@ safedeps_ledger_atomic_write() {
     rm -f "${temp_path}"
     return 1
   }
+  printf '%s\n' "${temp_path}"
+}
+
+safedeps_ledger_atomic_write() {
+  local target_path="$1"
+  local temp_path
+
+  safedeps_ledger_init
+  temp_path=$(safedeps_ledger_stage "${target_path}") || return 1
   mv -f "${temp_path}" "${target_path}"
 }
 

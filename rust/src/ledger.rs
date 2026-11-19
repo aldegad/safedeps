@@ -80,7 +80,7 @@ pub fn hash(ecosystem: &str, package: &str, version: &str, context: &str) -> Str
     format!("sha256:{}", sha256::hex(text.as_bytes()))
 }
 
-fn filename(key: &str) -> String { format!("{}.json", key.replacen(':', "-", 1)) }
+pub(crate) fn filename(key: &str) -> String { format!("{}.json", key.replacen(':', "-", 1)) }
 
 const DIRECTORY_ENV: &str = "SAFEDEPS_LEDGER_DIR";
 const DIRECTORY_NAME: &str = "approved-specs";

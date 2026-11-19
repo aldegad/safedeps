@@ -367,24 +367,25 @@ sf_check_unavailable() {
 }
 
 # The same for an approval that could not be written (sf_check_commit names
-# why): every approval a report states is one the hook will find and the
-# approvals store vouches for. The caller removes its files and returns 4.
+# why): every approval a report states is one this check committed, the hook
+# will find, and the approvals store vouches for. A report never states one
+# another check made. The caller removes its files and returns 4.
 sf_check_not_written() {
   local ecosystem="$1" package="$2" range="$3" version="$4"
   local failure="${SF_CHECK_COMMIT_ERROR:-ledger_write_failed}" kind why
 
   case "${failure}" in
     core_missing) kind=core-missing why="an approval is written with the safedeps-core binary, which is missing" ;;
-    approvals_store_failed) kind=approvals-store why="the approvals store did not take the approval, so it was taken back" ;;
-    approvals_store_in_doubt) kind=approvals-store-in-doubt why="the approvals store could not be written or read back, so the approval was taken back" ;;
-    *) kind=ledger-write why="the ledger could not be written" ;;
+    approvals_store_failed) kind=approvals-store why="the approvals store did not take the approval" ;;
+    approvals_store_in_doubt) kind=approvals-store-in-doubt why="whether the approvals store took the approval is not known" ;;
+    *) kind=ledger-write why="the ledger entry or its advisory.log line could not be written" ;;
   esac
   sf_err "${package}@${version} cleared, but ${why} — not approved"
   sf_advisory_log "check fail-closed ${kind} ecosystem=${ecosystem} package=${package} version=${version}"
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
     sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${package}" "${range}" '{}' '{resolved_version:$version}' \
-      '{approved:false, error:$error} + (if $left == "1" then {ledger_entry_left:true} else {} end)' \
-      -n --arg version "${version}" --arg error "${failure}" --arg left "${SF_CHECK_COMMIT_LEFT}"
+      '{approved:false, error:$error} + (if $left == "1" then {ledger_entry_left:true} else {} end) + (if $kept == "1" then {ledger_entry_kept:true} else {} end)' \
+      -n --arg version "${version}" --arg error "${failure}" --arg left "${SF_CHECK_COMMIT_LEFT}" --arg kept "${SF_CHECK_COMMIT_KEPT}"
   fi
 }
 
@@ -445,90 +446,103 @@ sf_store_vouches() {
   return 2
 }
 
-# Takes back the ledger entry FILE an approval of HASH wrote. An entry that
-# stays is undo-failed: whatever it holds stays where the hook reads it, and no
-# approval stands behind it.
-sf_check_take_back() {
-  local hash="$1" file="$2"
-
-  # Where the ledger directory is not a directory, no entry can stand, and rm
-  # would answer that with a failure: there is nothing to take back.
-  if [[ ! -d "${file%/*}" ]] || rm -f -- "${file}"; then
-    [[ -e "${file}" || -L "${file}" ]] || return 0
-  fi
-  SF_CHECK_COMMIT_LEFT=1
-  sf_eprintf "safedeps: undo-failed: the ledger entry ${file} could not be removed. Whatever it holds stays where the hook reads it, and no approval stands behind it."
-  sf_advisory_log "check approve-undo-failed hash=${hash} entry=${file}" || true
-}
-
 # An approval is three records and a report. The ledger entry is what the hook
 # reads, the `check approve(...)` line in advisory.log is the record a person
 # reads, and the line in the approvals store is the record re-check and the
-# cache lookup read. They are written in that order, and the store line is the
-# commit point: a failure before it takes the entry back. The binary that
-# writes the store is found before anything is written, so a missing one
-# leaves nothing (core-missing). advisory.log is only appended to, so an
-# approval taken back after its line is there gets a `check approve-undone`
-# line after it. The caller makes the report first, calls this, and only
-# prints after it.
+# cache lookup read. This CLI makes the entry and validates it in a staged file
+# beside the entry's path (safedeps_ledger_stage). The core commits it
+# (`safedeps-core approvals commit`, rust/src/approvals.rs): under the store
+# lock it renames the staged file into place, writes the approve line, then
+# the store line, which is the commit point, and takes the entry back when one
+# of them fails. The lock is held for all of it, take-back included, so two
+# commits never overlap. Where the store vouches for the hash, whoever's line
+# vouches, a take-back puts back the entry that stood at the path before the
+# commit, so a failed check never removes or rewrites what another check
+# approved. The binary is found before anything is staged, so a missing
+# one leaves nothing (core-missing). The caller makes the report first, calls
+# this, and only prints after it.
 #
-# Every answer of the store's append but "written" is decided by reading the
-# store back, the read the cache lookup and re-check make. So a check never
-# answers that it failed for an approval the store vouches for, nor that it
-# approved one the store does not. What that cannot rule out has a name, on
-# stderr and in advisory.log:
-#   unsynced     the append did not answer "written", and the store vouches for
-#                the hash: the approval stands, and nothing confirms that its
-#                line is on the disk
-#   in-doubt     the append did not answer "written", and the store could not
-#                be read back: the approval is taken back, and the store may
-#                still hold its line
-#   undo-failed  a ledger entry that was to be taken back stays
-#                (sf_check_take_back)
-# SF_CHECK_COMMIT_ERROR names a failure for the report, and SF_CHECK_COMMIT_LEFT
-# is 1 when the ledger entry stayed.
+# The commit answers `approved`, or `not-approved <failure> <entry>`: the
+# failure for the report, and what is at the entry's path. A commit that
+# answered neither ended before it answered. Where its staged file is still
+# here it renamed nothing, so nothing was written. Otherwise it is settled
+# (`safedeps-core approvals settle`): under the lock, the same take-back, and
+# advisory.log is told how the commit ended. What the commit cannot rule out has a name, on
+# stderr and in advisory.log: unsynced, kept, in-doubt, undo-failed
+# (rust/src/approvals.rs). Rotation of advisory.log is not work for the store
+# lock, so it runs before the commit.
+# SF_CHECK_COMMIT_ERROR names a failure for the report. SF_CHECK_COMMIT_LEFT is
+# 1 when an entry that was to go stayed (undo-failed), and SF_CHECK_COMMIT_KEPT
+# is 1 when the entry stays because the store vouches for the hash.
 #   sf_check_commit HASH ENTRY RECORD
 SF_CHECK_COMMIT_ERROR=""
 SF_CHECK_COMMIT_LEFT=0
+SF_CHECK_COMMIT_KEPT=0
 sf_check_commit() {
   local hash="$1" entry="$2" record="$3"
-  local ledger_file rc=0 vouched=0 outcome
+  local ledger_file staged answer rc=0 ended
 
   SF_CHECK_COMMIT_ERROR="ledger_write_failed"
   SF_CHECK_COMMIT_LEFT=0
+  SF_CHECK_COMMIT_KEPT=0
   if ! sf_core; then
     SF_CHECK_COMMIT_ERROR="core_missing"
     sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. An approval is written with it, so nothing is approved."
     return 1
   fi
   ledger_file=$(safedeps_ledger_path_for_hash "${hash}") || return 1
-  # A write that answered failure is taken back too: its rename may have landed.
-  if ! safedeps_ledger_atomic_write "${ledger_file}" <<< "${entry}" || ! sf_advisory_log "${record}"; then
-    sf_check_take_back "${hash}" "${ledger_file}"
+  staged=$(safedeps_ledger_stage "${ledger_file}" <<< "${entry}") || return 1
+  safedeps_advisory_log_rotate_once
+  answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals commit "${hash}" "${staged}" "${ledger_file}" <<< "${record}") || rc=$?
+  [[ "${rc}" -ne 0 || "${answer}" != approved ]] || return 0
+  [[ "${rc}" -eq 1 ]] && sf_check_commit_answer "${answer}" && { rm -f -- "${staged}" || true; return 1; }
+  if [[ "${rc}" -gt 128 ]]; then ended="signal-$((rc - 128))"; else ended="exit-${rc}"; fi
+  # The rename is the commit's first change and it is atomic, so a staged file
+  # still here is a commit that put nothing in place and wrote nothing.
+  if [[ -e "${staged}" || -L "${staged}" ]]; then
+    rm -f -- "${staged}" || true
+    SF_CHECK_COMMIT_ERROR="approvals_store_failed"
+    sf_eprintf "safedeps: not committed: the commit of ${hash} ended with ${ended} before it put its entry in place, so nothing was written."
     return 1
   fi
-  SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals append "${hash}" <<< "${record}" || rc=$?
-  [[ "${rc}" -ne 0 ]] || return 0
-  if [[ "${rc}" -gt 128 ]]; then outcome="signal-$((rc - 128))"; else outcome="exit-${rc}"; fi
-  sf_store_vouches "${hash}" || vouched=$?
-  case "${vouched}" in
-    0)
-      sf_eprintf "safedeps: unsynced: the approvals store append answered ${outcome}, and the store vouches for ${hash}. The approval stands, and nothing confirms that its line is on the disk."
-      sf_advisory_log "check approve-unsynced hash=${hash} outcome=${outcome}" || true
-      return 0
-      ;;
-    1)
-      SF_CHECK_COMMIT_ERROR="approvals_store_failed"
-      sf_advisory_log "check approve-undone hash=${hash} outcome=${outcome}" || true
-      ;;
-    *)
-      SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
-      sf_eprintf "safedeps: in-doubt: the approvals store append answered ${outcome}, and the store could not be read back. The approval of ${hash} is taken back, and the store may still hold its line."
-      sf_advisory_log "check approve-in-doubt hash=${hash} outcome=${outcome}" || true
-      ;;
-  esac
-  sf_check_take_back "${hash}" "${ledger_file}"
+  rc=0
+  answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals settle "${hash}" "${ledger_file}" "${ended}") || rc=$?
+  if [[ "${rc}" -eq 1 ]] && sf_check_commit_answer "${answer}"; then
+    # A settle that took nothing back could not take the lock: what the dead
+    # commit put in place may still be there.
+    [[ "${answer}" == *" untouched" ]] || return 1
+  else
+    SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
+    sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended with ${ended}, and it could not be settled."
+  fi
+  if [[ -e "${ledger_file}" || -L "${ledger_file}" ]]; then
+    SF_CHECK_COMMIT_LEFT=1
+    sf_eprintf "safedeps: undo-failed: the ledger entry ${ledger_file} could not be taken back. It stays where the hook reads it, and whether an approval stands behind it is not known."
+    sf_advisory_log "check approve-undo-failed hash=${hash} entry=${ledger_file}" || true
+  fi
   return 1
+}
+
+# A commit's or a settle's `not-approved <failure> <entry>`, read into
+# SF_CHECK_COMMIT_*. Anything else is no answer, and nothing is read.
+sf_check_commit_answer() {
+  local failure entry
+
+  [[ "$1" == "not-approved "* ]] || return 1
+  failure=${1#not-approved }
+  entry=${failure#* }
+  failure=${failure%% *}
+  case "${failure}" in
+    ledger_write_failed|approvals_store_failed|approvals_store_in_doubt) ;;
+    *) return 1 ;;
+  esac
+  case "${entry}" in
+    untouched|removed) ;;
+    kept) SF_CHECK_COMMIT_KEPT=1 ;;
+    left) SF_CHECK_COMMIT_LEFT=1 ;;
+    *) return 1 ;;
+  esac
+  SF_CHECK_COMMIT_ERROR="${failure}"
 }
 
 # The closure source as an approval's project context, or nothing when the
