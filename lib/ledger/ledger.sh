@@ -319,9 +319,10 @@ safedeps_ledger_check() {
 # path, or fails and leaves nothing. What it leaves is the entry whole and
 # valid (safedeps_ledger_validate_json), under a name no ledger reader lists:
 # it starts with a dot and does not end in .json. Nothing in the ledger changes
-# until the file is renamed into place: by safedeps_ledger_atomic_write, or by
-# an approval's commit under the approvals store lock (`safedeps-core
-# approvals commit`, sf_check_commit in bin/safedeps).
+# until the file is renamed into place: by safedeps_ledger_atomic_write, or,
+# under the approvals store lock, by an approval's commit or a revoke
+# (`safedeps-core approvals commit` and `revoke`, sf_check_commit and
+# sf_ledger_revoke in bin/safedeps).
 safedeps_ledger_stage() {
   local target_path="$1"
   local target_dir
@@ -690,28 +691,18 @@ safedeps_ledger_effect_check() {
   return 1
 }
 
-safedeps_ledger_revoke() {
-  local ecosystem="$1"
-  local package_name="$2"
-  local version="$3"
-  local reason="${4:-revoked}"
-  local context_hash="${5:-}"
-  local ledger_file
+# The entry on stdin, revoked now for REASON. Nothing is written here: a
+# revoke is put in place under the approvals store lock (sf_ledger_revoke in
+# bin/safedeps).
+safedeps_ledger_render_revoked() {
+  local reason="${1:-revoked}"
   local revoked_at
-  local entry
-
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
-  [[ -f "${ledger_file}" ]] || return 1
-  safedeps_ledger_validate_json "${ledger_file}" || return 1
 
   revoked_at=$(safedeps_ledger_now_iso) || return 1
-  entry=$(jq \
+  jq \
     --arg revoked_at "${revoked_at}" \
     --arg reason "${reason}" \
-    '. + {revoked_at: $revoked_at, revoked_reason: $reason, expires_at: $revoked_at}' \
-    "${ledger_file}") || return 1
-  safedeps_ledger_atomic_write "${ledger_file}" <<< "${entry}" || return 1
-  printf '%s\n' "${entry}"
+    '. + {revoked_at: $revoked_at, revoked_reason: $reason, expires_at: $revoked_at}'
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -742,15 +733,8 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       [[ "$#" -eq 3 ]] || { printf 'usage: %s effect-check <ecosystem> <package> <version>\n' "$0" >&2; exit 2; }
       safedeps_ledger_effect_check "$@"
       ;;
-    revoke)
-      if [[ "$#" -lt 3 || "$#" -gt 4 ]]; then
-        printf 'usage: %s revoke <ecosystem> <package> <version> [reason]\n' "$0" >&2
-        exit 2
-      fi
-      safedeps_ledger_revoke "$@"
-      ;;
     *)
-      printf 'usage: %s {hash|path|check|effect-check|approve|revoke} ...\n' "$0" >&2
+      printf 'usage: %s {hash|path|check|effect-check|approve} ...\n' "$0" >&2
       exit 2
       ;;
   esac

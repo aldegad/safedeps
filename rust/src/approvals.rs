@@ -36,46 +36,75 @@
 //! holds past LOCK_WAIT is an error: nothing is written or read without the
 //! lock.
 //!
+//! The same lock orders every write of a ledger entry an approval stands on:
+//! a commit, a settle and a revoke of an entry each run under it from their
+//! first change to their last. So no two of them overlap, whatever entry each
+//! writes, and a reader of the store never sees an entry whose store line is
+//! still to come. In each the CLI makes the entry's bytes and validates them
+//! in a staged file beside the entry's path; this module only renames that
+//! file into place and, on a take-back, removes it or puts back the file that
+//! stood there. It never builds or reads an entry's bytes, so the ledger's
+//! format keeps one writer, the CLI. That is why the CLI stages and the core
+//! renames: the bytes are the CLI's, and the order of the writes is the
+//! lock's.
+//!
 //! The commit. An approval is three records: the ledger entry the hook reads,
 //! the `check approve(...)` line in advisory.log a person reads, and the line
 //! here that re-check and the cache lookup read. `commit` writes all three for
-//! `safedeps check`, and it holds the store lock from before the first until
-//! after the last, take-back included. So two commits never overlap, whatever
-//! hash each approves, and a reader never sees an entry whose store line is
-//! still to come. The CLI makes the entry and validates it in a staged file
-//! beside the entry's path; the commit only renames that file into place and,
-//! on a take-back, removes it. It never builds or reads an entry's bytes, so
-//! the ledger's format keeps one writer, the CLI.
+//! `safedeps check`. Under the lock, in this order: what stands at the path,
+//! kept under a second name (below); the rename; the approve line; the store
+//! line. The store line is the commit point. A rename that fails puts nothing
+//! in place, so it takes nothing back.
 //!
-//! Under the lock, in this order: the entry already at the path, if there is
-//! one, kept aside under a second name; the rename; the approve line; the
-//! store line. The store line is the commit point. A rename that fails puts
-//! nothing in place, so it takes nothing back. A failure after the rename
-//! takes the entry back, and the store read under the same lock decides how.
-//! Where the store vouches for the hash, whoever's line it is, the entry that
-//! stood at the path before this commit is put back, the same file, so a
-//! failed check never takes away or rewrites an approval another check made
-//! and reported, a revoked entry included. Where nothing stood there, this
-//! commit's entry stays: no entry the store vouches for is removed (`kept`).
-//! Where the store does not vouch, the entry is removed. Where the store
-//! cannot be read, the entry is removed and the answer is `in-doubt`: it lets
-//! no entry stand that nothing may vouch for.
+//! A failure after the rename takes the path back to what it was before the
+//! commit. The commit's own entry goes. The entry that stood at the path
+//! before it, if one did, comes back, the same file, unless a read of the
+//! store under the same lock says the store does not vouch for the hash: then
+//! that entry is no approval, and it goes too. A store that cannot be read
+//! does not say that, so the entry comes back, and the answer is `in-doubt`.
+//! So a failed check never takes away or rewrites an entry another check made,
+//! a revoked one included, and it leaves no entry of its own, where the store
+//! vouches for the hash or not: an entry of a check that answered failure is
+//! no approval to find.
 //!
-//! An append answers one of three things: Ok, and the two of `Appended`.
+//! The second name. Before the rename the commit keeps what stands at the
+//! path: the entry itself, as a second name for the same file
+//! (`.<file>.prev`), or, where nothing stands there, an empty file that says
+//! so (`.<file>.none`). Both start with a dot and do not end in `.json`, so no
+//! ledger reader lists them. One of the two is there from before the rename
+//! until the commit has answered, and only while that commit holds the lock
+//! or after it died holding it.
+//!
+//! A store write answers one of three things: Ok, and the two of `Appended`.
 //! Written: the line is in the store and synced. Not written: the line is not
 //! there, or only a torn piece of it is, which the next writer seals as one
 //! broken line. Written, not synced: every byte of the line landed and a reader
 //! sees it, but the sync failed, so nothing says it is on the disk. A commit
-//! knows which of the three its own append answered. So it never takes a line
+//! knows which of the three its own write answered. So it never takes a line
 //! another check wrote for its own: not written is a failure, whatever the
 //! store vouches for. Written, not synced is an approval that stands, named
 //! `unsynced`.
 //!
-//! A commit whose process ended before it answered took its lock with it, and
-//! the CLI settles it (`settle`): under the lock, the same take-back, with
-//! advisory.log told how the commit ended. A store that vouches for the hash
-//! then may vouch with the commit's own line or another's, and nothing tells
-//! which, so the check answers that it is in doubt and the entry stays.
+//! The settle. A commit whose process ended before it answered took its lock
+//! with it, and the CLI settles it (`settle`): under the lock, with
+//! advisory.log told how the commit ended. A second name beside the entry says
+//! the commit died before it answered, so the entry at the path is its own,
+//! and the settle takes it back as the commit would have. A store that then
+//! vouches for the hash may vouch with the commit's own line, and nothing
+//! tells which, so the check answers that it is in doubt. No second name says
+//! the commit's entry is not the one at the path: the commit finished first,
+//! or a later commit or revoke of the same entry has run since. The settle
+//! then takes nothing back.
+//!
+//! The revoke. A revoke rewrites an entry with the fields that revoke it. The
+//! CLI reads the entry through a second name it made for it (`seen`), and
+//! stages the revoked entry beside the path. `revoke` puts it in place only
+//! where the entry at the path is still the file the CLI read. Where it is
+//! not, a commit or a settle of the same entry ran between the read and the
+//! lock, and the answer is `changed`: the CLI reads the entry again. A revoke
+//! that puts its entry in place removes a second name a commit that died left
+//! beside it: the entry that name speaks of is the one the revoke replaced, so
+//! no settle may take the revoked entry back.
 //!
 //! The torn-line seal. A write that did not finish leaves a last line with no
 //! newline: its process died, or the write failed after some of its bytes
@@ -107,7 +136,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::{
         ffi::OsStrExt,
-        fs::{DirBuilderExt, FileExt, OpenOptionsExt},
+        fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
     time::Duration,
@@ -210,10 +239,10 @@ fn open_for_append(dir: &Path) -> io::Result<fs::File> {
     regular(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir))?)
 }
 
-/// Why an append did not answer written. `NotWritten`: the line is not in the
-/// store, or a torn piece of it is, which the next writer seals as one broken
-/// line. `Unsynced`: the whole line is in the store and a reader sees it, but
-/// the sync failed.
+/// Why a store write did not answer written. `NotWritten`: the line is not in
+/// the store, or a torn piece of it is, which the next writer seals as one
+/// broken line. `Unsynced`: the whole line is in the store and a reader sees
+/// it, but the sync failed.
 #[derive(Debug)]
 pub enum Appended {
     NotWritten(io::Error),
@@ -248,26 +277,6 @@ fn write_then_sync(file: &fs::File, lines: &[u8], sync: impl FnOnce(&fs::File) -
     let mut f: &fs::File = file;
     f.write_all(&out)?;
     sync(file).map_err(Appended::Unsynced)
-}
-
-/// Records one approval `safedeps check` made: the ledger entry `hash`, and
-/// `record`, its approve line as advisory.log gets it. Ok only once the line
-/// is in the store and synced.
-pub fn append(dir: &Path, hash: &str, record: &[u8]) -> Result<(), Appended> {
-    append_within(dir, hash, record, LOCK_WAIT)
-}
-
-fn append_within(dir: &Path, hash: &str, record: &[u8], wait: Duration) -> Result<(), Appended> {
-    if !is_hash(hash) {
-        return Err(invalid("the hash is not sha256: and 64 lowercase hex digits").into());
-    }
-    if !record.starts_with(RECORD_PREFIX) {
-        return Err(invalid("the record is not an approval (it does not start with `check approve(`)").into());
-    }
-    let at = os::utc_stamp(os::wall(os::WallRole::ApprovalRecord).seconds());
-    let file = open_for_append(dir)?;
-    os::flock_within(&file, os::FileLock::Exclusive, wait)?;
-    write_locked(&file, &line(&at, hash, Via::Check, record))
 }
 
 /// What the store vouches for: each hash once, in the order of its first
@@ -347,15 +356,20 @@ const ENOTDIR: i32 = 20;
 /// What a commit that did not approve left at the ledger entry's path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Entry {
-    /// The commit put nothing in place, and it removed nothing.
+    /// The commit put nothing in place, and it removed nothing. A settle says
+    /// it where no second name is left: nothing of the commit is left to take
+    /// back.
     Untouched,
-    /// No entry is at the path after the take-back.
+    /// The commit's entry is gone, and no entry is at the path.
     Removed,
-    /// An entry is at the path and stays, because the store vouches for the
-    /// hash.
-    Kept,
+    /// The commit's entry is gone, and the entry that stood at the path before
+    /// it is back, the same file.
+    Restored,
     /// An entry was to go and is still at the path: undo-failed.
     Left,
+    /// A settle could not take the store lock: what the commit put in place
+    /// may still be there.
+    Unsettled,
 }
 
 impl Entry {
@@ -363,8 +377,9 @@ impl Entry {
         match self {
             Self::Untouched => "untouched",
             Self::Removed => "removed",
-            Self::Kept => "kept",
+            Self::Restored => "restored",
             Self::Left => "left",
+            Self::Unsettled => "unsettled",
         }
     }
 }
@@ -423,14 +438,19 @@ fn entry_for(hash: &str, entry: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// An approval a commit acts on. The staged file sits in the entry's own
-/// directory, so the rename never leaves it.
+/// A file the CLI made beside the entry: in the entry's own directory, so a
+/// rename never leaves it, and not the entry itself.
+fn beside(file: &Path, entry: &Path) -> bool {
+    file.file_name().is_some() && file.parent() == entry.parent() && file != entry
+}
+
+/// An approval a commit acts on.
 fn checked(a: &Approval) -> io::Result<()> {
     entry_for(a.hash, a.entry)?;
     if !a.record.starts_with(RECORD_PREFIX) {
         return Err(invalid("the record is not an approval (it does not start with `check approve(`)"));
     }
-    if a.staged.file_name().is_none() || a.staged.parent() != a.entry.parent() || a.staged == a.entry {
+    if !beside(a.staged, a.entry) {
         return Err(invalid("the staged entry is not a file beside the entry's path"));
     }
     Ok(())
@@ -476,90 +496,137 @@ fn log_now(log: &Path, text: String) {
     let _ = log_line(log, &at, text.as_bytes());
 }
 
-/// The store, opened and locked for a commit or a settle. The lock goes with
-/// the file.
+/// The store, opened and locked for a commit, a settle or a revoke. The lock
+/// goes with the file.
 fn locked(dir: &Path, wait: Duration) -> io::Result<fs::File> {
     let file = open_for_append(dir)?;
     os::flock_within(&file, os::FileLock::Exclusive, wait)?;
     Ok(file)
 }
 
-/// The second name a commit keeps the entry already at the path under, in the
-/// entry's own directory: it starts with a dot and does not end in `.json`, so
-/// no ledger reader lists it.
-fn prev_of(entry: &Path) -> PathBuf {
+/// `.<file><suffix>` in the entry's own directory: a name that starts with a
+/// dot and does not end in `.json`, so no ledger reader lists it.
+fn second_name(entry: &Path, suffix: &str) -> PathBuf {
     let mut name = std::ffi::OsString::from(".");
     name.push(entry.file_name().unwrap_or_default());
-    name.push(".prev");
+    name.push(suffix);
     entry.with_file_name(name)
 }
 
-/// Under the lock, before the rename: the entry at the path, if there is one,
-/// kept aside as a second name for the same file, so a take-back can put it
-/// back as it was. A second name a commit that ended left is removed first.
-fn keep_prev(entry: &Path, prev: &Path) -> io::Result<()> {
-    match fs::remove_file(prev) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
+/// The second name of the entry that stood at the path before a commit.
+fn prev_of(entry: &Path) -> PathBuf {
+    second_name(entry, ".prev")
+}
+
+/// The empty file that says nothing stood at the path before a commit.
+fn none_of(entry: &Path) -> PathBuf {
+    second_name(entry, ".none")
+}
+
+fn remove_if_there(p: &Path) -> io::Result<()> {
+    match fs::remove_file(p) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
-    match fs::hard_link(entry, prev) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+}
+
+fn there(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok()
+}
+
+/// Under the lock, before the rename: what stands at the path, kept under a
+/// second name. The entry, as a second name for the same file, so a take-back
+/// can put it back as it was; or, where no entry stands there, the empty file
+/// that says so. The second names a commit that ended left are removed first.
+fn keep_before(entry: &Path) -> io::Result<()> {
+    let (prev, none) = (prev_of(entry), none_of(entry));
+    remove_if_there(&prev)?;
+    remove_if_there(&none)?;
+    match fs::hard_link(entry, &prev) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&none).map(drop)
+        }
         r => r,
     }
 }
 
-/// The take-back of `entry`, under the store lock `file` holds. The store,
-/// read through `file`, decides. It vouches for `hash`: the entry kept aside
-/// at `prev` is put back, or, where none was, the entry at the path stays
-/// (`Kept`). It does not, or it cannot be read: the entry is removed, and the
-/// one kept aside goes with it, as the rename already took it from the path.
-/// `ended` says how the commit ended where advisory.log holds its approve line
-/// or may: the take-back then says there what it did. Returns what is left at
-/// the path, and whether the store could be read.
+/// The commit is over: neither second name is wanted.
+fn forget_before(entry: &Path) {
+    let _ = fs::remove_file(prev_of(entry));
+    let _ = fs::remove_file(none_of(entry));
+}
+
+/// Who a take-back tells in advisory.log how its commit ended.
+#[derive(Clone, Copy)]
+enum Told<'a> {
+    /// No one: the commit's approve line was not written.
+    Not,
+    /// The commit itself, whose own store line was not written: its approval
+    /// is undone, whoever's line the store holds.
+    Commit(&'a str),
+    /// A settle, which cannot tell whether a line the store holds is the
+    /// commit's own: where the store vouches, the approval is in doubt.
+    Settle(&'a str),
+}
+
+impl Told<'_> {
+    fn line(self, hash: &str, vouched: &io::Result<bool>) -> Option<String> {
+        let (how, doubt) = match self {
+            Self::Not => return None,
+            Self::Commit(how) => (how, vouched.is_err()),
+            Self::Settle(how) => (how, !matches!(vouched, Ok(false))),
+        };
+        Some(format!("check approve-{} hash={hash} outcome={how}", if doubt { "in-doubt" } else { "undone" }))
+    }
+}
+
+/// The take-back of a commit's entry at `entry`, under the store lock `file`
+/// holds: the path goes back to what it was before the commit. The commit's
+/// own entry goes. The entry kept aside at the second name, if one stood
+/// there, comes back, the same file, unless the store, read through `file`,
+/// does not vouch for `hash`: then it is no approval, and it goes too. A store
+/// that cannot be read does not say that, so the entry that stood there comes
+/// back. `told` says what advisory.log is told. Returns what is left at the
+/// path, and the store's answer.
 fn take_back(
     file: &fs::File,
     hash: &str,
     entry: &Path,
     read: impl FnOnce(&fs::File) -> io::Result<Index>,
-    ended: Option<&str>,
+    told: Told<'_>,
     log: &Path,
     err: &mut Vec<u8>,
-) -> (Entry, bool) {
-    let prev = prev_of(entry);
+) -> (Entry, io::Result<bool>) {
+    let (prev, none) = (prev_of(entry), none_of(entry));
     let vouched = read(file).map(|ix| ix.hashes.iter().any(|h| h == hash));
-    match &vouched {
-        Ok(true) => {
-            let put_back = fs::symlink_metadata(&prev).is_ok() && fs::rename(&prev, entry).is_ok();
-            if !put_back && fs::symlink_metadata(entry).is_err() {
-                return (Entry::Removed, true);
+    if let Err(e) = &vouched {
+        note(err, format!("safedeps: in-doubt: the approvals store could not be read back ({e}). The approval of {hash} is taken back, and the store may vouch for it."));
+    }
+    if let Some(l) = told.line(hash, &vouched) {
+        log_now(log, l);
+    }
+    if !matches!(vouched, Ok(false)) && there(&prev) {
+        match fs::rename(&prev, entry) {
+            Ok(()) => {
+                let _ = fs::remove_file(&none);
+                return (Entry::Restored, vouched);
             }
-            let which = if put_back { "the one that stood there before this check is back" } else { "this check's stays" };
-            note(err, format!("safedeps: kept: the approvals store vouches for {hash}, so the ledger entry {} is not removed: {which}. This check does not report it as its approval.", entry.display()));
-            if let Some(how) = ended {
-                log_now(log, format!("check approve-kept hash={hash} outcome={how}"));
-            }
-            return (Entry::Kept, true);
-        }
-        Ok(false) => {
-            if let Some(how) = ended {
-                log_now(log, format!("check approve-undone hash={hash} outcome={how}"));
-            }
-        }
-        Err(e) => {
-            note(err, format!("safedeps: in-doubt: the approvals store could not be read back ({e}). The approval of {hash} is taken back, and the store may vouch for it."));
-            if let Some(how) = ended {
-                log_now(log, format!("check approve-in-doubt hash={hash} outcome={how}"));
+            Err(e) => {
+                note(err, format!("safedeps: undo-failed: the ledger entry that stood at {} before this check could not be put back from {} ({e}). This check's entry stays where the hook reads it, and no approval stands behind it.", entry.display(), prev.display()));
+                log_now(log, format!("check approve-undo-failed hash={hash} entry={}", entry.display()));
+                return (Entry::Left, vouched);
             }
         }
     }
     let _ = fs::remove_file(entry);
     let _ = fs::remove_file(&prev);
+    let _ = fs::remove_file(&none);
     match fs::symlink_metadata(entry) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(ENOTDIR) => (Entry::Removed, vouched.is_ok()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(ENOTDIR) => (Entry::Removed, vouched),
         _ => {
             note(err, format!("safedeps: undo-failed: the ledger entry {} could not be removed. Whatever it holds stays where the hook reads it, and no approval stands behind it.", entry.display()));
             log_now(log, format!("check approve-undo-failed hash={hash} entry={}", entry.display()));
-            (Entry::Left, vouched.is_ok())
+            (Entry::Left, vouched)
         }
     }
 }
@@ -567,7 +634,7 @@ fn take_back(
 /// Commits one approval for `safedeps check`: under the store lock, the
 /// rename of the staged entry, the approve line in advisory.log and the store
 /// line, and the take-back when one of them fails. What it cannot rule out it
-/// names on `err`: `unsynced`, `kept`, `in-doubt`, `undo-failed`.
+/// names on `err`: `unsynced`, `in-doubt`, `undo-failed`.
 pub fn commit(dir: &Path, a: &Approval, err: &mut Vec<u8>) -> Answer {
     commit_with(dir, a, LOCK_WAIT, write_locked, read_locked, err)
 }
@@ -588,13 +655,13 @@ fn commit_with(
         }
     };
     // From here to the answer the store lock is held. It goes with `file`.
-    let prev = prev_of(a.entry);
-    if let Err(e) = keep_prev(a.entry, &prev) {
-        note(err, format!("safedeps-core approvals: not committed: the ledger entry {} could not be kept aside at {}: {e}", a.entry.display(), prev.display()));
+    if let Err(e) = keep_before(a.entry) {
+        forget_before(a.entry);
+        note(err, format!("safedeps-core approvals: not committed: what stands at the ledger entry {} could not be kept aside: {e}", a.entry.display()));
         return Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched);
     }
     if let Err(e) = fs::rename(a.staged, a.entry) {
-        let _ = fs::remove_file(&prev);
+        forget_before(a.entry);
         note(err, format!("safedeps-core approvals: not committed: the ledger entry {} could not be put in place: {e}", a.entry.display()));
         return Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched);
     }
@@ -602,16 +669,16 @@ fn commit_with(
     let log = dir.join(ADVISORY_LOG);
     if let Err(e) = log_line(&log, &at, a.record) {
         note(err, format!("safedeps-core approvals: not committed: the approve line could not be written to {}: {e}", log.display()));
-        let (entry, _) = take_back(&file, a.hash, a.entry, read, None, &log, err);
+        let (entry, _) = take_back(&file, a.hash, a.entry, read, Told::Not, &log, err);
         return Answer::NotApproved(Failure::LedgerWrite, entry);
     }
     match write(&file, &line(&at, a.hash, Via::Check, a.record)) {
         Ok(()) => {
-            let _ = fs::remove_file(&prev);
+            forget_before(a.entry);
             Answer::Approved
         }
         Err(Appended::Unsynced(e)) => {
-            let _ = fs::remove_file(&prev);
+            forget_before(a.entry);
             let how = outcome(&e);
             note(err, format!("safedeps: unsynced: the approvals store line of {} was written and not synced ({how}). The approval stands, and nothing confirms that its line is on the disk.", a.hash));
             log_now(&log, format!("check approve-unsynced hash={} outcome={how}", a.hash));
@@ -620,18 +687,18 @@ fn commit_with(
         Err(Appended::NotWritten(e)) => {
             note(err, format!("safedeps-core approvals: not written to {}: {e}", path(dir).display()));
             let how = outcome(&e);
-            let (entry, read) = take_back(&file, a.hash, a.entry, read, Some(how.as_str()), &log, err);
-            Answer::NotApproved(if read { Failure::Store } else { Failure::InDoubt }, entry)
+            let (entry, vouched) = take_back(&file, a.hash, a.entry, read, Told::Commit(how.as_str()), &log, err);
+            Answer::NotApproved(if vouched.is_ok() { Failure::Store } else { Failure::InDoubt }, entry)
         }
     }
 }
 
 /// Settles a commit whose process ended (`ended`, `exit-N` or `signal-N`)
-/// after it renamed its entry into place and before it answered: under the
-/// store lock, the commit's take-back. The CLI asks only where the staged file
-/// is gone, so the rename happened. A store that vouches for the hash may
-/// vouch with the commit's own line, so that answer is in doubt, and the
-/// entry is not removed.
+/// after it renamed its entry into place and before it answered. The CLI asks
+/// only where the staged file is gone, so the rename happened. Under the
+/// store lock: where a second name is left beside the entry, the commit's
+/// take-back; where none is, nothing. A store that vouches for the hash may
+/// vouch with the commit's own line, so that answer is in doubt.
 pub fn settle(dir: &Path, hash: &str, entry: &Path, ended: &str, err: &mut Vec<u8>) -> Answer {
     settle_with(dir, hash, entry, ended, LOCK_WAIT, read_locked, err)
 }
@@ -649,12 +716,99 @@ fn settle_with(
         Ok(f) => f,
         Err(e) => {
             note(err, format!("safedeps: in-doubt: the commit of {hash} ended with {ended}, and {} could not be opened and locked to settle it: {e}", path(dir).display()));
-            return Answer::NotApproved(Failure::InDoubt, Entry::Untouched);
+            return Answer::NotApproved(Failure::InDoubt, Entry::Unsettled);
         }
     };
-    let (left, read) = take_back(&file, hash, entry, read, Some(ended), &dir.join(ADVISORY_LOG), err);
-    let failure = if read && left != Entry::Kept { Failure::Store } else { Failure::InDoubt };
-    Answer::NotApproved(failure, left)
+    let log = dir.join(ADVISORY_LOG);
+    let failure = |vouched: &io::Result<bool>| if matches!(vouched, Ok(false)) { Failure::Store } else { Failure::InDoubt };
+    if !there(&prev_of(entry)) && !there(&none_of(entry)) {
+        let vouched = read(&file).map(|ix| ix.hashes.iter().any(|h| h == hash));
+        if let Err(e) = &vouched {
+            note(err, format!("safedeps: in-doubt: the approvals store could not be read back ({e}), and whether it vouches for {hash} is not known."));
+        }
+        note(err, format!("safedeps-core approvals: the commit of {hash} ended with {ended}, and nothing of it is left beside {} to take back: it finished first, or a later commit or revoke of the entry has run since.", entry.display()));
+        if let Some(l) = Told::Settle(ended).line(hash, &vouched) {
+            log_now(&log, l);
+        }
+        return Answer::NotApproved(failure(&vouched), Entry::Untouched);
+    }
+    let (left, vouched) = take_back(&file, hash, entry, read, Told::Settle(ended), &log, err);
+    Answer::NotApproved(failure(&vouched), left)
+}
+
+/// One revoke to put in place: the entry's `hash`, the `staged` revoked entry
+/// the CLI made, the entry's path `entry`, and `seen`, the second name the CLI
+/// made for the entry it read. All three files sit in the entry's directory.
+pub struct Revoke<'a> {
+    pub hash: &'a str,
+    pub staged: &'a Path,
+    pub entry: &'a Path,
+    pub seen: &'a Path,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum Revoked {
+    /// The revoked entry is in place.
+    Revoked,
+    /// The entry at the path is not the file the CLI read, or no entry is
+    /// there: nothing was put in place.
+    Changed,
+    /// The store could not be locked, or the rename failed: nothing was put
+    /// in place.
+    NotRevoked,
+}
+
+impl Revoked {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked",
+            Self::Changed => "changed",
+            Self::NotRevoked => "not-revoked",
+        }
+    }
+}
+
+fn checked_revoke(r: &Revoke) -> io::Result<()> {
+    entry_for(r.hash, r.entry)?;
+    if !beside(r.staged, r.entry) || !beside(r.seen, r.entry) || r.staged == r.seen {
+        return Err(invalid("the staged entry and the entry read are not two files beside the entry's path"));
+    }
+    Ok(())
+}
+
+/// One file under two names: the same device and inode.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// Puts a revoked entry in place for the CLI: under the store lock, and only
+/// where the entry at the path is still the file the CLI read. It removes
+/// neither the staged file nor the entry read: both are the CLI's.
+pub fn revoke(dir: &Path, r: &Revoke, err: &mut Vec<u8>) -> Revoked {
+    revoke_with(dir, r, LOCK_WAIT, |from, to| fs::rename(from, to), err)
+}
+
+fn revoke_with(dir: &Path, r: &Revoke, wait: Duration, rename: impl FnOnce(&Path, &Path) -> io::Result<()>, err: &mut Vec<u8>) -> Revoked {
+    let _file = match locked(dir, wait) {
+        Ok(f) => f,
+        Err(e) => {
+            note(err, format!("safedeps-core approvals: not revoked: {} could not be opened and locked: {e}", path(dir).display()));
+            return Revoked::NotRevoked;
+        }
+    };
+    // From here to the answer the store lock is held. It goes with `_file`.
+    if !same_file(r.entry, r.seen) {
+        return Revoked::Changed;
+    }
+    if let Err(e) = rename(r.staged, r.entry) {
+        note(err, format!("safedeps-core approvals: not revoked: the revoked entry {} could not be put in place: {e}", r.entry.display()));
+        return Revoked::NotRevoked;
+    }
+    forget_before(r.entry);
+    Revoked::Revoked
 }
 
 /// A commit's or a settle's answer as the command gives it: `approved` and
@@ -666,37 +820,30 @@ fn answer_line(answer: &Answer) -> (i32, Vec<u8>) {
     }
 }
 
-const USAGE: &str = "usage: safedeps-core approvals append <hash> (the record on stdin) | commit <hash> <staged> <entry> (the record on stdin) | settle <hash> <entry> <exit-N|signal-N> | index\n";
+const USAGE: &str = "usage: safedeps-core approvals commit <hash> <staged> <entry> (the record on stdin) | settle <hash> <entry> <exit-N|signal-N> | revoke <hash> <staged> <entry> <seen> | index\n";
 
 /// `safedeps-core approvals commit <hash> <staged> <entry>`, the record on
 /// stdin (one trailing newline is not part of it): the approval committed
 /// (`commit`), and its answer on stdout, `approved` and exit 0 or
 /// `not-approved <failure> <entry>` and exit 1. Exit 2 for an argument that is
-/// not one, and nothing is written.
+/// not one, and nothing is written. A commit is the one command that writes a
+/// store line.
 /// `safedeps-core approvals settle <hash> <entry> <exit-N|signal-N>`: a commit
 /// whose process ended before it answered, settled (`settle`), and the same
 /// answer, always exit 1.
-/// `safedeps-core approvals append <hash>`, the record on stdin: the store
-/// line alone, under the store lock. Exit 0 when the line is written, 1 when
-/// it is not, 3 when it is written and not synced, 2 for a hash or a record
-/// that is not one. No check calls it: it is the store's own write, which the
-/// approvals-store battery cuts with a file size limit.
+/// `safedeps-core approvals revoke <hash> <staged> <entry> <seen>`: the revoked
+/// entry put in place (`revoke`), and its answer on stdout: `revoked` and exit
+/// 0, or `changed` or `not-revoked` and exit 1. Exit 2 for an argument that is
+/// not one, and nothing is put in place.
 /// `safedeps-core approvals index`: the index on stdout and exit 0, or exit 1
 /// when the store cannot be read.
 pub fn cli(args: &[String]) -> i32 {
     os::set_umask(0o077);
     let mut stdin = Vec::new();
-    match args.first().map(String::as_str) {
-        Some("append") if io::stdin().read_to_end(&mut stdin).is_err() => {
-            eprintln!("safedeps-core approvals: not written: the record could not be read from stdin");
-            return 1;
-        }
-        Some("commit") if io::stdin().read_to_end(&mut stdin).is_err() => {
-            eprintln!("safedeps-core approvals: not committed: the record could not be read from stdin");
-            println!("not-approved {} {}", Failure::LedgerWrite.as_str(), Entry::Untouched.as_str());
-            return 1;
-        }
-        _ => {}
+    if args.first().map(String::as_str) == Some("commit") && io::stdin().read_to_end(&mut stdin).is_err() {
+        eprintln!("safedeps-core approvals: not committed: the record could not be read from stdin");
+        println!("not-approved {} {}", Failure::LedgerWrite.as_str(), Entry::Untouched.as_str());
+        return 1;
     }
     let (code, out, err) = run(&state::guard_dir(), args, &stdin);
     let _ = io::stderr().write_all(&err);
@@ -712,10 +859,6 @@ fn run(dir: &Path, args: &[String], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let store = path(dir);
     match args.as_slice() {
-        ["append", hash] => {
-            let record = stdin.strip_suffix(b"\n").unwrap_or(stdin);
-            answer(append(dir, hash, record), &store)
-        }
         ["commit", hash, staged, entry] => {
             let a = Approval {
                 hash,
@@ -741,29 +884,21 @@ fn run(dir: &Path, args: &[String], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
             let (code, out) = answer_line(&settle(dir, hash, Path::new(entry), ended, &mut err));
             (code, out, err)
         }
+        ["revoke", hash, staged, entry, seen] => {
+            let r = Revoke { hash, staged: Path::new(staged), entry: Path::new(entry), seen: Path::new(seen) };
+            if let Err(e) = checked_revoke(&r) {
+                return (2, Vec::new(), format!("safedeps-core approvals: not revoked: {e}\n").into_bytes());
+            }
+            let mut err = Vec::new();
+            let answer = revoke(dir, &r, &mut err);
+            let code = if answer == Revoked::Revoked { 0 } else { 1 };
+            (code, format!("{}\n", answer.as_str()).into_bytes(), err)
+        }
         ["index"] => match index(dir) {
             Ok(ix) => (0, format!("{}\n", index_json(&ix)).into_bytes(), Vec::new()),
             Err(e) => (1, Vec::new(), format!("safedeps-core approvals: {} could not be read: {}\n", store.display(), e).into_bytes()),
         },
         _ => (2, Vec::new(), USAGE.as_bytes().to_vec()),
-    }
-}
-
-/// An append's answer as the command gives it: exit status, stdout, stderr.
-fn answer(appended: Result<(), Appended>, store: &Path) -> (i32, Vec<u8>, Vec<u8>) {
-    match appended {
-        Ok(()) => (0, Vec::new(), Vec::new()),
-        Err(Appended::NotWritten(e)) if e.kind() == io::ErrorKind::InvalidInput => {
-            (2, Vec::new(), format!("safedeps-core approvals: not written: {}\n", e).into_bytes())
-        }
-        Err(Appended::NotWritten(e)) => {
-            (1, Vec::new(), format!("safedeps-core approvals: not written to {}: {}\n", store.display(), e).into_bytes())
-        }
-        Err(Appended::Unsynced(e)) => (
-            3,
-            Vec::new(),
-            format!("safedeps-core approvals: written to {} and not synced: {}\n", store.display(), e).into_bytes(),
-        ),
     }
 }
 
