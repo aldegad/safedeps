@@ -17,7 +17,7 @@
 //!   hash    the approved ledger entry's hash, `sha256:` and 64 hex digits
 //!   via     `check` for an approval `safedeps check` wrote here, `migrate`
 //!           for one moved in from advisory.log after its hash was checked
-//!   record  the approval's line as advisory.log has it, `check approve...`
+//!   record  the approval's line as advisory.log has it, `check approve(...`
 //!
 //! A line vouches for a ledger entry by its hash alone, compared whole with
 //! the hash recomputed from the entry's own fields. The hash covers the
@@ -34,6 +34,14 @@
 //! file is closed, so a process that dies holding it leaves nothing to clean
 //! up. A lock another process holds past LOCK_WAIT is an error: nothing is
 //! written or read without the lock.
+//!
+//! An append answers one of three things: Ok, and the two of `Appended`.
+//! Written: the line is in the store and synced. Not written: the line is not there, or only a torn
+//! piece of it is, which the next writer seals as one broken line. Written, not
+//! synced: every byte of the line landed and a reader sees it, but the sync
+//! failed, so nothing says it is on the disk. The CLI does not take the third
+//! for the first or the second: it reads the store back (`index`), and what the
+//! store vouches for decides (`sf_check_commit` in bin/safedeps).
 //!
 //! The torn-line seal. A write that did not finish leaves a last line with no
 //! newline: its process died, or the write failed after some of its bytes
@@ -71,8 +79,9 @@ use std::{
 pub const FILE_NAME: &str = "approvals.jsonl";
 /// What every record in the store starts with. advisory.log writes an
 /// approval with the same words, and a record that does not start with them
-/// is no approval.
-pub const RECORD_PREFIX: &[u8] = b"check approve";
+/// is no approval. The parenthesis is part of it: `check approve-undone`, the
+/// line that takes an approval back, is no approval.
+pub const RECORD_PREFIX: &[u8] = b"check approve(";
 const HASH_PREFIX: &str = "sha256:";
 const FIELDS: [&str; 4] = ["at", "hash", "via", "record"];
 /// The torn-line seal's byte. A writer ends a torn last line with it and a
@@ -164,9 +173,31 @@ fn open_for_append(dir: &Path) -> io::Result<fs::File> {
     regular(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir))?)
 }
 
+/// Why an append did not answer written. `NotWritten`: the line is not in the
+/// store, or a torn piece of it is, which the next writer seals as one broken
+/// line. `Unsynced`: the whole line is in the store and a reader sees it, but
+/// the sync failed.
+#[derive(Debug)]
+pub enum Appended {
+    NotWritten(io::Error),
+    Unsynced(io::Error),
+}
+
+impl From<io::Error> for Appended {
+    fn from(e: io::Error) -> Self {
+        Self::NotWritten(e)
+    }
+}
+
 /// Under LOCK_EX: seals a torn last line, then appends `lines` in the same
 /// write and syncs them.
-fn write_locked(file: &fs::File, lines: &[u8]) -> io::Result<()> {
+fn write_locked(file: &fs::File, lines: &[u8]) -> Result<(), Appended> {
+    write_then_sync(file, lines, fs::File::sync_data)
+}
+
+/// The write, then `sync`. Only a write that put every byte in the store
+/// reaches the sync, so a failed sync is a line a reader sees.
+fn write_then_sync(file: &fs::File, lines: &[u8], sync: impl FnOnce(&fs::File) -> io::Result<()>) -> Result<(), Appended> {
     let len = file.metadata()?.len();
     let mut out = Vec::with_capacity(lines.len() + 2);
     if len > 0 {
@@ -179,22 +210,22 @@ fn write_locked(file: &fs::File, lines: &[u8]) -> io::Result<()> {
     out.extend_from_slice(lines);
     let mut f: &fs::File = file;
     f.write_all(&out)?;
-    file.sync_data()
+    sync(file).map_err(Appended::Unsynced)
 }
 
 /// Records one approval `safedeps check` made: the ledger entry `hash`, and
 /// `record`, its approve line as advisory.log gets it. Ok only once the line
 /// is in the store and synced.
-pub fn append(dir: &Path, hash: &str, record: &[u8]) -> io::Result<()> {
+pub fn append(dir: &Path, hash: &str, record: &[u8]) -> Result<(), Appended> {
     append_within(dir, hash, record, LOCK_WAIT)
 }
 
-fn append_within(dir: &Path, hash: &str, record: &[u8], wait: Duration) -> io::Result<()> {
+fn append_within(dir: &Path, hash: &str, record: &[u8], wait: Duration) -> Result<(), Appended> {
     if !is_hash(hash) {
-        return Err(invalid("the hash is not sha256: and 64 lowercase hex digits"));
+        return Err(invalid("the hash is not sha256: and 64 lowercase hex digits").into());
     }
     if !record.starts_with(RECORD_PREFIX) {
-        return Err(invalid("the record is not an approval (it does not start with `check approve`)"));
+        return Err(invalid("the record is not an approval (it does not start with `check approve(`)").into());
     }
     let at = os::utc_stamp(os::wall(os::WallRole::ApprovalRecord).seconds());
     let file = open_for_append(dir)?;
@@ -266,7 +297,8 @@ const USAGE: &str = "usage: safedeps-core approvals append <hash> (the record on
 
 /// `safedeps-core approvals append <hash>`, the record on stdin (one
 /// trailing newline is not part of it): exit 0 when the line is written, 1
-/// when it is not, 2 for a hash or a record that is not one.
+/// when it is not, 3 when it is written and not synced, 2 for a hash or a
+/// record that is not one.
 /// `safedeps-core approvals index`: the index on stdout and exit 0, or exit 1
 /// when the store cannot be read.
 pub fn cli(args: &[String]) -> i32 {
@@ -292,19 +324,31 @@ fn run(dir: &Path, args: &[String], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
     match args.as_slice() {
         ["append", hash] => {
             let record = stdin.strip_suffix(b"\n").unwrap_or(stdin);
-            match append(dir, hash, record) {
-                Ok(()) => (0, Vec::new(), Vec::new()),
-                Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
-                    (2, Vec::new(), format!("safedeps-core approvals: not written: {}\n", e).into_bytes())
-                }
-                Err(e) => (1, Vec::new(), format!("safedeps-core approvals: not written to {}: {}\n", store.display(), e).into_bytes()),
-            }
+            answer(append(dir, hash, record), &store)
         }
         ["index"] => match index(dir) {
             Ok(ix) => (0, format!("{}\n", index_json(&ix)).into_bytes(), Vec::new()),
             Err(e) => (1, Vec::new(), format!("safedeps-core approvals: {} could not be read: {}\n", store.display(), e).into_bytes()),
         },
         _ => (2, Vec::new(), USAGE.as_bytes().to_vec()),
+    }
+}
+
+/// An append's answer as the command gives it: exit status, stdout, stderr.
+fn answer(appended: Result<(), Appended>, store: &Path) -> (i32, Vec<u8>, Vec<u8>) {
+    match appended {
+        Ok(()) => (0, Vec::new(), Vec::new()),
+        Err(Appended::NotWritten(e)) if e.kind() == io::ErrorKind::InvalidInput => {
+            (2, Vec::new(), format!("safedeps-core approvals: not written: {}\n", e).into_bytes())
+        }
+        Err(Appended::NotWritten(e)) => {
+            (1, Vec::new(), format!("safedeps-core approvals: not written to {}: {}\n", store.display(), e).into_bytes())
+        }
+        Err(Appended::Unsynced(e)) => (
+            3,
+            Vec::new(),
+            format!("safedeps-core approvals: written to {} and not synced: {}\n", store.display(), e).into_bytes(),
+        ),
     }
 }
 
@@ -326,6 +370,12 @@ mod tests {
     }
     fn rec(n: u8) -> Vec<u8> {
         format!("check approve(clean) ecosystem=npm package=p{} version=1.0.0 hash={}", n, h(n)).into_bytes()
+    }
+    fn not_written(r: Result<(), Appended>) -> io::Error {
+        match r {
+            Err(Appended::NotWritten(e)) => e,
+            other => panic!("not a not-written answer: {other:?}"),
+        }
     }
     fn holder(dir: &Path, lock: os::FileLock) -> fs::File {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
@@ -380,9 +430,11 @@ mod tests {
             ("md5:".to_string() + &"0".repeat(64), rec(1)),
             (String::new(), rec(1)),
             (h(1), b"check block ecosystem=npm package=p version=1".to_vec()),
+            (h(1), format!("check approve-undone hash={} outcome=exit-1", h(1)).into_bytes()),
+            (h(1), b"check approve ecosystem=npm package=p version=1".to_vec()),
             (h(1), Vec::new()),
         ] {
-            let e = append(&d.0, &hash, &record).unwrap_err();
+            let e = not_written(append(&d.0, &hash, &record));
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{hash:?}");
         }
         assert!(!path(&d.0).exists());
@@ -406,19 +458,20 @@ mod tests {
         bytes.extend(String::from_utf8(ok(11, Via::Check)).unwrap().replace("\"check\"", "\"manual\"").into_bytes());
         bytes.extend(String::from_utf8(ok(12, Via::Check)).unwrap().replace("2026-11-19T08:00:00Z", "yesterday").into_bytes());
         bytes.extend(line("2026-11-19T08:00:00Z", &h(13), Via::Check, b"check block ecosystem=npm package=p version=1"));
+        bytes.extend(line("2026-11-19T08:00:00Z", &h(16), Via::Check, format!("check approve-undone hash={}", h(16)).as_bytes()));
         bytes.extend(ok(5, Via::Check));
         let whole15 = ok(15, Via::Check);
         bytes.extend(sealed(&whole15[..whole15.len() - 1]));
         bytes.extend(&ok(14, Via::Check)[..20]);
         fs::write(path(&d.0), &bytes).unwrap();
         let ix = index(&d.0).unwrap();
-        // Ten lines vouch for nothing: garbage, an empty line, an extra
+        // Eleven lines vouch for nothing: garbage, an empty line, an extra
         // field, a missing field, an uppercase hash, an unknown via, a time
-        // that is no time, a record that is no approval, a whole record a
-        // writer sealed and a torn tail. The repeated h(5) is a record and
-        // counts once.
+        // that is no time, a record that is no approval, the line that takes
+        // an approval back, a whole record a writer sealed and a torn tail.
+        // The repeated h(5) is a record and counts once.
         assert_eq!(ix.hashes, vec![h(5), h(6), h(10)]);
-        assert_eq!(ix.broken, 10);
+        assert_eq!(ix.broken, 11);
         assert!(ix.present);
     }
 
@@ -565,7 +618,7 @@ mod tests {
     fn a_lock_held_past_the_wait_is_an_error_and_nothing_is_written() {
         let d = scratch();
         let held = holder(&d.0, os::FileLock::Exclusive);
-        let e = append_within(&d.0, &h(1), &rec(1), Duration::from_millis(100)).unwrap_err();
+        let e = not_written(append_within(&d.0, &h(1), &rec(1), Duration::from_millis(100)));
         assert_eq!(e.kind(), io::ErrorKind::TimedOut);
         assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap_err().kind(), io::ErrorKind::TimedOut);
         drop(held);
@@ -578,6 +631,40 @@ mod tests {
         append(&d.0, &h(1), &rec(1)).unwrap();
         let _held = holder(&d.0, os::FileLock::Shared);
         assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap().hashes, vec![h(1)]);
+    }
+
+    #[test]
+    fn a_sync_that_fails_after_a_whole_write_is_unsynced_and_the_line_is_seen() {
+        // No file system here fails a sync on demand, so the sync is the one
+        // part a test puts in: the write and the store are the real ones.
+        let d = scratch();
+        let file = open_for_append(&d.0).unwrap();
+        let whole = line("2026-11-19T08:00:00Z", &h(1), Via::Check, &rec(1));
+        match write_then_sync(&file, &whole, |_| Err(io::Error::from_raw_os_error(5))) {
+            Err(Appended::Unsynced(e)) => assert_eq!(e.raw_os_error(), Some(5)),
+            other => panic!("a failed sync answered {other:?}"),
+        }
+        drop(file);
+        assert_eq!(fs::read(path(&d.0)).unwrap(), whole);
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
+        let (code, out, err) = answer(Err(Appended::Unsynced(io::Error::from_raw_os_error(5))), &path(&d.0));
+        assert_eq!((code, out.is_empty()), (3, true));
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.starts_with(&format!("safedeps-core approvals: written to {} and not synced: ", path(&d.0).display())), "{err}");
+    }
+
+    #[test]
+    fn a_write_that_fails_never_reaches_the_sync_and_is_not_written() {
+        let d = scratch();
+        drop(open_for_append(&d.0).unwrap());
+        let read_only = fs::File::open(path(&d.0)).unwrap();
+        let whole = line("2026-11-19T08:00:00Z", &h(1), Via::Check, &rec(1));
+        let r = write_then_sync(&read_only, &whole, |_| panic!("a failed write reached the sync"));
+        assert!(matches!(r, Err(Appended::NotWritten(_))), "{r:?}");
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
+        let (code, out, err) = answer(r, &path(&d.0));
+        assert_eq!((code, out.is_empty()), (1, true));
+        assert!(err.starts_with(format!("safedeps-core approvals: not written to {}: ", path(&d.0).display()).as_bytes()));
     }
 
     #[test]

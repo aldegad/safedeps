@@ -366,34 +366,166 @@ sf_check_unavailable() {
   fi
 }
 
-# The same for an approval the ledger would not take: every approval a report
-# states is one the hook will find. The caller removes its files and returns 4.
+# The same for an approval that could not be written (sf_check_commit names
+# why): every approval a report states is one the hook will find and the
+# approvals store vouches for. The caller removes its files and returns 4.
 sf_check_not_written() {
   local ecosystem="$1" package="$2" range="$3" version="$4"
+  local error="${SF_CHECK_COMMIT_ERROR:-ledger_write_failed}" kind why
 
-  sf_err "${package}@${version} cleared, but the ledger could not be written — not approved"
-  sf_advisory_log "check fail-closed ledger-write ecosystem=${ecosystem} package=${package} version=${version}"
+  case "${error}" in
+    core_missing) kind=core-missing why="an approval is written with the safedeps-core binary, which is missing" ;;
+    approvals_store_failed) kind=approvals-store why="the approvals store did not take the approval, so it was taken back" ;;
+    approvals_store_in_doubt) kind=approvals-store-in-doubt why="the approvals store could not be written or read back, so the approval was taken back" ;;
+    *) kind=ledger-write why="the ledger could not be written" ;;
+  esac
+  sf_err "${package}@${version} cleared, but ${why} — not approved"
+  sf_advisory_log "check fail-closed ${kind} ecosystem=${ecosystem} package=${package} version=${version}"
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
     sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${package}" "${range}" '{}' '{resolved_version:$version}' \
-      '{approved:false, error:"ledger_write_failed"}' \
-      -n --arg version "${version}"
+      '{approved:false, error:$error} + (if $left == "1" then {ledger_entry_left:true} else {} end)' \
+      -n --arg version "${version}" --arg error "${error}" --arg left "${SF_CHECK_COMMIT_LEFT}"
   fi
 }
 
-# An approval is three things that must agree: the ledger entry the hook reads,
-# the `check approve` line re-check reads, and the report. A caller makes all
-# three, then calls this, then only prints: a failure anywhere leaves none of
-# them, and from here on nothing can fail.
-#   sf_check_commit HASH ENTRY RECORD
-sf_check_commit() {
-  local hash="$1" entry="$2" record="$3"
-  local ledger_file
+# ---- the core and the approvals store ----------------------------------------
 
-  ledger_file=$(safedeps_ledger_path_for_hash "${hash}") || return 1
-  if safedeps_ledger_atomic_write "${ledger_file}" <<< "${entry}" && sf_advisory_log "${record}"; then
+# The core binary beside this CLI, bin/native/<os>-<arch>/safedeps-core, into
+# SF_CORE. The platform is read from bash the way the hook entry reads it
+# (scripts/safedeps-hook-entry.sh), and nothing in the environment chooses the
+# binary. The approvals store is the core's (rust/src/approvals.rs), so an
+# approval is written with it and a cache hit is read with it, each time in the
+# SAFEDEPS_HOME this CLI writes the ledger and advisory.log in. Where it is not
+# there, SF_CORE_MISSING says where it was looked for.
+SF_CORE=""
+SF_CORE_MISSING=""
+sf_core() {
+  local machine="${BASH_VERSINFO[5]:-}" native="${SAFEDEPS_REPO_DIR}/bin/native" os="" arch="" repair
+
+  if [[ -d "${SAFEDEPS_REPO_DIR}/rust" ]]; then
+    repair="build it from this checkout with ${SAFEDEPS_REPO_DIR}/scripts/build-core.sh"
+  else
+    repair="reinstall the package"
+  fi
+  case "${machine}" in
+    *-darwin*) os=darwin ;;
+    *-linux*) os=linux ;;
+  esac
+  case "${machine%%-*}" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  if [[ -z "${os}" || -z "${arch}" ]]; then
+    SF_CORE_MISSING="no safedeps-core binary is built for this machine (bash was built for ${machine:-an unnamed machine}), so none was found under ${native}"
+    return 1
+  fi
+  SF_CORE="${native}/${os}-${arch}/safedeps-core"
+  if [[ ! -f "${SF_CORE}" || ! -x "${SF_CORE}" ]]; then
+    SF_CORE_MISSING="the safedeps-core binary is missing: ${SF_CORE} is not an executable file. Repair: ${repair}"
+    return 1
+  fi
+}
+
+# Whether the approvals store vouches for HASH, from one read of the store:
+# 0 it does, 1 it does not, 2 it could not be read (no core, a store the core
+# could not read, or an answer that is no index).
+sf_store_vouches() {
+  local hash="$1" index answer
+
+  sf_core || return 2
+  index=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals index) || return 2
+  answer=$(jq -r --arg hash "${hash}" '
+    if (.present | type) == "boolean" and (.hashes | type) == "object" and (.broken | type) == "number"
+    then (if .hashes[$hash] == true then "vouched" else "not vouched" end)
+    else error("not an approvals index") end' <<< "${index}") || return 2
+  case "${answer}" in
+    vouched) return 0 ;;
+    "not vouched") return 1 ;;
+  esac
+  return 2
+}
+
+# Takes back the ledger entry FILE an approval of HASH wrote. An entry that
+# stays is undo-failed: whatever it holds stays where the hook reads it, and no
+# approval stands behind it.
+sf_check_take_back() {
+  local hash="$1" file="$2"
+
+  if rm -f -- "${file}" && [[ ! -e "${file}" ]]; then
     return 0
   fi
-  rm -f "${ledger_file}"
+  SF_CHECK_COMMIT_LEFT=1
+  sf_eprintf "safedeps: undo-failed: the ledger entry ${file} could not be removed. Whatever it holds stays where the hook reads it, and no approval stands behind it."
+  sf_advisory_log "check approve-undo-failed hash=${hash} entry=${file}" || true
+}
+
+# An approval is three records and a report. The ledger entry is what the hook
+# reads, the `check approve(...)` line in advisory.log is the record a person
+# reads, and the line in the approvals store is the record re-check and the
+# cache lookup read. They are written in that order, and the store line is the
+# commit point: a failure before it takes the entry back. The binary that
+# writes the store is found before anything is written, so a missing one
+# leaves nothing (core-missing). advisory.log is only appended to, so an
+# approval taken back after its line is there gets a `check approve-undone`
+# line after it. The caller makes the report first, calls this, and only
+# prints after it.
+#
+# Every answer of the store's append but "written" is decided by reading the
+# store back, the read the cache lookup and re-check make. So a check never
+# answers that it failed for an approval the store vouches for, nor that it
+# approved one the store does not. What that cannot rule out has a name, on
+# stderr and in advisory.log:
+#   unsynced     the append did not answer "written", and the store vouches for
+#                the hash: the approval stands, and nothing confirms that its
+#                line is on the disk
+#   in-doubt     the append did not answer "written", and the store could not
+#                be read back: the approval is taken back, and the store may
+#                still hold its line
+#   undo-failed  a ledger entry that was to be taken back stays
+#                (sf_check_take_back)
+# SF_CHECK_COMMIT_ERROR names a failure for the report, and SF_CHECK_COMMIT_LEFT
+# is 1 when the ledger entry stayed.
+#   sf_check_commit HASH ENTRY RECORD
+SF_CHECK_COMMIT_ERROR=""
+SF_CHECK_COMMIT_LEFT=0
+sf_check_commit() {
+  local hash="$1" entry="$2" record="$3"
+  local ledger_file rc=0 vouched=0 outcome
+
+  SF_CHECK_COMMIT_ERROR="ledger_write_failed"
+  SF_CHECK_COMMIT_LEFT=0
+  if ! sf_core; then
+    SF_CHECK_COMMIT_ERROR="core_missing"
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. An approval is written with it, so nothing is approved."
+    return 1
+  fi
+  ledger_file=$(safedeps_ledger_path_for_hash "${hash}") || return 1
+  # A write that answered failure is taken back too: its rename may have landed.
+  if ! safedeps_ledger_atomic_write "${ledger_file}" <<< "${entry}" || ! sf_advisory_log "${record}"; then
+    sf_check_take_back "${hash}" "${ledger_file}"
+    return 1
+  fi
+  SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals append "${hash}" <<< "${record}" || rc=$?
+  [[ "${rc}" -ne 0 ]] || return 0
+  if [[ "${rc}" -gt 128 ]]; then outcome="signal-$((rc - 128))"; else outcome="exit-${rc}"; fi
+  sf_store_vouches "${hash}" || vouched=$?
+  case "${vouched}" in
+    0)
+      sf_eprintf "safedeps: unsynced: the approvals store append answered ${outcome}, and the store vouches for ${hash}. The approval stands, and nothing confirms that its line is on the disk."
+      sf_advisory_log "check approve-unsynced hash=${hash} outcome=${outcome}" || true
+      return 0
+      ;;
+    1)
+      SF_CHECK_COMMIT_ERROR="approvals_store_failed"
+      sf_advisory_log "check approve-undone hash=${hash} outcome=${outcome}" || true
+      ;;
+    *)
+      SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
+      sf_eprintf "safedeps: in-doubt: the approvals store append answered ${outcome}, and the store could not be read back. The approval of ${hash} is taken back, and the store may still hold its line."
+      sf_advisory_log "check approve-in-doubt hash=${hash} outcome=${outcome}" || true
+      ;;
+  esac
+  sf_check_take_back "${hash}" "${ledger_file}"
   return 1
 }
 
@@ -814,10 +946,23 @@ cmd_check() {
       fi
     fi
   fi
+  # A cache hit is an approval the approvals store vouches for: a ledger entry
+  # whose hash matches its fields is not enough on its own. An entry the store
+  # does not vouch for, or a store that cannot be read, is checked again from
+  # the start, and a check that clears it writes a new approval.
   if [[ "${ledger_context_status}" -ne 2 ]] && ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}" 2>/dev/null); then
     if jq -e '.approved == true' <<< "${ledger_check}" >/dev/null 2>&1 && { [[ "${ecosystem}" != "npm" ]] || sf_ledger_hit_has_npm_closure "${ledger_check}"; }; then
-      local hash approved_at expires_at project_context resolved_closure
+      local hash approved_at expires_at project_context resolved_closure vouched=0 unvouched
       hash=$(jq -r '.hash' <<< "${ledger_check}")
+      sf_store_vouches "${hash}" || vouched=$?
+      if [[ "${vouched}" -ne 0 ]]; then
+        unvouched="not-vouched"
+        [[ "${vouched}" -eq 1 ]] || unvouched="unreadable"
+        sf_warn "${pkg}@${version} is in the ledger, but the approvals store does not vouch for it (${unvouched}) — checking it again"
+        sf_advisory_log "check ledger-unvouched ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash} store=${unvouched}"
+      fi
+    fi
+    if [[ "${vouched:-1}" -eq 0 ]]; then
       approved_at=$(jq -r '.spec.approved_at // "n/a"' <<< "${ledger_check}")
       expires_at=$(jq -r '.spec.expires_at // "n/a"' <<< "${ledger_check}")
       project_context=$(jq -c '.spec.project_context // null' <<< "${ledger_check}")

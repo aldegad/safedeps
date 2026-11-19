@@ -7,7 +7,9 @@
 # rule on bytes a test writes. These rows make the core's own write fail: a
 # file size limit stops `safedeps-core approvals append` at a byte the row
 # picks (scripts/test/lib/core-approvals-store.py), and the next appends and
-# the index are the real CLI's.
+# the index are the real CLI's. The last row kills a process holding the store
+# lock while appends wait for it. What `safedeps check` does with the store's
+# answers is check-fail-closed's.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

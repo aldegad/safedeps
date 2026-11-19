@@ -261,11 +261,31 @@ faulted() {
   check_with "${ecosystem}" "${spec}" PATH="${stub_bin}:${PATH}" STUB_MATCH="${match}" "$@"
 }
 
-# No approval of any kind: in the report, in the ledger or in the record.
+# The core the CLI writes the approvals store with, to read the store back.
+# shellcheck source=lib/core-reader.sh
+source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
+core_reader_init "${ROOT_DIR}"
+core="${SAFEDEPS_TEST_CORE}"
+store_of() { printf '%s/approvals.jsonl' "$1"; }
+# The hashes the approvals store in HOME vouches for, one a line, or a failure
+# when the store cannot be read.
+vouched() {
+  local index
+  index=$(env SAFEDEPS_HOME="$1" "${core}" approvals index) || return 1
+  jq -r '.hashes | keys[]' <<< "${index}"
+}
+
+# No approval of any kind: in the report, in the ledger, in the record or in
+# the approvals store.
 no_approval() {
+  local hashes
   jq -e '.approved != true' <<< "${json}" >/dev/null || no "the report approves: ${json}"
   [[ -z "$(find "${home}/approved-specs" -name '*.json' -type f 2>/dev/null)" ]] || no "a ledger entry was written"
   ! grep -q 'check approve' "${home}/advisory.log" 2>/dev/null || no "advisory.log records an approval"
+  if [[ -e "$(store_of "${home}")" ]]; then
+    hashes=$(vouched "${home}") || no "the approvals store cannot be read"
+    [[ -z "${hashes}" ]] || no "the approvals store vouches for ${hashes}"
+  fi
 }
 unavailable() {
   [[ "${rc}" == 4 ]] || no "exit ${rc}, not 4: ${json}"
@@ -1068,6 +1088,307 @@ already_approved_hint() {
   jq -e '.result == "already_approved" and .install_hint == "install with fixture-clean@1.0.0"' <<< "${json}" >/dev/null || no "the report: ${json}"
 }
 row "already_approved carries the install_hint the deny message and SKILL.md send a reader to" already_approved_hint
+
+# ---- the approvals store ----------------------------------------------------
+#
+# An approval is a ledger entry, its `check approve(...)` line in advisory.log
+# and its line in the approvals store, written in that order, and the store
+# line is the commit point (sf_check_commit in bin/safedeps). A cache hit is an
+# approval the store vouches for. Each fault below is put into the real CLI and
+# the real core: a store the core may not append to, a store that is a
+# directory, a core killed while it waits for the store lock, a ledger
+# directory that refuses the take-back, a tree with no core.
+#
+# A sync that fails alone is not something a file system here can be made to
+# do. The CLI does not read the append's answer, though: it reads the store back
+# for every answer but "written". So the row where an append is refused and the
+# store already vouches for the hash runs the branch a failed sync takes, and
+# rust-core holds the core's own answer to a failed sync (exit 3, the line seen).
+
+# The `check approve(...)` line in HOME's advisory.log, without its time.
+approve_line() { sed -n 's/^\[[^]]*\] \(check approve(.*\)$/\1/p' "$1/advisory.log"; }
+# The line number of the first line in HOME's advisory.log that holds TEXT.
+log_at() { grep -nF -- "$2" "$1/advisory.log" | head -n 1 | cut -d: -f1; }
+# The ledger entries in HOME.
+entries() { find "$1/approved-specs" -name '*.json' -type f 2>/dev/null; }
+# The store in HOME holds one line, written by check, and it is the approval
+# advisory.log records, of KIND and HASH.
+one_check_line() {
+  local home="$1" kind="$2" hash="$3" line hashes
+  line=$(approve_line "${home}")
+  [[ "$(grep -c . <<< "${line}")" == 1 && "${line}" == "check approve(${kind}) "*" hash=${hash}"* ]] \
+    || no "advisory.log's approval is not one ${kind} line of ${hash}: ${line}"
+  hashes=$(vouched "${home}") || no "the approvals store cannot be read"
+  [[ "${hashes}" == "${hash}" ]] || no "the approvals store vouches for '${hashes}', not ${hash}"
+  [[ "$(grep -c . "$(store_of "${home}")")" == 1 ]] || no "the approvals store holds $(grep -c . "$(store_of "${home}")") lines"
+  jq -e --arg line "${line}" '.via == "check" and .record == $line' "$(store_of "${home}")" >/dev/null \
+    || no "the store line is not advisory.log's approval: $(cat "$(store_of "${home}")")"
+}
+
+store_line_for_every_approval() {
+  local ecosystem spec kind hash
+  while read -r ecosystem spec kind; do
+    check_with "${ecosystem}" "${spec}" < /dev/null
+    [[ "${rc}" == 0 ]] || no "${ecosystem} ${spec}: exit ${rc}: ${json}"
+    hash=$(jq -r '.spec_hash' <<< "${json}")
+    one_check_line "${home}" "${kind}" "${hash}"
+  done <<'PATHS'
+npm fixture-clean@1.0.0 clean closure
+npm fixture-vuln@1.0.0 patched closure
+pypi fixture-clean@1.0.0 clean
+pypi fixture-vuln@1.0.0 patched
+PATHS
+}
+row "every approval a check makes, clean, patched and closure, leaves its line in the approvals store" store_line_for_every_approval
+
+vouched_entry_is_a_cache_hit() {
+  local ecosystem hash
+  for ecosystem in npm pypi; do
+    check_with "${ecosystem}" fixture-clean@1.0.0
+    [[ "${rc}" == 0 ]] || no "${ecosystem}: the first run exits ${rc}: ${json}"
+    hash=$(jq -r '.spec_hash' <<< "${json}")
+    check_in "${ecosystem}" fixture-clean@1.0.0
+    [[ "${rc}" == 0 ]] || no "${ecosystem}: the second run exits ${rc}: ${json}"
+    jq -e --arg hash "${hash}" '.result == "already_approved" and .spec_hash == $hash' <<< "${json}" >/dev/null || no "${ecosystem}: the report: ${json}"
+    grep -qF "check approve(cache) ecosystem=${ecosystem} package=fixture-clean version=1.0.0 hash=${hash}" "${home}/advisory.log" \
+      || no "${ecosystem}: advisory.log has no cache line"
+    ! grep -q 'check ledger-unvouched' "${home}/advisory.log" || no "${ecosystem}: the vouched entry was checked again"
+    [[ "$(grep -c . "$(store_of "${home}")")" == 1 ]] || no "${ecosystem}: the cache hit wrote to the approvals store"
+  done
+}
+row "an entry the approvals store vouches for is a cache hit, and the hit writes no store line" vouched_entry_is_a_cache_hit
+
+hand_written_entry_is_checked() {
+  local answer
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-unpatched 1.0.0 >/dev/null
+  answer=$(env SAFEDEPS_HOME="${home}" bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_check pypi fixture-unpatched 1.0.0') \
+    || no "control: the ledger does not read the hand-written entry as approved: ${answer}"
+  jq -e '.approved == true' <<< "${answer}" >/dev/null || no "control: the ledger's answer: ${answer}"
+  check_in pypi fixture-unpatched@1.0.0
+  [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "cve_unpatched" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -qE '^\[[^]]*\] check ledger-unvouched ecosystem=pypi package=fixture-unpatched version=1\.0\.0 hash=sha256:[0-9a-f]{64} store=not-vouched$' "${home}/advisory.log" \
+    || no "advisory.log does not say the entry was checked again"
+  ! grep -q 'check approve' "${home}/advisory.log" || no "advisory.log records an approval"
+  [[ ! -e "$(store_of "${home}")" ]] || no "the approvals store was written"
+}
+row "a hand-written entry with an honest hash is checked again, and a check that blocks blocks" hand_written_entry_is_checked
+
+copied_entry_is_checked_again() {
+  local first hash
+  check_with npm fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the approval in the first home exits ${rc}: ${json}"
+  first="${home}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  fresh_home
+  mkdir -p "${home}/approved-specs"
+  cp "$(entries "${first}")" "${home}/approved-specs/"
+  check_in npm fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.result == "clean" and .spec_hash == $hash' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -qF "check ledger-unvouched ecosystem=npm package=fixture-clean version=1.0.0 hash=${hash} store=not-vouched" "${home}/advisory.log" \
+    || no "advisory.log does not say the entry was checked again"
+  ! grep -q 'check approve(cache)' "${home}/advisory.log" || no "the copied entry was a cache hit"
+  one_check_line "${home}" "clean closure" "${hash}"
+}
+row "an entry copied whole from another home is checked again, and the store holds only the line that check made" copied_entry_is_checked_again
+
+logged_only_entry_is_checked_again() {
+  local hash
+  check_with pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  # A state from before the store: the approval is in the ledger and in
+  # advisory.log, and there is no store.
+  rm -f "$(store_of "${home}")"
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.result == "clean" and .spec_hash == $hash' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -qF "check ledger-unvouched ecosystem=pypi package=fixture-clean version=1.0.0 hash=${hash} store=not-vouched" "${home}/advisory.log" \
+    || no "advisory.log does not say the entry was checked again"
+  [[ "$(vouched "${home}")" == "${hash}" ]] || no "the new approval is not in the store"
+  [[ "$(jq -r '.via + " " + .record' "$(store_of "${home}")")" == "check check approve(clean) "* ]] || no "the store line: $(cat "$(store_of "${home}")")"
+}
+row "an entry whose approval is only in advisory.log is no cache hit, and is checked again" logged_only_entry_is_checked_again
+
+# The approval refused at the store: the ledger entry is taken back, and an
+# undone line follows the approve line.
+undone() {
+  local outcome="$1" hash approve at_undone
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false and .error == "approvals_store_failed" and (has("ledger_entry_left") | not)' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  [[ -z "$(entries "${home}")" ]] || no "the ledger entry stayed: $(entries "${home}")"
+  approve=$(approve_line "${home}")
+  hash=${approve##* hash=}
+  hash=${hash%% *}
+  [[ "${hash}" == sha256:* ]] || no "advisory.log has no approve line: $(cat "${home}/advisory.log")"
+  at_undone=$(log_at "${home}" "check approve-undone hash=${hash} outcome=${outcome}")
+  [[ -n "${at_undone}" && "${at_undone}" -gt "$(log_at "${home}" "${approve}")" ]] || no "no undone line after the approve line: $(cat "${home}/advisory.log")"
+  grep -qF 'check fail-closed approvals-store ecosystem=npm package=fixture-clean version=1.0.0' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+  [[ -z "$(vouched "${home}")" ]] || no "the store vouches for $(vouched "${home}")"
+}
+
+store_refuses_the_append() {
+  fresh_home
+  : > "$(store_of "${home}")"
+  chmod 400 "$(store_of "${home}")"
+  check_in npm fixture-clean@1.0.0
+  chmod 600 "$(store_of "${home}")"
+  undone exit-1
+  grep -qF "safedeps-core approvals: not written to $(store_of "${home}")" "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
+}
+row "an approval the store refuses is taken back, with an undone line after its approve line" store_refuses_the_append
+
+vouched_after_a_failed_append_stands() {
+  local hash entry
+  check_with pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  entry=$(entries "${home}")
+  jq -c '.expires_at = "2020-01-01T00:00:00Z"' "${entry}" > "${entry}.next" && mv -f "${entry}.next" "${entry}"
+  chmod 400 "$(store_of "${home}")"
+  check_in pypi fixture-clean@1.0.0
+  chmod 600 "$(store_of "${home}")"
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.result == "clean" and .approved == true and .spec_hash == $hash' <<< "${json}" >/dev/null || no "the report: ${json}"
+  [[ "$(entries "${home}")" == "${entry}" ]] && ! grep -q '2020-01-01' "${entry}" || no "the approval did not write its ledger entry"
+  grep -qF "safedeps: unsynced: the approvals store append answered exit-1, and the store vouches for ${hash}." "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+  grep -qF "check approve-unsynced hash=${hash} outcome=exit-1" "${home}/advisory.log" || no "advisory.log has no unsynced line"
+  [[ "$(grep -c . "$(store_of "${home}")")" == 1 ]] || no "the store changed"
+}
+row "an append that fails where the store vouches for the hash leaves the approval standing, named unsynced" vouched_after_a_failed_append_stands
+
+store_cannot_be_read() {
+  local hash approve
+  fresh_home
+  mkdir "$(store_of "${home}")"
+  check_in npm fixture-clean@1.0.0
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false and .error == "approvals_store_in_doubt"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  [[ -z "$(entries "${home}")" ]] || no "the ledger entry stayed"
+  approve=$(approve_line "${home}")
+  hash=${approve##* hash=}
+  hash=${hash%% *}
+  grep -qF "safedeps: in-doubt: the approvals store append answered exit-1, and the store could not be read back. The approval of ${hash} is taken back" "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+  [[ "$(log_at "${home}" "check approve-in-doubt hash=${hash} outcome=exit-1")" -gt "$(log_at "${home}" "${approve}")" ]] \
+    || no "no in-doubt line after the approve line: $(cat "${home}/advisory.log")"
+  grep -qF 'check fail-closed approvals-store-in-doubt ecosystem=npm' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+}
+row "an append that fails where the store cannot be read back is in-doubt: taken back, the hash named" store_cannot_be_read
+
+unreadable_store_is_no_cache_hit() {
+  local hash
+  check_with pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  rm -f "$(store_of "${home}")"
+  mkdir "$(store_of "${home}")"
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.error == "approvals_store_in_doubt"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -qF "check ledger-unvouched ecosystem=pypi package=fixture-clean version=1.0.0 hash=${hash} store=unreadable" "${home}/advisory.log" \
+    || no "advisory.log does not say the store could not be read"
+  ! grep -q 'check approve(cache)' "${home}/advisory.log" || no "the entry was a cache hit"
+  [[ -z "$(entries "${home}")" ]] || no "the entry stayed after a check that could not record it"
+}
+row "a store that cannot be read vouches for nothing: no cache hit, and the new approval fails closed" unreadable_store_is_no_cache_hit
+
+# A check whose core is killed while it waits for the store lock. A holder
+# keeps the lock, the row finds the core among the check's own processes,
+# runs BEFORE, kills the core, then lets the lock go. The holder runs from the
+# scratch root and ends when the row ends.
+core_below() {
+  local p
+  for p in $(pgrep -P "$1" 2>/dev/null); do
+    if [[ "$(ps -o args= -p "${p}" 2>/dev/null)" == *"safedeps-core approvals append"* ]]; then
+      printf '%s\n' "${p}"
+      return 0
+    fi
+    core_below "${p}" && return 0
+  done
+  return 1
+}
+killed_while_waiting() {
+  local before="$1" holder pid core_pid="" release
+  fresh_home
+  release="${home}/release"
+  ( cd "${tmp_root}" && exec python3 -I -c 'import fcntl, os, sys, time
+f = open(sys.argv[1], "ab")
+fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+end = time.monotonic() + 300
+while not os.path.exists(sys.argv[3]) and time.monotonic() < end:
+    time.sleep(0.02)' "$(store_of "${home}")" "${home}/held" "${release}" ) &
+  holder=$!
+  # The row runs in a subshell of its own, and this trap ends with it: the
+  # values are put in now, since these locals are gone by then.
+  trap ": > '${release}'; kill ${holder} 2>/dev/null || true" EXIT
+  for _ in $(seq 1 3000); do [[ -e "${home}/held" ]] && break; sleep 0.02; done
+  [[ -e "${home}/held" ]] || no "the holder did not take the lock"
+  ( exec env SAFEDEPS_HOME="${home}" ./bin/safedeps --json check npm fixture-clean@1.0.0 > "${home}/out" 2> "${home}/stderr" < /dev/null ) &
+  pid=$!
+  trap ": > '${release}'; kill ${holder} ${pid} 2>/dev/null || true" EXIT
+  while kill -0 "${pid}" 2>/dev/null; do
+    core_pid=$(core_below "${pid}") && break
+    sleep 0.02
+  done
+  [[ -n "${core_pid}" ]] || no "the check ended before its core waited for the lock: $(cat "${home}/out" "${home}/stderr")"
+  eval "${before}"
+  kill -KILL "${core_pid}"
+  : > "${release}"
+  wait "${holder}" || true
+  rc=0
+  wait "${pid}" || rc=$?
+  trap - EXIT
+  json=$(cat "${home}/out")
+}
+
+core_killed() {
+  killed_while_waiting ':'
+  undone signal-9
+}
+row "a check whose core is killed by a signal takes its approval back" core_killed
+
+take_back_refused() {
+  local entry approve hash
+  killed_while_waiting 'chmod 500 "${home}/approved-specs"'
+  chmod 700 "${home}/approved-specs"
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false and .error == "approvals_store_failed" and .ledger_entry_left == true' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  entry=$(entries "${home}")
+  [[ -n "${entry}" ]] || no "the ledger entry is gone, so nothing was refused"
+  approve=$(approve_line "${home}")
+  hash=${approve##* hash=}
+  hash=${hash%% *}
+  grep -qF "safedeps: undo-failed: the ledger entry ${entry} could not be removed." "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
+  [[ "$(log_at "${home}" "check approve-undo-failed hash=${hash} entry=${entry}")" -gt "$(log_at "${home}" "check approve-undone hash=${hash} outcome=signal-9")" ]] \
+    || no "no undo-failed line after the undone line: $(cat "${home}/advisory.log")"
+}
+row "a take-back the ledger refuses is undo-failed: named, and the report says the entry stayed" take_back_refused
+
+core_missing() {
+  local tree
+  tree=$(mktemp -d "${tmp_root}/no-core.XXXXXX")
+  mkdir -p "${tree}/bin"
+  cp bin/safedeps "${tree}/bin/safedeps"
+  cp -R lib "${tree}/lib"
+  fresh_home
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "${tree}/bin/safedeps" --json check npm fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false and .error == "core_missing"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+  [[ ! -e "$(store_of "${home}")" ]] || no "a store was made"
+  grep -qE "^safedeps: core-missing: the safedeps-core binary is missing: ${tree}/bin/native/[a-z]+-[a-z0-9]+/safedeps-core is not an executable file\. Repair: reinstall the package\." "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+  grep -qF 'check fail-closed core-missing ecosystem=npm package=fixture-clean version=1.0.0' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+}
+row "a CLI with no core binary approves nothing and names the path it looked at" core_missing
 
 recheck_unknown_status() {
   fresh_home
