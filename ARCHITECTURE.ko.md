@@ -789,22 +789,45 @@ OSV.dev — 읽을 수 없는 응답
     가리키는 CVE 가 KEV 에 올라 있으면 install 을 막는다
   • record 는 `cache/osv-vuln/` 에 보관하되, 응답이 준 (`id`, `modified`)
     쌍 아래에만 보관한다
-  • 그 쌍으로 보관한 record 는 같은 쌍으로 다시 읽는다. OSV 가 바꾼
-    advisory 는 `modified` 가 새로우므로 key 도 새롭다
-  • record 는 자신의 `id` 와 `modified` 가 모두 그 쌍과 같을 때만 응답이
-    가리킨 record 다
+  • 그 쌍으로 보관한 record 는 같은 쌍으로, OSV 가 주는 record 와 같은
+    규칙으로 다시 읽는다. OSV 가 바꾼 advisory 는 `modified` 가 새로우므로
+    key 도 새롭다
+  • record 는 자신의 `id` 가 그 `id` 와 같고, 자신의 `modified` 가
+    마이크로초 규칙으로 그 `modified` 와 같은 시각일 때만 응답이 가리킨
+    record 다
+  • 마이크로초 규칙: batch 는 `modified` 를 소수 6자리로 주고, record 는
+    같은 시각을 9자리로 준다
+  • 2026-11-19 에 lodash 4.17.20, minimist 1.2.5, axios 0.21.1 의 advisory
+    29 개로 쟀다: 27 개의 record 가 batch 의 6자리에 3자리를 더 달았고,
+    나머지 둘은 batch 의 문자열 그대로였다. nanoid 3.3.12 의 advisory 둘은
+    그 27 개와 같았다
+  • 그래서 두 값은 모두 OSV schema 가 쓰는 시각이어야 한다: RFC 3339, UTC,
+    대문자 `T`, 소수 9자리 이하, `Z` 로 끝나고, 각 필드가 범위 안에 있고,
+    날이 그 달 안에 있다
+  • 날짜와 초가 같아야 하고, 소수는 앞 6자리가 같아야 한다. 각 값은 준
+    자리 뒤를 0 으로 읽는다
+  • batch 가 6자리보다 많이 주면 그 자리 모두가 같아야 한다
+  • 6자리보다 적게 준 batch 는 본 적이 없다. 짧은 값을 같은 마이크로초에
+    0 이 붙은 것으로 읽는 것이 더 엄격한 읽기다. 그래서 batch 의 `…03Z` 는
+    record 의 `…03.191256883Z` 가 아니다
+  • 그 밖의 것은 다른 시각이다: 그런 시각이 아닌 값, 다른 초, 다른
+    자리. 시간대 오프셋은 OSV 의 형식이 아니므로, 같은 순간을 가리켜도
+    거절한다
+  • CLI(`SAFEDEPS_OSV_JQ` 의 `osv_same_time`)와 core
+    (`rust/src/post/providers.rs` 의 `osv_same_time`)는 이 한 규칙으로
+    읽고, `post::providers::osv_answers_match_cli` 가 같은 행에 둘을 돌린다
+  • 그래서 9자리로 보관한 record 는 batch 가 준 6자리에 다시 답한다
   • `modified` 없이 가리킨 record 는 매번 질의하고 보관하지 않는다
   • 응답에 `modified` 가 없으면 `id` 만 맞으면 된다
   • 읽을 수 없는 record, 또는 다른 advisory 의 record 는 응답 없음이다
-  • OSV 가 다른 `modified` 로 주는 record 는 이번 판정에 쓰지 않고
+  • OSV 가 다른 시각으로 주는 record 는 이번 판정에 쓰지 않고
     보관하지도 않는다
   • 이때 응답은 응답 없음이다: check 는 `provider_unavailable` 을 보고한다
   • 그러면 effect gate 는 `SAFEDEPS_ACCEPT_RISK` 여부와 상관없이
     rollback 한다
   • 그 쌍으로 보관한 file 이 다른 record 를 담고 있으면 그것도 응답이
     가리킨 record 가 아니다
-  • 다른 record 란 `id` 가 다르거나, `id` 는 같고 `modified` 가 다른
-    record 다
+  • 다른 record 란 `id` 가 다르거나, `id` 는 같고 다른 시각의 record 다
   • 그런 file 에는 `advisory.log` 에 WARN 한 줄이 남고 OSV 에 다시
     질의한다
   • file 은 그대로 둔다. OSV 가 이제 맞는 record 를 주면 그 record 가

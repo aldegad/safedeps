@@ -789,20 +789,45 @@ OSV.dev — an answer that cannot be read
     only the record's `aliases` name blocks the install
   • a record is kept in `cache/osv-vuln/` only under the pair (`id`,
     `modified`) the answer gave
-  • a record kept under that pair is read again under the same pair; an
-    advisory OSV has changed has a new `modified`, so a new key
-  • a record is the one the answer named only when its own `id` and
-    `modified` both equal that pair
+  • a record kept under that pair is read again under the same pair, by the
+    same rule as a record OSV serves; an advisory OSV has changed has a new
+    `modified`, so a new key
+  • a record is the one the answer named only when its own `id` equals that
+    `id` and its `modified` is the same time as that `modified` by the
+    microsecond rule
+  • the microsecond rule: the batch gives `modified` with six fraction
+    digits, and the record gives the same time with nine
+  • measured on 2026-11-19 over the 29 advisories of lodash 4.17.20,
+    minimist 1.2.5 and axios 0.21.1: 27 records carried the batch's six
+    digits and three more, and the other two the batch's own string; the
+    two advisories of nanoid 3.3.12 were like the 27
+  • so both values must be times as OSV's schema writes them: RFC 3339, UTC,
+    an upper-case `T`, at most nine fraction digits, ending in `Z`, each
+    field in its range and the day within its month
+  • they must have the same date and second, and their fractions must agree
+    in the first six digits, each read with zeros after the digits it gives
+  • a batch that gives more than six digits is held to all of them
+  • no batch has been seen to give fewer; reading a shorter one as the same
+    microsecond with zeros is the stricter reading, so a batch's `…03Z` is
+    not a record's `…03.191256883Z`
+  • anything else is another time: a value that is not such a time, another
+    second, another digit; an offset is not OSV's form and is refused even
+    where it names the same instant
+  • the CLI (`osv_same_time` in `SAFEDEPS_OSV_JQ`) and the core
+    (`osv_same_time` in `rust/src/post/providers.rs`) read by this one rule,
+    and `post::providers::osv_answers_match_cli` runs both on the same rows
+  • so a kept record with nine digits answers again for the six the batch
+    gave
   • a record named with no `modified` is asked every time and not kept
   • with no `modified` in the answer, only the `id` must match
   • a record that cannot be read, or that is another advisory's record, is
     no answer
-  • a record OSV serves with another `modified` is not used for this
-    verdict and is not kept
+  • a record OSV serves at another time is not used for this verdict and is
+    not kept
   • the answer is then no answer: the check reports `provider_unavailable`
   • the effect gate then rolls back, `SAFEDEPS_ACCEPT_RISK` or not
   • a file kept under the pair that holds another record is not that
-    record either: another `id`, or the same `id` at another `modified`
+    record either: another `id`, or the same `id` at another time
   • for such a file `advisory.log` gets a WARN line and OSV is asked again
   • the file is left as it was unless OSV now serves the matching record,
     which then replaces it

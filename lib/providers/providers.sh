@@ -213,15 +213,44 @@ safedeps_cache_is_fresh() {
 #                    empty when it goes on, and an error for anything else. A
 #                    page with a token is part of an answer, never the whole of
 #                    one.
+#   osv_time         a `modified` as OSV writes one, as [second, fraction]:
+#                    an RFC 3339 date-time, YYYY-MM-DDTHH:MM:SS with each
+#                    field in its range and the day within its month (a
+#                    second of 60 is RFC 3339's leap second), then at most
+#                    nine fraction digits, then `Z`; null for anything else.
+#                    OSV's schema writes every time in UTC, ending in `Z`, so
+#                    an offset, a lower-case `t` or `z`, a space for the `T`
+#                    and a tenth digit are not times here, even where an
+#                    offset names the same instant.
+#   osv_same_time($batch)
+#                    the microsecond rule: the record's `modified` is the
+#                    one the batch gave when it is the same time to the
+#                    microsecond. querybatch gives six fraction digits and
+#                    /v1/vulns/<id> nine for the same time. Measured on
+#                    2026-11-19 over the 29 advisories of lodash 4.17.20,
+#                    minimist 1.2.5 and axios 0.21.1, 27 records carried the
+#                    batch's six digits and three more, and the other two the
+#                    batch's own string; the two of nanoid 3.3.12 were like
+#                    the 27. Both must be times (osv_time) with the same date
+#                    and second, and their fractions must agree in the first
+#                    six digits, each read with zeros after the digits it
+#                    gives. A batch that gives more than six is held to all of
+#                    them. No batch has been seen to give fewer: one that
+#                    ended in 0 kept it (…04.440180Z). Reading a shorter one
+#                    as the same microsecond with zeros is the stricter of the
+#                    two readings, so …03Z is not …03.191256883Z. Anything else
+#                    is another time: a value that is not a time, another
+#                    second, another digit.
 #   osv_record($id; $modified)
 #                    the record GET /v1/vulns/<id> answers: an object that
 #                    names that id and, when the answer that named it gave a
-#                    `modified`, carries that `modified`. A record another
-#                    `modified` names is another version of the advisory,
-#                    not the one the answer named.
-# The core reads by the same rules (osv_answer, page_token and record in
-# rust/src/post/providers.rs), and `osv_answers_match_cli` holds them together.
-SAFEDEPS_OSV_JQ='def osv_answer: type == "object" and (.vulns | type == "array" or . == null); def osv_page_token: .next_page_token as $t | if $t == null then null elif ($t | type) == "string" and ($t | length) > 0 then $t else error("not a page token") end; def osv_record($id; $modified): type == "object" and .id == $id and ($modified == "" or .modified == $modified);'
+#                    `modified`, carries that time by the microsecond rule.
+#                    A record at another time is another version of the
+#                    advisory, not the one the answer named.
+# The core reads by the same rules (osv_answer, page_token, osv_time,
+# osv_same_time and osv_record in rust/src/post/providers.rs), and
+# `osv_answers_match_cli` holds them together.
+SAFEDEPS_OSV_JQ='def osv_answer: type == "object" and (.vulns | type == "array" or . == null); def osv_page_token: .next_page_token as $t | if $t == null then null elif ($t | type) == "string" and ($t | length) > 0 then $t else error("not a page token") end; def osv_digits: explode | reduce .[] as $c (0; . * 10 + $c - 48); def osv_time: if type == "string" and test("\\A[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)([.][0-9]{1,9})?Z\\z") and (.[8:10] | osv_digits) <= ((.[0:4] | osv_digits) as $y | [31, (if $y % 4 == 0 and ($y % 100 != 0 or $y % 400 == 0) then 29 else 28 end), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][(.[5:7] | osv_digits) - 1]) then [.[0:19], (.[19:(length - 1)] | ltrimstr("."))] else null end; def osv_same_time($batch): ($batch | osv_time) as $b | osv_time as $r | if $b == null or $r == null then false else $b[0] == $r[0] and (([6, ($b[1] | length)] | max) as $p | ($b[1] + "000000000")[0:$p] == ($r[1] + "000000000")[0:$p]) end; def osv_record($id; $modified): type == "object" and .id == $id and ($modified == "" or (.modified | osv_same_time($modified)));'
 
 # The answer this prints is the one the rule read, and it is the only copy a
 # verdict reads: the file may hold something else by the time anything opens it
@@ -591,12 +620,14 @@ safedeps_osv_query_batch() {
 #
 # OSV changes a record's `modified` whenever it changes the record, so the id
 # and the MODIFIED the answer gave name one record, and a record is that record
-# only when it carries both (osv_record). A record OSV serves with another
-# `modified` is not an answer: it is not used and not kept, and the read
-# fails. A record read under that pair is kept in cache/osv-vuln and read again
-# under the same pair; a kept file that is not that record is no answer, OSV is
-# asked again, and the record it gives replaces the file. Without a MODIFIED
-# nothing names one record, so the record is asked of OSV and not kept.
+# only when it carries the id and the time of MODIFIED, by the microsecond rule
+# (osv_record, osv_same_time). A record OSV serves at another time is not an
+# answer: it is not used and not kept, and the read fails. A record read under
+# that pair is kept in cache/osv-vuln and read again under the same pair by the
+# same rule, so a kept record with nine digits answers for the six the batch
+# gave; a kept file that is not that record is no answer, OSV is asked again,
+# and the record it gives replaces the file. Without a MODIFIED nothing names
+# one record, so the record is asked of OSV and not kept.
 # Prints the record; returns 1 when there is no record to print.
 #   safedeps_osv_vuln_answer FILE ID [MODIFIED]
 safedeps_osv_vuln_answer() {

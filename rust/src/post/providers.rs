@@ -44,13 +44,55 @@ fn osv_answer(v:Value)->Option<Value>{(matches!(v,Value::Obj(_))&&matches!(jv::f
 fn page_token(v:&Value)->Result<Option<W>,()>{
     match jv::field(v,"next_page_token"){Ok(Value::Null)=>Ok(None),Ok(Value::Str(t)) if !t.is_empty()=>Ok(Some(t.clone())),_=>Err(())}
 }
+/// A `modified` as OSV writes one, split into its second and its fraction: an
+/// RFC 3339 date-time, `YYYY-MM-DDTHH:MM:SS` with each field in its range and
+/// the day within its month (a second of 60 is RFC 3339's leap second), then
+/// at most nine fraction digits, then `Z`. OSV's schema writes every time in
+/// UTC, ending in `Z`. So an offset, a lower-case `t` or `z`, a space for the
+/// `T` and a tenth digit are not OSV's form, and none of them is a time here,
+/// even where an offset names the same instant. The CLI reads a time by the
+/// same rule (osv_time).
+fn osv_time(s:&[u8])->Option<(&[u8],&[u8])>{
+    let num=|a:usize,b:usize|s.get(a..b).filter(|d|d.iter().all(u8::is_ascii_digit)).map(|d|d.iter().fold(0u32,|n,c|n*10+u32::from(c-b'0')));
+    let (year,month,day,hour,minute,second)=(num(0,4)?,num(5,7)?,num(8,10)?,num(11,13)?,num(14,16)?,num(17,19)?);
+    let at=|i:usize,c:u8|s.get(i)==Some(&c);
+    let leap=year%4==0&&(year%100!=0||year%400==0);
+    let days=[31,if leap{29}else{28},31,30,31,30,31,31,30,31,30,31];
+    let fields=(1..=12).contains(&month)&&(1..=days[month as usize-1]).contains(&day)&&hour<24&&minute<60&&second<=60;
+    if !(fields&&at(4,b'-')&&at(7,b'-')&&at(10,b'T')&&at(13,b':')&&at(16,b':')){return None}
+    let (z,rest)=s[19..].split_last()?;
+    let fraction=match rest{[]=>rest,[b'.',f@..] if (1..=9).contains(&f.len())&&f.iter().all(u8::is_ascii_digit)=>f,_=>return None};
+    (*z==b'Z').then_some((&s[..19],fraction))
+}
+/// The microsecond rule: a record's `modified` is the one the batch gave when
+/// it is the same time to the microsecond. querybatch gives a `modified` with
+/// six fraction digits, and /v1/vulns/<id> gives the same time with nine.
+/// Measured on 2026-11-19 over the 29 advisories of lodash 4.17.20, minimist
+/// 1.2.5 and axios 0.21.1, 27 records carried the batch's six digits and three
+/// more, and the other two the batch's own string; the two of nanoid 3.3.12
+/// were like the 27. So both values must be times (osv_time) with the same
+/// date and second, and their fractions must agree in the first six digits,
+/// each read with zeros after the digits it gives. A batch that gives more
+/// than six digits is held to all of them. No batch has been seen to give
+/// fewer: one that ended in 0 kept it (`…04.440180Z`). Reading a shorter one
+/// as the same microsecond with zeros is the stricter of the two readings, so
+/// `…03Z` is not `…03.191256883Z`. Anything else is another time and another
+/// version of the advisory: a value that is not a time, another second,
+/// another digit. The CLI reads by the same rule (osv_same_time).
+fn osv_same_time(record:&[u8],batch:&[u8])->bool{
+    let (Some((second,given)),Some((record_second,fraction)))=(osv_time(batch),osv_time(record))else{return false};
+    let digits=given.len().max(6);
+    let pad=|f:&[u8]|->Vec<u8>{(0..digits).map(|i|f.get(i).copied().unwrap_or(b'0')).collect()};
+    second==record_second&&pad(given)==pad(fraction)
+}
 /// The record GET /v1/vulns/<id> answers: an object that names that id and,
-/// when the answer that named it gave a `modified`, carries that `modified`.
-/// A record another `modified` names is another version of the advisory, not
-/// the one the answer named. The CLI reads it by the same rule (osv_record).
+/// when the answer that named it gave a `modified`, carries that time by the
+/// microsecond rule (osv_same_time). A record at another time is another
+/// version of the advisory, not the one the answer named. The CLI reads it by
+/// the same rule (osv_record).
 fn osv_record(v:Value,id:&[u8],modified:&[u8])->Option<Value>{
     let named=matches!(jv::field(&v,"id"),Ok(Value::Str(s)) if s.as_slice()==id);
-    let current=modified.is_empty()||matches!(jv::field(&v,"modified"),Ok(Value::Str(s)) if s.as_slice()==modified);
+    let current=modified.is_empty()||matches!(jv::field(&v,"modified"),Ok(Value::Str(s)) if osv_same_time(s,modified));
     (named&&current).then_some(v)
 }
 /// jq's @uri, which the CLI puts an id in its record URL with.
@@ -292,11 +334,13 @@ impl Providers{
     /// One advisory record, as the CLI reads it (safedeps_osv_vuln_detail):
     /// GET the batch URL with `querybatch` replaced by `vulns/<id>`, so the
     /// record comes from the source whose answer named it. A record is the one
-    /// the answer named only when it carries the id and the `modified` the
-    /// answer gave (osv_record); a record OSV serves with another `modified` is
-    /// not used and not kept, and the read fails. A record kept under that
-    /// pair is read again under it; a kept file that is not that record is no
-    /// answer, OSV is asked again, and the record it gives replaces the file.
+    /// the answer named only when it carries the id and the time of the
+    /// `modified` the answer gave, by the microsecond rule (osv_record); a
+    /// record OSV serves at another time is not used and not kept, and the
+    /// read fails. A record kept under that pair is read again under it, by the
+    /// same rule, so a kept record with nine digits answers for the six the
+    /// batch gave; a kept file that is not that record is no answer, OSV is
+    /// asked again, and the record it gives replaces the file.
     /// With no `modified` nothing names one record, so it is asked and not
     /// kept.
     fn record(&mut self,url:&str,id:&[u8],modified:&[u8])->Option<Value>{
@@ -442,20 +486,56 @@ fn osv_answers_match_cli() {
     // The record of one id: one object that names it, and nothing else.
     let record_head = "safedeps_osv_vuln_answer() {";
     let record_body = cli.split_once(record_head).unwrap().1.split_once("\n}").unwrap().0;
-    // With a `modified` from the answer, the record must carry the same one:
-    // another, none, or one that is not a string is another version of it.
+    // With a `modified` from the answer, the record must carry the same time by
+    // the microsecond rule: another time, none, or one that is not a time is
+    // another version of it.
     let record_script = format!("{rule}\n{record_head}{record_body}\n}}\nsafedeps_osv_vuln_answer \"$1\" GHSA-x \"$2\" >/dev/null");
-    let records = [(r#"{"id":"GHSA-x"}"#, "", true), (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, "", true), ("  {\"id\":\"GHSA-x\"}\n", "", true),
+    let mut records: Vec<(String, &str, bool)> = [(r#"{"id":"GHSA-x"}"#, "", true), (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, "", true), ("  {\"id\":\"GHSA-x\"}\n", "", true),
         (r#"{"id":"GHSA-y"}"#, "", false), (r#"{"id":"ghsa-x"}"#, "", false), (r#"{"id":1}"#, "", false), (r#"{"id":null}"#, "", false), ("{}", "", false), ("[]", "", false),
         (r#"[{"id":"GHSA-x"}]"#, "", false), ("null", "", false), ("", "", false), ("not json", "", false), (r#"{"id":"GHSA-x"} {"id":"GHSA-x"}"#, "", false), (r#"{"id":"GHSA-x"} null"#, "", false),
         (r#"{"id":"GHSA-x","modified":"2026-11-17T16:00:03Z"}"#, "2026-11-17T16:00:03Z", true),
-        (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, "m", true),
+        (r#"{"id":"GHSA-x","aliases":["CVE-2026-1"],"modified":"m"}"#, "m", false),
         (r#"{"id":"GHSA-x","modified":"2026-11-10T00:00:00Z"}"#, "2026-11-17T16:00:03Z", false),
-        (r#"{"id":"GHSA-x","modified":"2026-11-17T16:00:03.000Z"}"#, "2026-11-17T16:00:03Z", false),
-        (r#"{"id":"GHSA-x"}"#, "m", false), (r#"{"id":"GHSA-x","modified":null}"#, "m", false), (r#"{"id":"GHSA-x","modified":1}"#, "1", false),
-        (r#"{"id":"GHSA-x","modified":"M"}"#, "m", false), (r#"{"id":"GHSA-y","modified":"m"}"#, "m", false), (r#"{"id":"GHSA-x","modified":"n"}"#, "", true)];
+        (r#"{"id":"GHSA-x","modified":"2026-11-17T16:00:03.000Z"}"#, "2026-11-17T16:00:03Z", true),
+        (r#"{"id":"GHSA-x"}"#, "2026-11-17T16:00:03Z", false), (r#"{"id":"GHSA-x","modified":null}"#, "2026-11-17T16:00:03Z", false), (r#"{"id":"GHSA-x","modified":1}"#, "1", false),
+        (r#"{"id":"GHSA-x","modified":"M"}"#, "m", false), (r#"{"id":"GHSA-y","modified":"2026-11-17T16:00:03Z"}"#, "2026-11-17T16:00:03Z", false), (r#"{"id":"GHSA-x","modified":"n"}"#, "", true)]
+        .iter().map(|(body, modified, record)| (body.to_string(), *modified, *record)).collect();
+    // The microsecond rule, row by row: the record's `modified`, the batch's,
+    // and whether they are the same time.
+    let times = [
+        // The measured pair, six digits from the batch and nine from the
+        // record, and the same time written with more or fewer zeros.
+        ("2026-09-10T03:50:51.191256883Z", "2026-09-10T03:50:51.191256Z", true), ("2026-09-10T03:50:51.191256Z", "2026-09-10T03:50:51.191256Z", true),
+        ("2026-09-10T03:50:51.191256Z", "2026-09-10T03:50:51.191256000Z", true), ("2026-09-10T03:50:51.191256883Z", "2026-09-10T03:50:51.191256883Z", true),
+        ("2026-11-17T16:00:03Z", "2026-11-17T16:00:03.000000Z", true), ("2026-11-17T16:00:03.000000999Z", "2026-11-17T16:00:03Z", true),
+        ("2026-09-10T03:50:51.191000883Z", "2026-09-10T03:50:51.191Z", true), ("2028-02-29T00:00:00.5Z", "2028-02-29T00:00:00.500000Z", true),
+        ("2000-02-29T23:59:59Z", "2000-02-29T23:59:59Z", true), ("2016-12-31T23:59:60.5Z", "2016-12-31T23:59:60.500000Z", true),
+        // Another time: a later or an earlier microsecond, the same six digits
+        // in another second or day, a batch with no digits or three against
+        // a record past them, a batch with nine held to all nine, a record
+        // with fewer digits than the batch's.
+        ("2026-09-10T03:50:51.191257883Z", "2026-09-10T03:50:51.191256Z", false), ("2026-09-10T03:50:51.191255999Z", "2026-09-10T03:50:51.191256Z", false),
+        ("2026-09-10T03:50:52.191256883Z", "2026-09-10T03:50:51.191256Z", false), ("2026-09-11T03:50:51.191256883Z", "2026-09-10T03:50:51.191256Z", false),
+        ("2026-11-17T16:00:03.191256883Z", "2026-11-17T16:00:03Z", false), ("2026-09-10T03:50:51.191256883Z", "2026-09-10T03:50:51.191Z", false),
+        ("2026-09-10T03:50:51.191256884Z", "2026-09-10T03:50:51.191256883Z", false), ("2026-09-10T03:50:51.191Z", "2026-09-10T03:50:51.191256Z", false),
+        // Not OSV's form on either side, even for the same instant or the
+        // same bytes: an offset, a lower-case `t` and `z`, a space, no `Z`, an
+        // empty or comma fraction, a tenth digit, a newline after the `Z`, a
+        // space before the date, a day or a field out of its range, no time.
+        ("2026-09-10T12:50:51.191256883+09:00", "2026-09-10T03:50:51.191256Z", false), ("2026-09-10T03:50:51.191256883Z", "2026-09-10T03:50:51.191256+00:00", false),
+        ("2026-09-10T03:50:51.191256+00:00", "2026-09-10T03:50:51.191256+00:00", false), ("2026-11-17t16:00:03z", "2026-11-17t16:00:03z", false),
+        ("2026-11-17 16:00:03Z", "2026-11-17 16:00:03Z", false), ("2026-11-17T16:00:03", "2026-11-17T16:00:03Z", false), ("2026-11-17T16:00:03Z", "2026-11-17T16:00:03", false),
+        ("2026-11-17T16:00:03.Z", "2026-11-17T16:00:03.Z", false), ("2026-11-17T16:00:03,5Z", "2026-11-17T16:00:03,5Z", false),
+        ("2026-11-17T16:00:03.1234567890Z", "2026-11-17T16:00:03.1234567890Z", false), ("2026-11-17T16:00:03Z\n", "2026-11-17T16:00:03Z\n", false),
+        (" 2026-11-17T16:00:03Z", " 2026-11-17T16:00:03Z", false), ("2026-02-30T00:00:00Z", "2026-02-30T00:00:00Z", false),
+        ("2027-02-29T00:00:00Z", "2027-02-29T00:00:00Z", false), ("1900-02-29T00:00:00Z", "1900-02-29T00:00:00Z", false),
+        ("2026-04-31T00:00:00Z", "2026-04-31T00:00:00Z", false), ("2026-13-01T00:00:00Z", "2026-13-01T00:00:00Z", false),
+        ("2026-00-01T00:00:00Z", "2026-00-01T00:00:00Z", false), ("2026-11-00T00:00:00Z", "2026-11-00T00:00:00Z", false),
+        ("2026-11-17T24:00:00Z", "2026-11-17T24:00:00Z", false), ("2026-11-17T16:60:00Z", "2026-11-17T16:60:00Z", false),
+        ("2026-11-17T16:00:61Z", "2026-11-17T16:00:61Z", false)];
+    records.extend(times.iter().map(|(at, given, same)| (format!("{{\"id\":\"GHSA-x\",\"modified\":\"{}\"}}", at.replace('\n', "\\n")), *given, *same)));
     for (body, modified, record) in records {
-        fs::write(&file, body).unwrap();
+        fs::write(&file, &body).unwrap();
         assert_eq!(jv::read_one_object(&file).and_then(|v| osv_record(v, b"GHSA-x", modified.as_bytes())).is_some(), record, "the core's record on {body:?} under {modified:?}");
         let cli = Command::new("/bin/bash").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .args(["-c", &record_script, "record-contract"]).arg(&file).arg(modified).status().unwrap();
