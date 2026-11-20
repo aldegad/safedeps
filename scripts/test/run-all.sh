@@ -102,6 +102,7 @@ ALL_BATTERIES=(
   "self-budget|2|dev|1|1|140|scripts/test/self-budget.sh"
   "advisory-log-retention|1|dev|1|1|1|scripts/test/advisory-log-retention.sh"
   "approvals-store|1|dev|1|1|1|scripts/test/approvals-store.sh"
+  "approvals-provenance|1|dev|1|1|15|scripts/test/approvals-provenance.sh"
   "hook-entry|1|dev|1|1|2|scripts/test/hook-entry.sh"
   "lockless-forms|1|dev|2|1|509|scripts/test/lockless-forms.sh"
   "effect-trace-grid|2|release|2|1|803|scripts/test/effect-trace-grid.sh"
