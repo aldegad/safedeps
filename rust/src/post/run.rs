@@ -358,9 +358,9 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    const O_NONBLOCK: i32 = 0x0004;
+    pub(super) const O_NONBLOCK: i32 = 0x0004;
     #[cfg(not(target_os = "macos"))]
-    const O_NONBLOCK: i32 = 0o4000;
+    pub(super) const O_NONBLOCK: i32 = 0o4000;
     /// What an open of a FIFO for writing, without blocking, returns while no
     /// process has it open for reading.
     const ENXIO: i32 = 6;

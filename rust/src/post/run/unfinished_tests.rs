@@ -8,9 +8,10 @@
 //! named with this test process's pid and another start is the mark of a run
 //! whose pid the kernel handed out again, so a row makes the mark of a run
 //! that is gone without waiting for a pid to be free.
-use super::tests::{answers, child, digits_between, hook_child, reader_came, Reaped, BOUND};
+use super::tests::{answers, child, digits_between, hook_child, reader_came, Reaped, BOUND, O_NONBLOCK};
 use crate::post::{jv, process, report::cat, sh};
-use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::{Command, Output}, time::{Duration, Instant}};
+use std::{fs, io::{ErrorKind, Read}, os::unix::fs::{OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}, process::{Command, Output},
+    time::{Duration, Instant}};
 
 const MODULE: &str = "post::run::unfinished_tests";
 
@@ -92,6 +93,32 @@ impl Held {
     }
 }
 
+/// What runs write to `fifo`, a FIFO in place of advisory.log, read until
+/// `done` says the runs the row waits for are over. The FIFO stays open for
+/// reading the whole time, so no run waits in its write of a line. `done` is
+/// asked before each read, so the read after it says yes gets every byte a
+/// run that ended wrote.
+fn read_fifo_until(fifo: &Path, mut done: impl FnMut() -> bool) -> Vec<u8> {
+    let mut reader = fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(fifo).unwrap();
+    let (mut read, mut buffer) = (Vec::new(), [0u8; 4096]);
+    let until = Instant::now() + BOUND;
+    loop {
+        let over = done();
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => read.extend_from_slice(&buffer[..n]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => panic!("the read of {}: {error}", fifo.display()),
+            }
+        }
+        if over { return read }
+        assert!(Instant::now() < until, "the runs ended within {BOUND:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// The names in `dir`, sorted.
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
@@ -126,10 +153,11 @@ fn line(mark: &Path, opened: &[u8], fact: &[u8], unclaimed: &[u8], tool: &[u8], 
 }
 
 /// The line for the mark of a run that is gone, where the mark does not name
-/// its call: `reason` says what is wrong with it.
-fn unnamed(mark: &Path, fact: &[u8], reason: &[u8]) -> Vec<u8> {
+/// its call: `reason` says what is wrong with it. `unclaimed` is empty, or the
+/// sentence that this run could not claim it.
+fn unnamed(mark: &Path, fact: &[u8], unclaimed: &[u8], reason: &[u8]) -> Vec<u8> {
     cat(&[HEAD, b"a post run did not finish judging a call: its judgment mark ", sh::bytes(mark), b" is still there, and ", fact,
-        b". The mark ", reason, b", so the call is not known."])
+        b".", unclaimed, b" The mark ", reason, b", so the call is not known."])
 }
 
 /// The sentence of a line whose mark this run could not claim, in a
@@ -261,39 +289,57 @@ fn a_mark_is_live_by_its_pid_and_start_and_gone_by_another_start() {
     assert_eq!(not_judged(&root.home).len(), 1, "{}", log(&root.home));
 }
 
-/// Done Criteria (3) and (5): two post runs judge in one home at once. A run
-/// that reads the home meanwhile reports neither mark. One of the two is
-/// killed; the other ends by itself and removes its own mark and not the
-/// other's. The next run reports the killed run's mark alone.
+/// Done Criteria (3) and (5): two post runs judge in one home at once. Each
+/// writes its mark under state.lock, lets the lock go, and then waits in its
+/// first write to advisory.log, here a FIFO no one reads yet, so neither run
+/// waits on the other. A run that reads the home meanwhile ends by itself,
+/// which it cannot do after a write to that log, and leaves both marks as they
+/// are. One of the two is killed. The other, once the log is read, ends by
+/// itself and removes its own mark and not the other's, and nothing it wrote
+/// is a NOT JUDGED line. The next run reports the killed run's mark alone.
 #[test]
 fn two_runs_at_once_neither_report_nor_remove_each_others_mark() {
     hook_child();
     const TEST: &str = "two_runs_at_once_neither_report_nor_remove_each_others_mark";
     let root = Root::new();
-    let mut first = hold(TEST, &root);
-    let mut second = Reaped(Some(child(&format!("{MODULE}::{TEST}"), &root.root, &root.home, None)));
-    let second_pid = second.0.as_ref().unwrap().id();
-    let until = Instant::now() + BOUND;
-    while names(&root.judging()).len() < 2 {
-        assert!(!second.ended() && Instant::now() < until, "the second run wrote its mark within {BOUND:?}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let first_name = format!("{}-{}.json", first.pid, process::start(first.pid).expect("the first run's start"));
-    let second_name = format!("{}-{}.json", second_pid, process::start(second_pid).expect("the second run's start"));
+    let fifo = root.home.join("advisory.log");
+    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let path = format!("{MODULE}::{TEST}");
+    let mut first = Reaped(Some(child(&path, &root.root, &root.home, None)));
+    let mut second = Reaped(Some(child(&path, &root.root, &root.home, None)));
+    let named = |run: &Reaped| {
+        let pid = run.0.as_ref().unwrap().id();
+        (pid, format!("{pid}-{}.json", process::start(pid).expect("the run's start")))
+    };
+    let ((_, first_name), (second_pid, second_name)) = (named(&first), named(&second));
     let mut both = vec![first_name, second_name.clone()];
     both.sort();
-    assert_eq!(names(&root.judging()), both, "each run's own mark");
+    let until = Instant::now() + BOUND;
+    while names(&root.judging()) != both {
+        assert!(!first.ended() && !second.ended() && Instant::now() < until,
+            "each run wrote its own mark within {BOUND:?}: {:?}", names(&root.judging()));
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let second_mark = root.judging().join(&second_name);
     let opened = field(&second_mark, "opened_at");
-    next_run(TEST, &root, &root.home);
-    assert!(not_judged(&root.home).is_empty(), "a live run's mark is not reported\n{}", log(&root.home));
-    assert_eq!(names(&root.judging()), both);
+    let mut reader = Reaped(Some(child(&path, &root.root, &root.home, Some("true"))));
+    let until = Instant::now() + BOUND;
+    while !reader.ended() {
+        assert!(Instant::now() < until, "a run that read the home meanwhile ended within {BOUND:?}, so it wrote no line");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    ran_quietly(&reader.0.take().unwrap().wait_with_output().unwrap());
+    assert_eq!(names(&root.judging()), both, "it left both marks");
     let mut killed = second.0.take().unwrap();
     killed.kill().unwrap();
     killed.wait().unwrap();
-    let out = first.let_go();
+    let written = read_fifo_until(&fifo, || first.ended());
+    let out = first.0.take().unwrap().wait_with_output().unwrap();
     assert!(out.status.success(), "the first run ended by itself: {:?}", out.status);
     assert_eq!(names(&root.judging()), vec![second_name], "the first run removed its own mark and not the other's");
+    fs::remove_file(&fifo).unwrap();
+    fs::write(&fifo, &written).unwrap();
+    assert!(not_judged(&root.home).is_empty(), "no run said a live run's mark\n{}", log(&root.home));
     next_run(TEST, &root, &root.home);
     let said = not_judged(&root.home);
     let [said] = said.as_slice() else { panic!("one NOT JUDGED line\n{}", log(&root.home)) };
@@ -353,8 +399,8 @@ fn a_mark_that_does_not_name_its_call_is_reported_by_its_file_name() {
     let fact = reused(pid, start);
     let mut said = not_judged(&root.home);
     said.sort();
-    let mut expected = vec![unnamed(&at(1), &fact, b"is not one JSON object"), unnamed(&at(2), &fact, b"is not one JSON object"),
-        unnamed(&at(3), &fact, b"does not name the pid and start in its file name"), unnamed(&at(4), &fact, b"has no string field command")];
+    let mut expected = vec![unnamed(&at(1), &fact, b"", b"is not one JSON object"), unnamed(&at(2), &fact, b"", b"is not one JSON object"),
+        unnamed(&at(3), &fact, b"", b"does not name the pid and start in its file name"), unnamed(&at(4), &fact, b"", b"has no string field command")];
     expected.sort();
     assert!(said == expected, "{}", log(&root.home));
     assert_eq!(names(&root.judging()), kept, "what is not a mark stays");
@@ -386,28 +432,44 @@ fn a_mark_is_reported_in_its_own_home_and_nowhere_else() {
 }
 
 /// A mark no run can claim, in a `judging/` that takes no change, is reported
-/// by every run while that lasts, and each line says that the claim failed
-/// and what the rename returned. Once the directory takes the claim, the next
-/// run reports the mark once more, without that sentence, and removes it.
+/// once, by the first run that reads it. Its line says that the claim failed
+/// and what the rename returned, and that run adds to the mark the record that
+/// it was said, which needs no change to `judging/`. A run after it finds that
+/// record and says nothing, and so does the first run that can claim the
+/// mark, which removes it. A mark that does not name its call gets the same
+/// record, after its own broken bytes.
 #[test]
-fn a_mark_no_run_can_claim_is_reported_by_each_run_until_one_can() {
+fn a_mark_no_run_can_claim_is_reported_once_and_removed_once_one_can() {
     hook_child();
-    const TEST: &str = "a_mark_no_run_can_claim_is_reported_by_each_run_until_one_can";
+    const TEST: &str = "a_mark_no_run_can_claim_is_reported_once_and_removed_once_one_can";
     let root = Root::new();
     let (pid, start) = me();
     let mark = plant(&root.home, pid, start + 1);
+    let broken = root.judging().join(format!("{pid}-{}.json", start + 2));
+    fs::write(&broken, b"{\"pid\":\"").unwrap();
     mode(&root.judging(), 0o500);
     next_run(TEST, &root, &root.home);
+    let fact = reused(pid, start);
+    let mut expected = vec![planted(&mark, start + 1, &fact, &unclaimed(&mark)), unnamed(&broken, &fact, &unclaimed(&broken), b"is not one JSON object")];
+    expected.sort();
+    let said = || { let mut said = not_judged(&root.home); said.sort(); said };
+    assert_eq!(said(), expected, "{}", log(&root.home));
+    for (path, own) in [(&mark, mark_json(pid, start + 1)), (&broken, b"{\"pid\":\"".to_vec())] {
+        let bytes = fs::read(path).unwrap();
+        let record = bytes.strip_prefix(own.as_slice()).expect("the mark's own bytes, as they were");
+        let (head, tail) = (b"\n{\"said_at\":\"".as_slice(), b"\"}\n".as_slice());
+        assert!(record.len() == head.len() + 20 + tail.len() && record.starts_with(head) && record.ends_with(tail)
+            && record[head.len() + 19] == b'Z', "the record that it was said, on a line of its own: {:?}", String::from_utf8_lossy(record));
+    }
     next_run(TEST, &root, &root.home);
-    let stuck = planted(&mark, start + 1, &reused(pid, start), &unclaimed(&mark));
-    assert_eq!(not_judged(&root.home), vec![stuck.clone(), stuck.clone()], "{}", log(&root.home));
-    assert_eq!(names(&root.judging()), vec![name(&mark)], "the mark stays");
+    assert_eq!(said(), expected, "said once\n{}", log(&root.home));
+    let mut both = vec![name(&mark), name(&broken)];
+    both.sort();
+    assert_eq!(names(&root.judging()), both, "the marks stay");
     mode(&root.judging(), 0o700);
     next_run(TEST, &root, &root.home);
-    assert_eq!(not_judged(&root.home), vec![stuck.clone(), stuck, planted(&mark, start + 1, &reused(pid, start), b"")], "{}", log(&root.home));
-    assert!(names(&root.judging()).is_empty());
-    next_run(TEST, &root, &root.home);
-    assert_eq!(not_judged(&root.home).len(), 3, "{}", log(&root.home));
+    assert_eq!(said(), expected, "the run that claims a mark that was said says nothing\n{}", log(&root.home));
+    assert!(names(&root.judging()).is_empty(), "{:?}", names(&root.judging()));
 }
 
 /// A claimed mark whose line advisory.log did not take stays claimed by the
