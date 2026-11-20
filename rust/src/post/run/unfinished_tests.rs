@@ -746,6 +746,49 @@ fn a_mark_whose_judgment_returned_is_not_reported() {
     assert!(names(&root.judging()).is_empty(), "the first run that could claim the mark removed it: {:?}", names(&root.judging()));
 }
 
+/// A judgment that returned while its mark took no write and `judging/` took
+/// no change could neither remove the mark nor add to it the record that it
+/// returned. Its run's last line in advisory.log says both, and the mark stays
+/// as it was. Without that record a later run cannot tell the mark from the
+/// mark of a judgment that did not finish, so the next run says it as NOT
+/// JUDGED, once, and the line before it is the reason. Here the next run can
+/// neither claim the mark nor add to it the record that it was said, and its
+/// second line says that.
+#[test]
+fn a_mark_that_could_neither_go_nor_take_its_record_is_said_by_the_next_run_and_the_log_says_why() {
+    hook_child();
+    const TEST: &str = "a_mark_that_could_neither_go_nor_take_its_record_is_said_by_the_next_run_and_the_log_says_why";
+    let root = Root::new();
+    let mut held = hold(TEST, &root);
+    let mark = root.judging().join(format!("{}-{}.json", held.pid, process::start(held.pid).expect("the kernel's start of the run")));
+    assert!(sh::present(&mark), "the run's own mark, while it judges");
+    let (bytes, opened) = (fs::read(&mark).unwrap(), field(&mark, "opened_at"));
+    mode(&mark, 0o400);
+    mode(&root.judging(), 0o500);
+    let out = held.let_go();
+    assert!(out.status.success(), "the run ended by itself: {:?}", out.status);
+    let written = cat(&[b"post-verify: the judgment of this call returned, and its judgment mark ", sh::bytes(&mark),
+        b" was not removed: removal returned OS error 13. The record that it returned was not added to it either: the write of ", sh::bytes(&mark),
+        b" returned OS error 13. Command: npm install mark-fixture"]);
+    let before = texts(&root.home);
+    assert_eq!(before.last(), Some(&written), "the run's last line says both failures\n{}", log(&root.home));
+    assert_eq!(before.iter().filter(|text| text.starts_with(b"post-verify: the judgment of this call returned")).count(), 1, "{}", log(&root.home));
+    assert!(not_judged(&root.home).is_empty(), "{}", log(&root.home));
+    assert_eq!(names(&root.judging()), vec![name(&mark)], "the mark stays");
+    assert_eq!(fs::read(&mark).unwrap(), bytes, "as it was, with no record that its judgment returned");
+    next_run(TEST, &root, &root.home);
+    let after = texts(&root.home);
+    let [said, unadded] = after.strip_prefix(before.as_slice()).expect("the lines before the next run, as they were") else {
+        panic!("the next run wrote two lines\n{}", log(&root.home))
+    };
+    let expected = line(&mark, &opened, b"\0", &unclaimed(&mark), b"toolu_mark", &root.project(), b"npm install mark-fixture");
+    assert!(with_gone_fact(said, &expected, held.pid), "the next run says the mark as not judged: {}", String::from_utf8_lossy(said));
+    assert_eq!(unadded, &cat(&[b"post-verify: the judgment mark ", sh::bytes(&mark), b" was said, and the record that it was said was not added to it: ",
+        b"the write of ", sh::bytes(&mark), b" returned OS error 13. A later run says it again."]), "{}", log(&root.home));
+    assert_eq!(names(&root.judging()), vec![name(&mark)], "the mark stays");
+    assert_eq!(fs::read(&mark).unwrap(), bytes, "as it was");
+}
+
 /// Done Criteria (1): a judgment that returns removes its run's mark, however
 /// it returns. `post::run::tests::a_run_that_wrote_its_mark_judges_as_before`
 /// returns a message. Here the judgment returns none: the project has no npm
