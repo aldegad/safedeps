@@ -31,8 +31,11 @@ SIGXFSZ left to kill, on an empty store, where the kernels agree). Each run
 after the kill must end where a whole run of the same input ends: the store
 vouches for the same hashes, and a third run inserts nothing and leaves the
 store's bytes as they were. The next row runs the migration through the CLI,
-`safedeps approvals migrate`. The migration rows run whatever the rows before
-them answered.
+`safedeps approvals migrate`. Every report a row reads gives the same five
+counts, a finished run's as a failed one's: inserted, not inserted,
+duplicates, unconfirmed and taken back, which add up to the approve lines. A
+finished run's lines not inserted are 0. The migration rows run whatever the
+rows before them answered.
 
 The last two migration rows let the kernel stop a run's write and leave the
 run alive to report it: the file size limit with SIGXFSZ ignored, on an empty
@@ -97,7 +100,9 @@ PARTWAY_ENTRIES = 5
 PARTWAY_LANDED = 2
 # What a write the file size limit stops answers, as the core reports it.
 EFBIG = "os-error-27"
-FAILED_COUNTS = ("approve_lines", "inserted", "not_inserted", "duplicates", "unconfirmed", "taken_back")
+# The counts every migration report gives: the approve lines, then the five
+# that add up to them.
+COUNTS = ("approve_lines", "inserted", "not_inserted", "duplicates", "unconfirmed", "taken_back")
 
 
 class Failed(Exception):
@@ -380,11 +385,15 @@ def migrated(home, when):
 
 
 def expect_counts(report, approve, inserted, duplicates, when):
-    keys = ("approve_lines", "inserted", "duplicates", "unconfirmed", "taken_back")
-    got = [report[k] for k in keys]
-    want = [approve, inserted, duplicates, 0, 0]
+    """A finished run's counts: no line left out, nothing unconfirmed or
+    taken back, and the five after the approve lines adding up to them. A
+    count the report does not give is None, which no count equals."""
+    got = [report.get(k) for k in COUNTS]
+    want = [approve, inserted, 0, duplicates, 0, 0]
     if got != want:
-        raise Failed(f"{when}: {dict(zip(keys, got))}, want {dict(zip(keys, want))}")
+        raise Failed(f"{when}: {dict(zip(COUNTS, got))}, want {dict(zip(COUNTS, want))}")
+    if sum(got[1:]) != got[0]:
+        raise Failed(f"{when}: the counts {got[1:]} do not add up to the {got[0]} approve lines")
 
 
 def vouched(home):
@@ -398,9 +407,9 @@ def vouched(home):
 def again_inserts_nothing(home, when):
     before = store(home)
     report = migrated(home, when)
-    if report["inserted"] != 0 or store(home) != before:
-        raise Failed(f"{when} inserted {report['inserted']}, and the store's bytes "
-                     f"{'stayed' if store(home) == before else 'changed'}")
+    if (report.get("inserted"), report.get("not_inserted")) != (0, 0) or store(home) != before:
+        raise Failed(f"{when} inserted {report.get('inserted')}, not inserted {report.get('not_inserted')}, "
+                     f"and the store's bytes {'stayed' if store(home) == before else 'changed'}")
 
 
 def whole_run(base, name, n):
@@ -545,10 +554,10 @@ def expect_write_failed(rc, report, err, approve, inserted, duplicates, when):
     if error != (1, "approvals_store_write_failed", EFBIG):
         raise Failed(f"{when}: exit, error and outcome {error!r}, want (1, 'approvals_store_write_failed', {EFBIG!r}): {err!r}")
     lines = approve - duplicates
-    got = [report.get(k) for k in FAILED_COUNTS]
+    got = [report.get(k) for k in COUNTS]
     want = [approve, inserted, lines - inserted, duplicates, 0, 0]
     if got != want:
-        raise Failed(f"{when}: {dict(zip(FAILED_COUNTS, got))}, want {dict(zip(FAILED_COUNTS, want))}")
+        raise Failed(f"{when}: {dict(zip(COUNTS, got))}, want {dict(zip(COUNTS, want))}")
     if sum(got[1:]) != got[0]:
         raise Failed(f"{when}: the counts {got[1:]} do not add up to the {got[0]} approve lines")
     said = ("%d of the run's %d store lines are in the store and %d are not" % (inserted, lines, lines - inserted)).encode()

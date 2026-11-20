@@ -707,7 +707,9 @@ fn the_command_reads_its_options_and_prints_its_report() {
     assert_eq!(options(&[]), Some((false, &[][..])));
     assert_eq!(options(&["--bogus"]), None);
     assert!(USAGE.contains("| migrate [--json] [--] [<archive>...]"));
-    // Two homes alike: one run in each, the person's lines and --json.
+    // Two homes alike: one run in each, the person's lines and --json. A
+    // finished run gives its lines not inserted, 0, as every report that
+    // gives the approve lines does, so the same five add up to them.
     let two = || {
         let h = home();
         let (a, b) = (entry(&h, "a", None), no_entry("b"));
@@ -719,7 +721,7 @@ fn the_command_reads_its_options_and_prints_its_report() {
     assert!(!path(&h.home).exists());
     let (code, out, err) = command(&h.home, &h.ledger, &[]);
     let want = format!(
-        "approvals migrate: {}\n  read {}: 2 lines: 2 approve, 0 cache, 0 undone, 0 in-doubt, 0 broken, 0 torn\n  2 approve lines: 1 inserted, 0 duplicates, 1 unconfirmed, 0 taken back\n  unconfirmed {b}: no ledger entry stands at its path\n",
+        "approvals migrate: {}\n  read {}: 2 lines: 2 approve, 0 cache, 0 undone, 0 in-doubt, 0 broken, 0 torn\n  2 approve lines: 1 inserted, 0 not inserted, 0 duplicates, 1 unconfirmed, 0 taken back\n  unconfirmed {b}: no ledger entry stands at its path\n",
         path(&h.home).display(),
         h.home.join(ADVISORY_LOG).display()
     );
@@ -727,7 +729,7 @@ fn the_command_reads_its_options_and_prints_its_report() {
     let (h, b) = two();
     let (code, out, err) = command(&h.home, &h.ledger, &["--json"]);
     let want = format!(
-        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":2,"approve":2,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":2,"inserted":1,"duplicates":0,"unconfirmed":1,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[{{"hash":"{b}","reason":"no_entry"}}],"error":null}}"#,
+        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":2,"approve":2,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":2,"inserted":1,"not_inserted":0,"duplicates":0,"unconfirmed":1,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[{{"hash":"{b}","reason":"no_entry"}}],"error":null}}"#,
         path(&h.home).display(),
         h.home.join(ADVISORY_LOG).display()
     ) + "\n";
