@@ -30,9 +30,21 @@ the kernel kill a run inside its write (the same file size limit, with
 SIGXFSZ left to kill, on an empty store, where the kernels agree). Each run
 after the kill must end where a whole run of the same input ends: the store
 vouches for the same hashes, and a third run inserts nothing and leaves the
-store's bytes as they were. The last row runs the migration through the CLI,
+store's bytes as they were. The next row runs the migration through the CLI,
 `safedeps approvals migrate`. The migration rows run whatever the rows before
 them answered.
+
+The last two migration rows let the kernel stop a run's write and leave the
+run alive to report it: the file size limit with SIGXFSZ ignored, on an empty
+store, so the write fails with EFBIG once the limit is reached. One cuts the
+write in the middle of a line, the other lets no byte land (its control). The
+store's bytes are read to measure the condition, and the report must say what
+`approvals index` says right after it: the run's inserted lines are the run's
+hashes the store vouches for, the lines it did not insert are the rest, and
+inserted, not inserted, duplicates, unconfirmed and taken back add up to the
+approve lines. A run after it inserts what the failed run did not and counts
+what it did as duplicates, and a third run inserts nothing and leaves the
+store's bytes as they were.
 """
 import calendar
 import fcntl
@@ -70,6 +82,8 @@ MIGRATE_ROWS = (
     "a migration killed while it holds the store lock, run again, ends where a whole run ends",
     "a migration killed inside its write, run again, ends where a whole run ends",
     "safedeps approvals migrate runs the core's migration, and answers exit 4 for what the core refused",
+    "a migration whose write the kernel stops partway reports the lines of the run the store holds, and the runs after it end where a whole run ends",
+    "a migration whose write lands no byte reports that none of its lines is in the store",
 )
 # The second of the migration rows' first advisory.log line.
 FIRST = calendar.timegm((2026, 11, 1, 0, 0, 0))
@@ -77,6 +91,13 @@ FIRST = calendar.timegm((2026, 11, 1, 0, 0, 0))
 HELD_ENTRIES = 3000
 CUT_ENTRIES = 400
 KILL_TRIES = 3
+# The partway rows: approvals in the input, and how many of their store lines
+# land whole before the limit cuts the next one.
+PARTWAY_ENTRIES = 5
+PARTWAY_LANDED = 2
+# What a write the file size limit stops answers, as the core reports it.
+EFBIG = "os-error-27"
+FAILED_COUNTS = ("approve_lines", "inserted", "not_inserted", "duplicates", "unconfirmed", "taken_back")
 
 
 class Failed(Exception):
@@ -501,6 +522,76 @@ def row_cli(base):
             raise Failed(f"`safedeps {' '.join(args)}` exited {rc} with {err!r}, want exit 4 and what it refused")
 
 
+def migrate_refused(home, limit):
+    """`approvals migrate --json` in HOME under a file size limit whose signal
+    is ignored, so its write fails with EFBIG where the limit stops it: its
+    exit status, its report and its stderr. The report is read whatever the
+    status, and a run that printed none is the row's failure."""
+    r = subprocess.run([CORE, "approvals", "migrate", "--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       env=core_env(home), cwd=home.parent, timeout=300, preexec_fn=limiter(limit))
+    try:
+        report = json.loads(r.stdout)
+    except ValueError:
+        raise Failed(f"the run under a limit of {limit} bytes exited {r.returncode} with no report: {r.stdout!r} {r.stderr!r}")
+    return r.returncode, report, r.stderr
+
+
+def expect_write_failed(rc, report, err, approve, inserted, duplicates, when):
+    """A run whose write failed: exit 1, the failure named with the write's
+    outcome, its counts, the five after the approve lines adding up to them,
+    and the stderr lines that say how many lines are in and out and that a
+    run after it puts the rest in."""
+    error = (rc, report.get("error"), report.get("outcome"))
+    if error != (1, "approvals_store_write_failed", EFBIG):
+        raise Failed(f"{when}: exit, error and outcome {error!r}, want (1, 'approvals_store_write_failed', {EFBIG!r}): {err!r}")
+    lines = approve - duplicates
+    got = [report.get(k) for k in FAILED_COUNTS]
+    want = [approve, inserted, lines - inserted, duplicates, 0, 0]
+    if got != want:
+        raise Failed(f"{when}: {dict(zip(FAILED_COUNTS, got))}, want {dict(zip(FAILED_COUNTS, want))}")
+    if sum(got[1:]) != got[0]:
+        raise Failed(f"{when}: the counts {got[1:]} do not add up to the {got[0]} approve lines")
+    said = ("%d of the run's %d store lines are in the store and %d are not" % (inserted, lines, lines - inserted)).encode()
+    if said not in err or b"run it again" not in err:
+        raise Failed(f"{when}: stderr does not say how many lines are in and out and to run it again: {err!r}")
+
+
+def row_write_stopped_partway(base):
+    hashes, whole = whole_run(base, "partway-whole-run", PARTWAY_ENTRIES)
+    lines = whole.split(b"\n")
+    cut = sum(len(line) + 1 for line in lines[:PARTWAY_LANDED]) + len(lines[PARTWAY_LANDED]) // 2
+    home = base / "partway"
+    approvals_before_the_store(home, PARTWAY_ENTRIES)
+    rc, report, err = migrate_refused(home, cut)
+    # The condition, measured: the store holds the first `cut` bytes a whole
+    # run writes, whole lines and then a piece of one.
+    if store(home) != whole[:cut]:
+        raise Failed(f"the stopped write left {len(store(home))} bytes, want the first {cut} a whole run writes")
+    held, broken = vouched(home)
+    ours = len(held & set(hashes))
+    if (ours, broken) != (PARTWAY_LANDED, 1):
+        raise Failed(f"right after the stopped write the index vouches for {ours} of the run's hashes with {broken} broken, want {PARTWAY_LANDED} and 1")
+    expect_write_failed(rc, report, err, PARTWAY_ENTRIES, ours, 0, "the run whose write was stopped")
+    again = migrated(home, "the run after the stopped write")
+    expect_counts(again, PARTWAY_ENTRIES, report["not_inserted"], report["inserted"], "the run after the stopped write")
+    if vouched(home) != (set(hashes), 1):
+        raise Failed("the run after the stopped write does not vouch for every hash with the torn piece as one broken line")
+    again_inserts_nothing(home, "a third run")
+
+
+def row_write_lands_nothing(base):
+    home = base / "nothing-landed"
+    hashes = approvals_before_the_store(home, PARTWAY_ENTRIES)
+    rc, report, err = migrate_refused(home, 0)
+    # The condition, measured: no byte landed.
+    if store(home) != b"" or vouched(home) != (set(), 0):
+        raise Failed(f"the write under a limit of 0 left {len(store(home))} bytes")
+    expect_write_failed(rc, report, err, PARTWAY_ENTRIES, 0, 0, "the run whose write landed nothing")
+    expect_counts(migrated(home, "the run after it"), PARTWAY_ENTRIES, PARTWAY_ENTRIES, 0, "the run after it")
+    if vouched(home) != (set(hashes), 0):
+        raise Failed("the run after the write that landed nothing does not vouch for every hash")
+
+
 def main():
     failed = False
     binds = None
@@ -524,8 +615,10 @@ def main():
         except Exception as error:  # every other end of a row is its failure
             print(f"not ok - {current}: {error!r}")
             failed = True
-        for name, row in zip(MIGRATE_ROWS, (row_killed_holding_lock, row_killed_inside_write, row_cli)):
-            if row is row_killed_inside_write and binds is False:
+        rows = (row_killed_holding_lock, row_killed_inside_write, row_cli, row_write_stopped_partway, row_write_lands_nothing)
+        limited = (row_killed_inside_write, row_write_stopped_partway, row_write_lands_nothing)
+        for name, row in zip(MIGRATE_ROWS, rows):
+            if row in limited and binds is False:
                 print(f"ok - {name} {NO_BIND}")
                 continue
             try:

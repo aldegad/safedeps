@@ -10,9 +10,10 @@
 # next commits and the index are the real CLI's. The last row kills a process
 # holding the store lock while commits wait for it. The migration rows kill
 # `safedeps-core approvals migrate` while it holds the store lock and inside its
-# write, and run it again; the last runs it through `safedeps approvals
-# migrate`, the CLI in this checkout. What `safedeps check` does with the
-# store's answers is check-fail-closed's.
+# write, and run it again; one runs it through `safedeps approvals
+# migrate`, the CLI in this checkout; the last two stop its write partway and
+# at its first byte, and hold its report to what the index says right after.
+# What `safedeps check` does with the store's answers is check-fail-closed's.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
