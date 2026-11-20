@@ -213,6 +213,10 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
     let mut unwritten = None;
     let result = Call::take(&home, input).and_then(|call| match call {
         Some(mut call) => {
+            // A run that wrote neither its mark nor the advisory.log line for
+            // it starts no judgment, because nothing it leaves would say that
+            // a kill cut one. Its answer says so instead (decision 6).
+            if let Some(unjudged) = call.mark.unjudged() { return Ok(Some(unjudged)) }
             let judged = judge(&mut call, &journal, input, post_started);
             call.mark.close(&home, &call.command);
             unwritten = call.mark.unwritten();
@@ -222,8 +226,9 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
     });
     let (rc, message) = match result { Ok(m) => (0,m), Err(rc) => (rc,None) };
     // The answer says, in this order: the rollbacks an earlier run left
-    // unfinished, the judgment's own message, and the mark this run could not
-    // write (mark::Mark::unwritten).
+    // unfinished, the judgment's own message or the report that none started
+    // (mark::Mark::unjudged), and the mark this run could not write
+    // (mark::Mark::unwritten).
     let parts: Vec<W> = [Some(unfinished).filter(|u| !u.is_empty()), message, unwritten].into_iter().flatten().collect();
     if !parts.is_empty() {
         let out = cat(&[crate::jq::system_message(&parts.join(b"\n\n".as_slice())).as_bytes(), b"\n"]);

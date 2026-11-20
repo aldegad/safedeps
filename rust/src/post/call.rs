@@ -60,8 +60,10 @@ impl Call {
         let mut found = false;
         let mut trace_none = b"the pre-guard left no trace entry for this call".to_vec();
         let mut moved = false;
-        // The call's own records go only after its mark is written, so a kill
-        // at any point leaves at least one of the two on disk.
+        // The call's own records go only after its mark is written, so where
+        // the mark is written, a kill at any point leaves at least one of the
+        // two on disk. Where it is not, the advisory.log line says so, or no
+        // judgment starts (mark::Mark::unjudged).
         let mut consumed: Vec<PathBuf> = Vec::new();
         if let Some(id) = &id {
             let base = call_base(&home.join("pending/backstop"), id);

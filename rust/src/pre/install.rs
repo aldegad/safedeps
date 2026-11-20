@@ -13,7 +13,7 @@ use std::os::unix::ffi::OsStrExt;
 mod notices;
 
 fn deny(out:&mut Out,reason:&[u8]) {out.say(&jq::deny(reason))}
-fn log(call:&Call,text:&[u8]) {state::log_advisory(&call.guard_dir,text)}
+fn log(call:&Call,text:&[u8]) {state::log_advisory(&call.guard_dir,text);}
 fn log_command(call:&Call,text:&[u8]) {log(call,&cat(&[text,b" Command: ",&call.command]))}
 fn undecided(call:&Call,run:&Run,out:&mut Out)->bool {
     if !run.failed{return false}

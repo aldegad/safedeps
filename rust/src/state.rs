@@ -4,7 +4,7 @@
 //! `re-check` reads it as the record of whether an approval ever happened, so
 //! the log and the ledger move together or not at all (AGENTS.md).
 
-use crate::{ere::Regex, md5, os};
+use crate::{ere::Regex, md5, os, outcome::Outcome};
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime};
 type W = Vec<u8>;
@@ -66,18 +66,25 @@ pub fn append_accepted_risk(dir: &Path, entry: &[u8]) -> std::io::Result<()> {
     f.write_all(&line)
 }
 
+/// The advisory log of the home `dir`.
+pub fn advisory_path(dir: &Path) -> PathBuf {
+    dir.join("advisory.log")
+}
+
 /// `log_advisory`: one line, `<UTC time>\t<text>\n`, appended to
 /// `advisory.log`. A line that cannot be written is dropped, as the shell's
-/// `|| true` drops it.
-pub fn log_advisory(dir: &Path, text: &[u8]) {
+/// `|| true` drops it. What the append returned comes back, and one caller
+/// acts on it: a post run that wrote no judgment mark starts no judgment
+/// where this line was not written either (`post::mark`). Every other caller
+/// drops it.
+pub fn log_advisory(dir: &Path, text: &[u8]) -> Outcome {
     let secs = os::wall(os::WallRole::AdvisoryHeader).seconds();
     let mut line = crate::os::utc_stamp(secs).into_bytes();
     line.push(b'\t');
     line.extend_from_slice(text);
     line.push(b'\n');
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join("advisory.log")) {
-        let _ = f.write_all(&line);
-    }
+    Outcome::Io(std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(advisory_path(dir))
+        .and_then(|mut f| f.write_all(&line)))
 }
 
 pub const DEFAULT_OSV_BATCH_API_URL: &str = "https://api.osv.dev/v1/querybatch";

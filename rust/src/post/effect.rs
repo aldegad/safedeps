@@ -46,14 +46,14 @@ pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mu
                 if !hash.is_empty() {
                     match ledger::effect_index(&ledger::directory(), hash, now, &mut warnings) {
                         Ok(scoped) => index.merge(scoped),
-                        Err(_) => state::log_advisory(&store.home, &cat(&[b"post-verify: the approvals scoped to ", sh::bytes(&store.project), b" could not be read, so only the approvals with no project context were counted."])),
+                        Err(_) => { state::log_advisory(&store.home, &cat(&[b"post-verify: the approvals scoped to ", sh::bytes(&store.project), b" could not be read, so only the approvals with no project context were counted."])); }
                     }
                 }
             }
             Ok(None) => {}
             Err(why) => {
                 let why: Vec<u8> = why.iter().map(|b| if matches!(b, b'\n' | b'\r') { b' ' } else { *b }).collect();
-                state::log_advisory(&store.home, &cat(&[b"post-verify: the project resolution context of ", sh::bytes(&store.project), b" could not be read (", why.trim_ascii(), b"), so only the approvals with no project context were counted."]))
+                state::log_advisory(&store.home, &cat(&[b"post-verify: the project resolution context of ", sh::bytes(&store.project), b" could not be read (", why.trim_ascii(), b"), so only the approvals with no project context were counted."]));
             }
         }
     }
