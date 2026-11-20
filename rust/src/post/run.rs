@@ -205,12 +205,15 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
     os::set_umask(0o077);
     let home = state::guard_dir();
     if state::ensure_dirs(&home).is_err() { return 1 }
-    let journal = Journal::new(&home);
-    let unfinished = journal.unfinished();
     // A mark an earlier run left, whose run is gone, is the record of a
     // judgment that run did not finish. Each is said in advisory.log once,
-    // before this run takes a call and writes a mark of its own.
+    // before this run takes a call and writes a mark of its own. It comes
+    // before the journal, so the journal owner's process query stays the
+    // last one a run that takes no call makes; e2e's owner-fault rows read
+    // the receipt of the last query (scripts/measure/core-post-test-fixtures.py).
     mark::report_gone(&home);
+    let journal = Journal::new(&home);
+    let unfinished = journal.unfinished();
     // Every way out of judge comes back here, so this is where the mark goes.
     // A run that never comes back (the runtime's kill, a panic, which aborts)
     // leaves it.
