@@ -4,6 +4,8 @@
 
 ## 2.25.0
 
+- 승인 저장소 I/O, `advisory.log`, 마이그레이션 JSON의 `outcome`/`reread_outcome` 필드가 `Outcome::describe`(`Create`, `Open`, `Write`, `Sync`, `Rename`, `Lock` 추가 및 잠금 기한에 기존 `Outcome::Deadline` 사용)를 사용하고 `advisory.log`에서 `outcome=`을 항상 마지막에 두며, 기존 `outcome=os-error-N` take-back 아카이브 호환성을 유지합니다. 또한 core가 커밋 응답을 주지 않을 때 셸은 `ended before it answered`와 hardlink 동일성 관찰 결과만 보고하고, 설치기 `machineCore`는 원시 Node `error.message` 없이 `spawnSync`의 시작 오류, 시그널, 종료를 구분합니다.
+
 - 추가 전용 승인 출처 저장소 `${SAFEDEPS_HOME}/approvals.jsonl`을 추가했습니다. `safedeps`는 이 파일을 rotate, compact, truncate, rename하거나 다시 쓰지 않습니다.
   새로 승인된 `clean`, `patched`, `clean closure`, `patched closure` 항목은 배타적 `flock(2)` lock 안에서 JSONL 레코드(`at`, `hash`, `via`, `record`)를 쓰고 sync한 뒤 `advisory.log`에 기록하고 staged ledger 항목을 rename합니다. sync되지 않은 승인은 `approve` 줄 기록과 ledger rename 전에 중단되므로 ledger 항목 없이 저장소 줄만 남을 수 있으며 이는 `unmatched`로 집계됩니다(레코드 간 all-or-nothing 보장이 아닌 불가피한 한계입니다).
   이제 `re-check`는 출처 확인에 `approvals.jsonl`만 읽고 현재 `advisory.log`나 아카이브로 fallback하지 않으므로, 로그 로테이션 때문에 거짓 위조 보고가 생기지 않습니다.

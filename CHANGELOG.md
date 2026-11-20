@@ -4,6 +4,8 @@
 
 ## 2.25.0
 
+- Approval-store I/O, `advisory.log`, and migration JSON `outcome`/`reread_outcome` fields now use `Outcome::describe` (adding `Create`, `Open`, `Write`, `Sync`, `Rename`, and `Lock`, and using existing `Outcome::Deadline` for lock deadlines) with `outcome=` always last in `advisory.log`, while keeping legacy `outcome=os-error-N` take-back archive compatibility; the shell reports only `ended before it answered` plus hardlink identity when core gives no commit answer, and installer `machineCore` distinguishes `spawnSync` start error, signal, and exit without raw Node `error.message`.
+
 - Added `${SAFEDEPS_HOME}/approvals.jsonl`, an append-only approval provenance store that `safedeps` never rotates, compacts, truncates, renames, or rewrites.
   Fresh `clean`, `patched`, `clean closure`, and `patched closure` approvals write and sync a JSONL record (`at`, `hash`, `via`, `record`) under an exclusive `flock(2)` lock before appending to `advisory.log` and renaming the staged ledger entry; an unsynced approval stops before writing the `approve` line and renaming the ledger entry, so a store line can exist without a ledger entry and is counted as `unmatched` (a necessary limit, not an all-or-nothing guarantee across records).
   `re-check` now reads only `approvals.jsonl` as provenance—never falling back to live or archived `advisory.log`—so log rotation no longer triggers false forgery reports.

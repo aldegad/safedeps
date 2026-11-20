@@ -922,6 +922,18 @@ GHSA / NVD — 응답 무
 
 배타적 저장소 lock 안에서 commit은 저장소에 덧붙이기 전에 대상 ledger 항목과 저장소를 한 번 읽는다. 보증되지 않은 기존 항목이 있으면 이를 삭제하고(알 수 없는 unlink 결과는 fail-closed 처리), 삭제를 기록한 뒤 ledger 디렉터리를 sync한다. 이어서 저장소 줄을 쓰고 sync한 다음 `advisory.log`에 approve 줄을 덧붙이고, 준비된 ledger 파일을 rename하는 시점이 커밋 포인트다. 실패하면 즉시 멈추므로 자기 자신이 커밋한 ledger 항목을 남기거나 기존 미보증 항목을 보증 상태로 만들지 않는다. 다만 고아 저장소 줄(`unmatched`로 집계)이 남을 수는 있으며, 뒤이은 커밋이 실패해도 이전에 보증된 항목은 유지된다. sync되지 않은 저장소 줄은 approve 줄과 rename 전에 멈추며 승인 성공이 아니다. CLI의 `approvals_store_in_doubt`는 이 check가 준비한 파일이 확정되었는지 확인하지 못했음을 뜻하며, 기록이 남아 있을 수 있다. core 종료 상태는 hardlink 동일성으로 판별한다. staged 파일이 자기 것이면 커밋되지 않은 것이고, 대상 항목이 자기 것이면 커밋된 것이며, 둘 다 아니면 in-doubt다.
 
+관찰된 I/O 및 프로세스 결과는 `Outcome::describe`를 사용하며(`Read(path)`, `Removal`, `Gzip`, 실제 디렉터리 생성 시스템 호출용 `Create(path)`, `Open(path)`, `Write(path)`, `Sync(path)`, `Rename(path)`, `Lock(path)`, 잠금 기한용 기존 `Outcome::Deadline`), 작성된 검증 판정은 `io::Error` `Display`가 아닌 고정 문구로 유지한다. 세 가지 `advisory.log` 형식은 키워드와 `hash=`/`entry=` 필드를 유지하며, `outcome=` 값은 공백과 경로를 포함할 수 있고 작성기가 잘라내거나 고치지 않은 `Outcome::describe`의 정확한 바이트이므로 항상 마지막에 온다:
+
+```text
+check unvouched-entry-removal hash=H entry=E outcome=removal returned without error
+check approve-unsynced hash=H outcome=the sync of S returned OS error N
+check approve-undone hash=H outcome=the rename to E returned OS error N
+```
+
+마이그레이션은 take-back 키워드, 시각, 해시만 읽고 `outcome` 문구는 무시하므로 같은 아카이브 안의 구식 `outcome=os-error-N` 줄과 새로 서술된 `approve-undone` 줄을 모두 읽으며, `approve-unsynced`와 `unvouched-entry-removal`은 여전히 take-back이 아니다. 마이그레이션 JSON의 `outcome`과 `reread_outcome` 필드도 구식 `os-error-N`/`no-os-code` 라벨 대신 동일한 `Outcome::describe` 텍스트를 담으며, 모든 상태 오류 이름과 종료 값은 그대로다.
+
+`safedeps-core`가 인식할 수 있는 커밋 응답을 주지 않으면 셸은 `ended before it answered`와 hardlink 동일성 관찰 결과(staged 파일이 자기 것이면 항목이 배치되지 않음, 대상 항목이 자기 것이면 승인 유지, 둘 다 아니면 in-doubt)만 말하며, 셸 상태로부터 종료 코드나 시그널을 추론하지 않고 프로세스 원인을 관찰했다고 주장하지 않는다. 설치기 `machineCore` 메시지도 원시 Node `error.message`를 노출하지 않고 `spawnSync` 관찰 결과를 시작 오류 `could not start bash: OS error N`(Node errno, 예: `-13`), 시그널 `bash terminated by signal SIGKILL`, 종료 `ran bash: exit N`으로 구분한다.
+
 읽기 경로는 오탐과 위조 오판을 피하기 위해 서로 반대 순서를 따른다. cache는 저장소를 먼저 읽고 ledger 항목을 읽어, 실패한 커밋이 삭제된 옛 바이트를 보증하지 않도록 한다. `re-check`는 커밋된 저장소 줄이 항목 rename보다 앞서므로 ledger 항목을 먼저 읽고 저장소를 읽어 거짓 위조 판정을 피한다. 훅과 `ledger` 목록 조회는 여전히 ledger 항목만 읽으며, effect-primary는 계속 npm 전용이다.
 
 기존 미보증 대상에 대해서는 삭제 시점부터 staged rename까지(두 번의 sync와 두 번의 로그/저장소 쓰기 포함) 창(window)이 존재하며, 그 순간 설치가 일어나면 승인이 없어 롤백된다. 그 구간에서 커밋이 실패하면 항목은 다음 `check` 전까지 없는 상태로 남는다(`re-check`는 판정만 하고, `check`가 승인을 만든다). APFS나 WSL1에서의 디렉터리 sync 내구성은 측정하지 않았다. 삭제가 디스크에 반영되지 않은 상태에서 저장소 줄만 반영된 채 전원이 꺼지면 옛 항목이 보증된 상태로 다시 나타날 수 있다.
