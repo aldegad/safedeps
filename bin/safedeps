@@ -455,7 +455,7 @@ sf_store_vouches() {
 SF_CHECK_COMMIT_ERROR=""
 sf_check_commit() {
   local hash="$1" entry="$2" record="$3"
-  local ledger_file staged mine="" answer rc=0 ended
+  local ledger_file staged mine="" answer rc=0
 
   SF_CHECK_COMMIT_ERROR="ledger_write_failed"
   if ! sf_core; then
@@ -480,21 +480,20 @@ sf_check_commit() {
     sf_check_commit_drop "${staged}" "${mine}"
     return 1
   fi
-  if [[ "${rc}" -gt 128 ]]; then ended="signal-$((rc - 128))"; else ended="exit-${rc}"; fi
   if [[ "${staged}" -ef "${mine}" ]]; then
     sf_check_commit_drop "${staged}" "${mine}"
     SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
-    sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended with ${ended} before it answered. Its staged entry is still there, so it put no entry in place. The approvals store may hold its line, and advisory.log its approve line."
+    sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended before it answered. Its staged entry is still there, so it put no entry in place. The approvals store may hold its line, and advisory.log its approve line."
     return 1
   fi
   if [[ "${ledger_file}" -ef "${mine}" ]]; then
     rm -f -- "${mine}" || true
-    sf_eprintf "safedeps: the commit of ${hash} ended with ${ended} before it answered. Its entry is at the ledger entry's path, so the approval stands."
+    sf_eprintf "safedeps: the commit of ${hash} ended before it answered. Its entry is at the ledger entry's path, so the approval stands."
     return 0
   fi
   rm -f -- "${mine}" || true
   SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
-  sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended with ${ended} before it answered. This check's file is neither at the staged path nor at the entry's path."
+  sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended before it answered. This check's file is neither at the staged path nor at the entry's path."
   return 1
 }
 
