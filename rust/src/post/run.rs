@@ -210,23 +210,130 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
     // Every way out of judge comes back here, so this is where the mark goes.
     // A run that never comes back (the runtime's kill, a panic, which aborts)
     // leaves it.
+    let mut unwritten = None;
     let result = Call::take(&home, input).and_then(|call| match call {
         Some(mut call) => {
             let judged = judge(&mut call, &journal, input, post_started);
             call.mark.close(&home, &call.command);
+            unwritten = call.mark.unwritten();
             judged
         }
         None => Ok(None),
     });
     let (rc, message) = match result { Ok(m) => (0,m), Err(rc) => (rc,None) };
-    let message = match (unfinished.is_empty(), message) {
-        (true, message) => message,
-        (false, Some(message)) => Some(cat(&[&unfinished, b"\n\n", &message])),
-        (false, None) => Some(unfinished),
-    };
-    if let Some(message) = message {
-        let out = cat(&[crate::jq::system_message(&message).as_bytes(), b"\n"]);
+    // The answer says, in this order: the rollbacks an earlier run left
+    // unfinished, the judgment's own message, and the mark this run could not
+    // write (mark::Mark::unwritten).
+    let parts: Vec<W> = [Some(unfinished).filter(|u| !u.is_empty()), message, unwritten].into_iter().flatten().collect();
+    if !parts.is_empty() {
+        let out = cat(&[crate::jq::system_message(&parts.join(b"\n\n".as_slice())).as_bytes(), b"\n"]);
         if std::io::stdout().write_all(&out).is_err() { return 1 }
     }
     rc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cat, jv, sh};
+    use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path, process::{Command, ExitStatus, Stdio}, time::Instant};
+
+    /// Set in a child of this test binary, it names the directory the parent
+    /// made, and the child is the post hook: it runs `main` on one call there
+    /// and exits with what `main` returned.
+    const HOOK: &str = "SAFEDEPS_MARK_TEST_HOOK";
+
+    fn hook_child() {
+        let Some(root) = std::env::var_os(HOOK) else { return };
+        let project = Path::new(&root).join("project");
+        let input = jv::dump(&jv::obj(vec![
+            ("tool_name", jv::s(b"Bash")),
+            ("tool_input", jv::obj(vec![("command", jv::s(b"npm install mark-fixture"))])),
+            ("tool_use_id", jv::s(b"toolu_mark")),
+            ("cwd", jv::s(sh::bytes(&project))),
+        ]));
+        let rc = super::main(&input, Instant::now());
+        let _ = std::io::stdout().flush();
+        std::process::exit(rc)
+    }
+
+    /// What a post run left when its mark could not be written.
+    struct Run { status: ExitStatus, pid: u32, stdout: Vec<u8>, said: Vec<Vec<u8>>, log: Option<Vec<u8>>, marks: usize, judging: Vec<u8> }
+
+    /// Runs the post hook in a child of this test binary on `npm install
+    /// mark-fixture`, in a project with no record and no lockfile: the
+    /// command-independent backstop takes the call, opens its mark, and finds
+    /// nothing to judge. `judging/` is mode 0500, so the mark cannot be
+    /// written. With `log_takes_nothing`, advisory.log is a directory, so no
+    /// line can be appended to it either.
+    fn unwritable_mark(test: &str, log_takes_nothing: bool) -> Run {
+        let root = crate::os::scratch_dir("safedeps-mark-run").unwrap();
+        let home = root.join("home");
+        let judging = home.join("judging");
+        fs::create_dir_all(&judging).unwrap();
+        fs::create_dir(root.join("project")).unwrap();
+        if log_takes_nothing { fs::create_dir(home.join("advisory.log")).unwrap(); }
+        fs::set_permissions(&judging, fs::Permissions::from_mode(0o500)).unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("post::run::tests::{test}"), "--nocapture", "--test-threads=1"])
+            .env_clear().env("PATH", "/usr/bin:/bin").env("SAFEDEPS_HOME", &home).env(HOOK, &root)
+            .current_dir(&root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let pid = child.id();
+        let out = child.wait_with_output().unwrap();
+        let marks = fs::read_dir(&judging).unwrap().count();
+        let log = fs::read(home.join("advisory.log")).ok();
+        let judging_text = sh::bytes(&judging).to_vec();
+        fs::set_permissions(&judging, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        // The hook's answer, among the test harness's own lines. Its key is
+        // spelled in jq.rs alone, so it is read off an empty answer.
+        let empty = crate::jq::system_message(b"");
+        let key = empty.strip_suffix("\"\"}").expect("an answer ends with its message").as_bytes();
+        let said = (0..out.stdout.len()).filter(|&i| out.stdout[i..].starts_with(key)).map(|i| {
+            let line = &out.stdout[i..];
+            let line = &line[..line.iter().position(|b| *b == b'\n').unwrap_or(line.len())];
+            let read = jv::read(line);
+            let [crate::json::Value::Obj(fields)] = read.values.as_slice() else { panic!("one object: {:?}", String::from_utf8_lossy(line)) };
+            let [(_, message)] = fields.as_slice() else { panic!("one field: {:?}", String::from_utf8_lossy(line)) };
+            let message = jv::text(message).expect("a string").to_vec();
+            assert_eq!(crate::jq::system_message(&message).as_bytes(), line, "the answer is one message object");
+            message
+        }).collect();
+        Run { status: out.status, pid, stdout: out.stdout, said, log, marks, judging: judging_text }
+    }
+
+    /// The hook's answer is one message, and it is the line for a mark the
+    /// write could not make: this backstop call has nothing else to say.
+    fn says_the_mark_was_not_written(run: &Run) -> bool {
+        let head = cat(&[b"safedeps: this run wrote no judgment mark: the write of ", &run.judging, b"/", run.pid.to_string().as_bytes(), b"-"]);
+        let tail = b".json returned OS error 13. Without that mark, a judgment the runtime kills before it returns leaves no record.";
+        let [said] = run.said.as_slice() else { return false };
+        said.len() > head.len() + tail.len() && said.starts_with(&head) && said.ends_with(tail)
+            && said[head.len()..said.len() - tail.len()].iter().all(u8::is_ascii_digit)
+    }
+
+    /// The control: advisory.log takes the line, and the hook's answer says it
+    /// too.
+    #[test]
+    fn a_mark_that_cannot_be_written_is_said_in_the_log_and_in_the_hook_answer() {
+        hook_child();
+        let run = unwritable_mark("a_mark_that_cannot_be_written_is_said_in_the_log_and_in_the_hook_answer", false);
+        assert!(run.status.success(), "{:?}", run.status);
+        assert_eq!(run.marks, 0, "no mark and no temporary file");
+        let log = run.log.as_deref().expect("advisory.log is a file");
+        let logged = cat(&[b"\tpost-verify: this run wrote no judgment mark: the write of ", &run.judging, b"/", run.pid.to_string().as_bytes(), b"-"]);
+        assert!(log.windows(logged.len()).any(|w| w == logged.as_slice()), "the write failed, and advisory.log says so\n{}", String::from_utf8_lossy(log));
+        assert!(says_the_mark_was_not_written(&run), "the hook's answer says it too\n{:?}", String::from_utf8_lossy(&run.stdout));
+    }
+
+    /// The counterexample: advisory.log takes no line, and the hook's answer
+    /// still says it.
+    #[test]
+    fn a_mark_that_cannot_be_written_is_said_when_the_log_takes_no_line() {
+        hook_child();
+        let run = unwritable_mark("a_mark_that_cannot_be_written_is_said_when_the_log_takes_no_line", true);
+        assert!(run.status.success(), "{:?}", run.status);
+        assert_eq!(run.marks, 0, "no mark and no temporary file");
+        assert!(run.log.is_none(), "advisory.log is a directory");
+        assert!(says_the_mark_was_not_written(&run), "the hook's answer says it\n{:?}", String::from_utf8_lossy(&run.stdout));
+    }
 }
