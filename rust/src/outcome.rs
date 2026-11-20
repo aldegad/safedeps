@@ -12,7 +12,7 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Write(&'a Path), Read(&'a Path), Rename(&'a Path), Copy, Removal }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Write(&'a Path), Read(&'a Path), Rename(&'a Path), Lock(&'a Path), Copy, Removal }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -34,6 +34,7 @@ impl Outcome {
             Action::Write(path)=>{named=[b"the write of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Read(path)=>{named=[b"the read of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Rename(path)=>{named=[b"the rename of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Lock(path)=>{named=[b"the lock of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
         };
         let cat=|parts: &[&[u8]]| parts.concat();
         let error=|error: &io::Error| match error.raw_os_error() {
@@ -87,6 +88,7 @@ mod tests {
         assert_eq!(Outcome::status(ExitStatus::from_raw(0x7f)).describe(Action::Judgment,Form::Judgment),b"no exit code or signal");
         assert_eq!(Outcome::status(ExitStatus::from_raw(9)).describe(Action::Npm,Form::Detail),b"signal 9");
         assert_eq!(Outcome::Deadline.describe(Action::Walk(Path::new("fixture")),Form::Within(5)),b"the walk of fixture did not finish within 5s");
+        assert_eq!(Outcome::Io(Err(io::Error::from_raw_os_error(45))).describe(Action::Lock(Path::new("fixture")),Form::Action),b"the lock of fixture returned OS error 45");
         assert!(Outcome::status(ExitStatus::from_raw(0)).success());
     }
 }
