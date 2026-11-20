@@ -12,8 +12,8 @@
 //!
 //! Prose is the text the CLI leaves as written: comments, log lines and
 //! what it prints for a person. A line is taken as prose from its shape,
-//! which does not prove that no code reads it back: an `advisory.log` line
-//! is evidence `sf_ledger_has_approval_provenance` reads, any output can be
+//! which does not prove that no code reads it back: the compaction of
+//! `advisory.log` reads each line's level back, any output can be
 //! captured, and so can a function that runs the help. A word that code
 //! reads back from such text is out of reach of these readings.
 //!

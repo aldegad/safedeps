@@ -3,9 +3,9 @@
 #
 # The advisory log is TWO channels in one file and rotation must treat them
 # differently, so the only assertions worth pinning are about that asymmetry:
-# the evidence the oracle reads survives compaction byte for byte, and the trace
-# nobody reads does not. A rotation that merely shrank the file would pass a
-# size check and quietly break `re-check` for every package approved before it.
+# the evidence survives compaction byte for byte, and the trace nobody reads
+# does not. A rotation that merely shrank the file would pass a size check and
+# quietly lose the record of every decision made before it.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -67,7 +67,7 @@ bytes_after=$(wc -c < "${log}" | tr -d ' ')
 pass "rotation shrinks the live log (${bytes_before} -> ${bytes_after} bytes)"
 
 [[ $(grep -c 'check approve' "${log}") == "${approve_before}" ]] \
-  || fail "compaction dropped approval provenance the re-check oracle reads"
+  || fail "compaction dropped check approve evidence"
 [[ $(grep -c '] ERROR ' "${log}") == "${error_before}" ]] \
   || fail "compaction dropped ERROR evidence"
 pass "every evidence line survives compaction (${approve_before} approvals, ${error_before} errors)"
