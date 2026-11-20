@@ -1332,7 +1332,7 @@ mod tests {
     #[test]
     fn the_rename_outcome_reaches_the_last_field_as_its_original_bytes() {
         let d = scratch();
-        let home = d.0.join(std::ffi::OsStr::from_bytes(b"with spaces-\xff"));
+        let home = d.0.join("with spaces-é");
         fs::create_dir(&home).unwrap();
         let (staged, entry) = stage(&home, 1, "new entry");
         let (hash, record) = (h(1), rec(1));

@@ -221,7 +221,7 @@ def commit_cut(home, n, landed, at, when):
     staged_file, entry = staged(home, n)
     rc, out, err = call(home, ["commit", h(n), staged_file, entry], rec(n), limit)
     after = store(home)
-    if (rc, out) != (1, b"not-approved approvals_store_failed untouched\n") or b"not written to " not in err or b"File too large" not in err:
+    if (rc, out) != (1, b"not-approved approvals_store_failed untouched\n") or b"not written to " not in err or f"the write to {home}/approvals.jsonl {EFBIG}".encode() not in err:
         raise Failed(f"{when}: the cut commit exited {rc} with {out!r} {err!r}")
     if not os.path.exists(staged_file) or os.path.exists(entry):
         raise Failed(f"{when}: the cut commit put its entry in place or removed the staged file")
