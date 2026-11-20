@@ -6,9 +6,10 @@ EFBIG instead of killing the process) stops the store line of the core's own
 commit after as many bytes as the row picks. The core is not changed and no
 row writes a store byte: what the store holds is what the core wrote before
 its write failed. A commit is the one command that writes a store line, and it
-writes the approve line to advisory.log first. The limit binds every regular
-file the process writes, so each row's advisory.log is a symbolic link to
-/dev/null, which no limit binds, and the limit cuts the store line alone.
+writes that line before its approve line in advisory.log and before its
+rename. The limit binds every regular file the process writes, so each row's
+advisory.log is a symbolic link to /dev/null, which no limit binds, and the
+limit cuts the store line alone.
 
 Kernels measure the append limit either at the file end or at the descriptor
 offset. A probe outside the core measures the host's behavior, rows branch on
@@ -160,17 +161,19 @@ def commit_ok(home, n, when):
 
 def commit_cut(home, n, landed, at, when):
     """A commit whose store line the limit stops after `landed` bytes: it must
-    say the store did not take it, take its entry back, and leave the store's
-    bytes before it and exactly `landed` more."""
+    say the store did not take it, put nothing in place, leave its staged entry
+    to the CLI, and leave the store's bytes before it and exactly `landed`
+    more. The staged entry is then removed, as the CLI removes it."""
     before = store(home)
     limit = landed if at == "descriptor" else len(before) + landed
     staged_file, entry = staged(home, n)
     rc, out, err = call(home, ["commit", h(n), staged_file, entry], rec(n), limit)
     after = store(home)
-    if (rc, out) != (1, b"not-approved approvals_store_failed removed\n") or b"not written to " not in err or b"File too large" not in err:
+    if (rc, out) != (1, b"not-approved approvals_store_failed untouched\n") or b"not written to " not in err or b"File too large" not in err:
         raise Failed(f"{when}: the cut commit exited {rc} with {out!r} {err!r}")
-    if os.path.exists(staged_file) or os.path.exists(entry):
-        raise Failed(f"{when}: the cut commit left its entry")
+    if not os.path.exists(staged_file) or os.path.exists(entry):
+        raise Failed(f"{when}: the cut commit put its entry in place or removed the staged file")
+    os.remove(staged_file)
     if len(after) != len(before) + landed or not after.startswith(before):
         raise Failed(f"{when}: the cut commit left {len(after)} bytes, want the {len(before)} before it and {landed} more")
     return after[len(before):]
