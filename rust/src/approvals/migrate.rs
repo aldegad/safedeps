@@ -59,13 +59,48 @@
 //! The lock and the write are a commit's. From its read of the store to the
 //! end of its write the migration holds the store lock, LOCK_EX, which every
 //! commit and every revoke of an entry hold for their whole run. Under it the
-//! store is read once, each entry is read, and then every line goes into the
-//! store in one `write_locked`: the seal of a torn last line, the lines, the
-//! sync. So no commit or revoke changes an entry between its confirmation and
-//! its line, and the line vouches for the entry that confirmed it. The
-//! migration writes nothing else: no advisory.log line and no ledger entry. A
-//! run with nothing to insert writes no byte. Its lock makes the store's file
-//! where there was none, empty, as a commit's lock does.
+//! store is read, each entry is read, and then every line goes into the store
+//! in one `write_locked`: the seal of a torn last line, the lines, the sync.
+//! So no commit or revoke changes an entry between its confirmation and its
+//! line, and the line vouches for the entry that confirmed it. The migration
+//! writes nothing else: no advisory.log line and no ledger entry. A run with
+//! nothing to insert writes no byte. Its lock makes the store's file where
+//! there was none, empty, as a commit's lock does.
+//!
+//! A run that fails. One that ends before its write wrote nothing, and says
+//! so: an input that cannot be read, an entry that cannot be read, and a store
+//! that cannot be opened, locked or read. Its write answers as a commit's
+//! does, and for many lines the answers mean this:
+//!
+//!   written      every line is in the store, synced.
+//!   unsynced     every line is in the store and a reader sees it, and the
+//!                sync failed. All of them are inserted, none is left out,
+//!                and nothing says they are on the disk.
+//!   not written  the write stopped somewhere in its bytes. The lines before
+//!                the stop are in the store whole, and a torn piece of the
+//!                next can follow them, which the next write seals as one
+//!                broken line. The answer does not say where it stopped, so
+//!                the run reads the store again, under the same lock and
+//!                through the same descriptor, and counts the hashes of its
+//!                own lines the store vouches for. Those lines are inserted
+//!                and the rest are not. The read before the write found none
+//!                of those hashes vouched for, and every writer of the store
+//!                holds the lock, so what the count finds is this run's lines.
+//!                Where that read fails too, the run gives no count: inserted
+//!                and not inserted are `unknown`, and the read's outcome is
+//!                named.
+//!
+//! Why a read and not a sync for each line: a sync waits for the disk, and a
+//! run moves a thousand lines or more while every commit waits for the lock
+//! for at most LOCK_WAIT. One write and one sync keep the lock as short as a
+//! run can.
+//!
+//! A failed write's counts: inserted, not inserted, duplicates, unconfirmed
+//! and taken back add up to the approve lines. A finished run gives no count
+//! of lines not inserted, since there are none, and its other four add up to
+//! the approve lines. A run after a failed write inserts the lines that were
+//! not inserted and counts the inserted ones as duplicates. The exit is 1
+//! either way: a run that inserted some of its lines did not finish.
 //!
 //! Twice, and after a death. A run reads the lines an earlier run wrote as
 //! the store vouching for their hashes, so a second run inserts nothing and
@@ -76,7 +111,7 @@
 //! next run ends where a whole run ends: the store vouches for the same
 //! hashes.
 
-use super::{is_hash, line, locked, outcome, path, read_locked, write_locked, Appended, Via, ADVISORY_LOG, LOCK_WAIT, RECORD_PREFIX, USAGE};
+use super::{is_hash, line, locked, outcome, path, Appended, Real, Steps, Via, ADVISORY_LOG, LOCK_WAIT, RECORD_PREFIX, USAGE};
 use crate::{
     jq, json, ledger, os,
     outcome::{Action, Form, Outcome},
@@ -329,17 +364,49 @@ fn confirm(p: &Path, hash: &str) -> io::Result<Option<Unconfirmed>> {
     })
 }
 
-/// What a run read and what it did with each approve line: inserted,
-/// duplicates, unconfirmed and taken back add up to `approve`.
-#[derive(Debug, Default, Eq, PartialEq)]
+/// What a run read and what it did with each approve line. The first line of
+/// a hash its entry confirmed is a line of the run's write, which the store
+/// holds or does not (`inserted`). Each other approve line is a duplicate,
+/// unconfirmed or taken back. Together they add up to `approve`.
+#[derive(Debug, Default)]
 pub(super) struct Report {
     pub inputs: Vec<(PathBuf, Counts)>,
     pub approve: usize,
-    pub inserted: usize,
+    /// The lines of the run's write: one a hash its entry confirmed.
+    pub batch: usize,
+    /// How many of them the store holds.
+    pub landed: Landed,
     pub duplicates: usize,
     pub unconfirmed: usize,
     pub taken_back: usize,
     pub unconfirmed_hashes: Vec<(String, Unconfirmed)>,
+}
+
+impl Report {
+    /// The lines of the run's write the store holds, and those it does not.
+    /// None where nobody counted them: there is no number to give.
+    pub fn inserted(&self) -> Option<(usize, usize)> {
+        match self.landed {
+            Landed::All => Some((self.batch, 0)),
+            Landed::Found(n) => Some((n, self.batch - n)),
+            Landed::Unknown(_) => None,
+        }
+    }
+}
+
+/// How many of the lines of a run's write the store holds.
+#[derive(Debug, Default)]
+pub(super) enum Landed {
+    /// All of them: the write answered written, or unsynced, which says every
+    /// byte landed. A run that had no line to write made no write.
+    #[default]
+    All,
+    /// The write answered not written, and the read of the store after it,
+    /// under the same lock, found this many of them.
+    Found(usize),
+    /// The write answered not written, and the read after it failed as this
+    /// says.
+    Unknown(io::Error),
 }
 
 /// Why a run did not finish.
@@ -351,10 +418,13 @@ pub(super) enum Failed {
     /// A ledger entry that could not be read, and what its read returned.
     /// Nothing was written.
     Entry(PathBuf, Vec<u8>),
-    /// The store could not be opened, locked or read, or it did not take the
-    /// lines: none of them is in it, or a torn piece of them is, which the
-    /// next write seals as one broken line.
+    /// The store could not be opened, locked or read, before the write.
+    /// Nothing was written.
     Store(io::Error),
+    /// The write answered not written. The lines before the byte where it
+    /// stopped are in the store, and the report's `landed` says how many, or
+    /// that the read that would count them failed.
+    Write(io::Error, Report),
     /// Every line is in the store and a reader sees it, and the sync failed.
     Unsynced(io::Error, Report),
 }
@@ -365,6 +435,7 @@ impl Failed {
             Self::Inputs(_) => "input_unreadable",
             Self::Entry(..) => "ledger_entry_unreadable",
             Self::Store(_) => "approvals_store_failed",
+            Self::Write(..) => "approvals_store_write_failed",
             Self::Unsynced(..) => "approvals_store_unsynced",
         }
     }
@@ -414,10 +485,12 @@ fn gunzip(bytes: Vec<u8>) -> Result<Vec<u8>, Vec<u8>> {
 /// Moves into the store in `home` the approvals of advisory.log there and of
 /// `archives` that the entries in `ledger_dir` confirm.
 pub(super) fn migrate(home: &Path, ledger_dir: &Path, archives: &[PathBuf]) -> Result<Report, Failed> {
-    migrate_within(home, ledger_dir, archives, LOCK_WAIT)
+    migrate_within(home, ledger_dir, archives, LOCK_WAIT, &Real)
 }
 
-fn migrate_within(home: &Path, ledger_dir: &Path, archives: &[PathBuf], wait: Duration) -> Result<Report, Failed> {
+/// The migration, its store reads and its write made through `steps`, a
+/// commit's steps: `Real`, or a test's that fails one.
+fn migrate_within(home: &Path, ledger_dir: &Path, archives: &[PathBuf], wait: Duration, steps: &dyn Steps) -> Result<Report, Failed> {
     let mut report = Report::default();
     let (mut approves, mut backs, mut unreadable) = (Vec::new(), Vec::new(), Vec::new());
     // The inputs, each read once, before the lock.
@@ -438,8 +511,10 @@ fn migrate_within(home: &Path, ledger_dir: &Path, archives: &[PathBuf], wait: Du
     let standing = standing(approves, &backs, &mut report);
     // From here to the end the store lock is held. It goes with `file`.
     let file = locked(home, wait).map_err(Failed::Store)?;
-    let vouched: HashSet<String> = read_locked(&file).map_err(Failed::Store)?.hashes.into_iter().collect();
+    let vouched: HashSet<String> = steps.read(&file).map_err(Failed::Store)?.hashes.into_iter().collect();
     let mut batch = Vec::new();
+    // The hashes of the lines in `batch`, none of which the store vouches for.
+    let mut ours = HashSet::new();
     for (hash, lines) in &standing {
         if vouched.contains(hash) {
             report.duplicates += lines.len();
@@ -458,16 +533,26 @@ fn migrate_within(home: &Path, ledger_dir: &Path, archives: &[PathBuf], wait: Du
             Ok(None) => {
                 let first = &lines[0];
                 batch.extend(line(&first.at, hash, Via::Migrate, &first.record));
-                report.inserted += 1;
+                ours.insert(hash.as_str());
+                report.batch += 1;
                 report.duplicates += lines.len() - 1;
             }
         }
     }
     if !batch.is_empty() {
-        match write_locked(&file, &batch) {
+        match steps.append(&file, &batch) {
             Ok(()) => {}
-            Err(Appended::NotWritten(e)) => return Err(Failed::Store(e)),
             Err(Appended::Unsynced(e)) => return Err(Failed::Unsynced(e, report)),
+            Err(Appended::NotWritten(e)) => {
+                // Where the write stopped is not in its answer. A read of the
+                // store under the same lock, through the same descriptor,
+                // says which of the run's lines landed whole.
+                report.landed = match steps.read(&file) {
+                    Ok(ix) => Landed::Found(ix.hashes.iter().filter(|h| ours.contains(h.as_str())).count()),
+                    Err(r) => Landed::Unknown(r),
+                };
+                return Err(Failed::Write(e, report));
+            }
         }
     }
     Ok(report)
@@ -481,9 +566,13 @@ fn named(p: &Path) -> jq::J {
     jq::arg(p.as_os_str().as_bytes())
 }
 
-/// A finished run as one JSON object. `error` is null, or the run's failure
-/// where it wrote its lines and did not sync them.
-fn report_json(store: &Path, r: &Report, error: Option<&Failed>) -> jq::J {
+/// The word a count gives where nobody counted.
+const UNKNOWN: &str = "unknown";
+
+/// A run's report as one JSON object. `failed` is None for a finished run, or
+/// the failure of its write and what the write returned. A failed write gives
+/// `not_inserted` beside `inserted`, and a count nobody made is `unknown`.
+fn report_json(store: &Path, r: &Report, failed: Option<(&Failed, &io::Error)>) -> jq::J {
     let total = |f: fn(&Counts) -> usize| count(r.inputs.iter().map(|(_, c)| f(c)).sum());
     let inputs = r.inputs.iter().map(|(p, c)| {
         jq::obj(vec![
@@ -498,12 +587,18 @@ fn report_json(store: &Path, r: &Report, error: Option<&Failed>) -> jq::J {
         ])
     });
     let unconfirmed = r.unconfirmed_hashes.iter().map(|(h, why)| jq::obj(vec![("hash", jq::s(h)), ("reason", jq::s(why.as_str()))]));
-    jq::obj(vec![
+    let mut fields = vec![
         ("command", jq::s("approvals migrate")),
         ("store", named(store)),
         ("inputs", jq::J::Arr(inputs.collect())),
         ("approve_lines", count(r.approve)),
-        ("inserted", count(r.inserted)),
+    ];
+    match r.inserted() {
+        Some((n, _)) if failed.is_none() => fields.push(("inserted", count(n))),
+        Some((n, left)) => fields.extend([("inserted", count(n)), ("not_inserted", count(left))]),
+        None => fields.extend([("inserted", jq::s(UNKNOWN)), ("not_inserted", jq::s(UNKNOWN))]),
+    }
+    fields.extend([
         ("duplicates", count(r.duplicates)),
         ("unconfirmed", count(r.unconfirmed)),
         ("taken_back", count(r.taken_back)),
@@ -511,27 +606,40 @@ fn report_json(store: &Path, r: &Report, error: Option<&Failed>) -> jq::J {
         ("broken", total(|c| c.broken)),
         ("torn", total(|c| c.torn)),
         ("unconfirmed_hashes", jq::J::Arr(unconfirmed.collect())),
-        ("error", error.map_or(jq::J::Null, |f| jq::s(f.as_str()))),
-    ])
-}
-
-/// A run that wrote nothing, as one JSON object: its failure and what failed.
-fn failed_json(store: &Path, f: &Failed) -> jq::J {
-    let mut fields = vec![("command", jq::s("approvals migrate")), ("store", named(store)), ("error", jq::s(f.as_str())), ("inserted", count(0))];
-    match f {
-        Failed::Inputs(list) => {
-            let list = list.iter().map(|(p, why)| jq::obj(vec![("path", named(p)), ("outcome", jq::arg(why))]));
-            fields.push(("unreadable", jq::J::Arr(list.collect())));
+    ]);
+    match failed {
+        None => fields.push(("error", jq::J::Null)),
+        Some((f, e)) => {
+            fields.extend([("error", jq::s(f.as_str())), ("outcome", jq::s(&outcome(Err(e))))]);
+            if let Landed::Unknown(read) = &r.landed {
+                fields.push(("reread_outcome", jq::s(&outcome(Err(read)))));
+            }
         }
-        Failed::Entry(p, why) => fields.push(("entry", jq::obj(vec![("path", named(p)), ("outcome", jq::arg(why))]))),
-        Failed::Store(e) => fields.push(("outcome", jq::s(&outcome(Err(e))))),
-        Failed::Unsynced(..) => {}
     }
     jq::obj(fields)
 }
 
-/// A finished run as the lines a person reads.
-fn report_text(store: &Path, r: &Report) -> Vec<u8> {
+/// A failed run as one JSON object. A failed write gives its report with the
+/// failure. A run that failed before its write made no write, so it inserted
+/// no line: it gives its failure, `inserted` 0, and what failed.
+fn failed_json(store: &Path, f: &Failed) -> jq::J {
+    let before = |what: (&'static str, jq::J)| {
+        jq::obj(vec![("command", jq::s("approvals migrate")), ("store", named(store)), ("error", jq::s(f.as_str())), ("inserted", count(0)), what])
+    };
+    match f {
+        Failed::Write(e, r) | Failed::Unsynced(e, r) => report_json(store, r, Some((f, e))),
+        Failed::Inputs(list) => {
+            let list = list.iter().map(|(p, why)| jq::obj(vec![("path", named(p)), ("outcome", jq::arg(why))]));
+            before(("unreadable", jq::J::Arr(list.collect())))
+        }
+        Failed::Entry(p, why) => before(("entry", jq::obj(vec![("path", named(p)), ("outcome", jq::arg(why))]))),
+        Failed::Store(e) => before(("outcome", jq::s(&outcome(Err(e))))),
+    }
+}
+
+/// A run's report as the lines a person reads. `failed` is whether its write
+/// failed: then the counts give the lines not inserted too.
+fn report_text(store: &Path, r: &Report, failed: bool) -> Vec<u8> {
     let mut out = Vec::new();
     let mut say = |parts: &[&[u8]]| {
         for p in parts {
@@ -547,9 +655,14 @@ fn report_text(store: &Path, r: &Report) -> Vec<u8> {
         );
         say(&[b"  read ", p.as_os_str().as_bytes(), counts.as_bytes()]);
     }
+    let inserted = match r.inserted() {
+        Some((n, _)) if !failed => format!("{n} inserted"),
+        Some((n, left)) => format!("{n} inserted, {left} not inserted"),
+        None => format!("inserted {UNKNOWN}, not inserted {UNKNOWN}"),
+    };
     let lines = format!(
-        "  {} approve lines: {} inserted, {} duplicates, {} unconfirmed, {} taken back",
-        r.approve, r.inserted, r.duplicates, r.unconfirmed, r.taken_back
+        "  {} approve lines: {inserted}, {} duplicates, {} unconfirmed, {} taken back",
+        r.approve, r.duplicates, r.unconfirmed, r.taken_back
     );
     say(&[lines.as_bytes()]);
     for (h, why) in &r.unconfirmed_hashes {
@@ -558,7 +671,18 @@ fn report_text(store: &Path, r: &Report) -> Vec<u8> {
     out
 }
 
-/// What failed, as the lines a person reads on stderr.
+/// What a read of `p` that failed as `e` returned, in an Outcome's words. An
+/// Outcome reads an error's OS code and nothing else, so the error it is given
+/// carries that code alone.
+fn read_failed(p: &Path, e: &io::Error) -> Vec<u8> {
+    let code = e.raw_os_error().map_or_else(|| io::Error::other("no OS code"), io::Error::from_raw_os_error);
+    Outcome::Io(Err(code)).describe(Action::Read(p), Form::Action)
+}
+
+/// What failed, as the lines a person reads on stderr. A run that failed
+/// before its write says nothing was written. A failed write says how many of
+/// its lines are in the store and how many are not, and that a run after it
+/// puts the rest in.
 fn failed_text(store: &Path, f: &Failed) -> Vec<u8> {
     let mut err = Vec::new();
     let mut say = |parts: &[&[u8]]| {
@@ -567,7 +691,10 @@ fn failed_text(store: &Path, f: &Failed) -> Vec<u8> {
         }
         err.push(b'\n');
     };
+    const SAYS: &[u8] = b"safedeps-core approvals: ";
     const NOT: &[u8] = b"safedeps-core approvals: not migrated: ";
+    const AGAIN: &[u8] = b"safedeps-core approvals: run it again: it inserts the lines that are not in the store and counts the lines that are as duplicates";
+    let s = store.as_os_str().as_bytes();
     match f {
         Failed::Inputs(list) => {
             for (p, why) in list {
@@ -577,12 +704,28 @@ fn failed_text(store: &Path, f: &Failed) -> Vec<u8> {
             say(&[NOT, format!("{n} input{} could not be read, so nothing was written", if n == 1 { "" } else { "s" }).as_bytes()]);
         }
         Failed::Entry(p, why) => say(&[NOT, b"the ledger entry ", p.as_os_str().as_bytes(), b" could not be read (", why, b"), so nothing was written"]),
-        Failed::Store(e) => say(&[NOT, store.as_os_str().as_bytes(), format!(" could not be opened, locked, read or written: {e}").as_bytes()]),
-        Failed::Unsynced(e, r) => say(&[
-            format!("safedeps: unsynced: {} lines were written to ", r.inserted).as_bytes(),
-            store.as_os_str().as_bytes(),
-            format!(" and not synced ({}). A reader sees them, and nothing says they are on the disk.", outcome(Err(e))).as_bytes(),
-        ]),
+        Failed::Store(e) => say(&[NOT, s, format!(" could not be opened, locked or read ({e}), so nothing was written").as_bytes()]),
+        Failed::Write(e, r) => {
+            say(&[SAYS, b"not migrated in full: the write to ", s, format!(" failed ({})", outcome(Err(e))).as_bytes()]);
+            if let Landed::Unknown(read) = &r.landed {
+                say(&[
+                    SAYS,
+                    format!("how many of the run's {} store lines are in the store is not known: ", r.batch).as_bytes(),
+                    &read_failed(store, read),
+                ]);
+            } else if let Some((n, left)) = r.inserted() {
+                say(&[SAYS, format!("{n} of the run's {} store lines are in the store and {left} are not", r.batch).as_bytes()]);
+            }
+            say(&[AGAIN]);
+        }
+        Failed::Unsynced(e, r) => {
+            say(&[
+                format!("safedeps: unsynced: all {} store lines of the run are in ", r.batch).as_bytes(),
+                s,
+                format!(", none is left out, and the sync failed ({}). A reader sees them, and nothing says they are on the disk.", outcome(Err(e))).as_bytes(),
+            ]);
+            say(&[AGAIN]);
+        }
     }
     err
 }
@@ -605,29 +748,33 @@ fn options<'a, 'b>(args: &'a [&'b str]) -> Option<(bool, &'a [&'b str])> {
 
 /// `safedeps-core approvals migrate [--json] [--] [<archive>...]`: exit 0 and
 /// the report on stdout; exit 1 and what failed on stderr, and on stdout the
-/// report where the lines were written and not synced, or with `--json` the
-/// failure; exit 2 for an argument that is not one, and nothing is read.
+/// report where the run wrote, or with `--json` the failure; exit 2 for an
+/// argument that is not one, and nothing is read.
 pub(super) fn command(home: &Path, ledger_dir: &Path, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
     let Some((json, archives)) = options(args) else {
         return (2, Vec::new(), USAGE.as_bytes().to_vec());
     };
     let archives: Vec<PathBuf> = archives.iter().map(PathBuf::from).collect();
-    let store = path(home);
+    answer(&path(home), json, &migrate(home, ledger_dir, &archives))
+}
+
+/// A run's result as the command gives it: exit status, stdout and stderr.
+/// A failed write is a failure, exit 1, whatever it inserted.
+fn answer(store: &Path, json: bool, result: &Result<Report, Failed>) -> (i32, Vec<u8>, Vec<u8>) {
     let shown = |j: jq::J| {
         let mut o = jq::compact(&j).into_bytes();
         o.push(b'\n');
         o
     };
-    match migrate(home, ledger_dir, &archives) {
-        Ok(r) => (0, if json { shown(report_json(&store, &r, None)) } else { report_text(&store, &r) }, Vec::new()),
+    match result {
+        Ok(r) => (0, if json { shown(report_json(store, r, None)) } else { report_text(store, r, false) }, Vec::new()),
         Err(f) => {
-            let out = match (&f, json) {
-                (Failed::Unsynced(_, r), true) => shown(report_json(&store, r, Some(&f))),
-                (Failed::Unsynced(_, r), false) => report_text(&store, r),
-                (_, true) => shown(failed_json(&store, &f)),
+            let out = match (f, json) {
+                (_, true) => shown(failed_json(store, f)),
+                (Failed::Write(_, r) | Failed::Unsynced(_, r), false) => report_text(store, r, true),
                 (_, false) => Vec::new(),
             };
-            (1, out, failed_text(&store, &f))
+            (1, out, failed_text(store, f))
         }
     }
 }

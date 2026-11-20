@@ -1910,8 +1910,11 @@ safedeps approvals migrate [<archive>...] [--json]
   named with why), a line that an approve-undone or approve-in-doubt line of
   its hash takes back, a cache hit, a broken line and an input's torn last
   line. A line whose hash the store vouches for already is a duplicate, so a
-  second run inserts nothing. An input that cannot be read stops the run
-  before anything is written.
+  second run inserts nothing. An input or a ledger entry that cannot be read
+  stops the run before anything is written. A write that fails partway leaves
+  the lines before the failure in the store: the run says how many of its
+  lines are in the store and how many are not, and exits 4. Run it again to
+  insert the rest.
 
   exit codes: 0 migrated · 4 an input, an entry or the store could not be read or written, or an argument that is not one
 EOF
