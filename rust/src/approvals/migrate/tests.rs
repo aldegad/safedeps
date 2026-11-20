@@ -207,13 +207,13 @@ impl Steps for Partway {
     fn read(&self, file: &fs::File, store: &Path) -> Result<Index, Fault> {
         self.reads.set(self.reads.get() + 1);
         if Some(self.reads.get()) == self.fail_read {
-            return Err(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(EIO))), store, Action::Read));
+            return Err(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(EIO))), store, |p| Action::Read(p)));
         }
         read_locked(file, store)
     }
     fn append(&self, file: &fs::File, store: &Path, lines: &[u8]) -> Result<(), Appended> {
         write_locked(file, store, &lines[..self.keep]).expect("the bytes that land");
-        Err(Appended::NotWritten(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(EFBIG))), store, Action::Write)))
+        Err(Appended::NotWritten(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(EFBIG))), store, |p| Action::Write(p))))
     }
 }
 

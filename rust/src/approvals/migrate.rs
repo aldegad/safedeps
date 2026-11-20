@@ -446,7 +446,7 @@ impl Failed {
 /// An input's text: the bytes of one read, and for an archive named `.gz`
 /// those bytes through gzip. Or what failed, as its outcome says it.
 fn text_of(p: &Path, archive: bool) -> Result<Vec<u8>, Fault> {
-    let bytes = observed(fs::read(p), p, Action::Read)?;
+    let bytes = observed(fs::read(p), p, |p| Action::Read(p))?;
     if archive && p.as_os_str().as_bytes().ends_with(GZIP_SUFFIX) {
         gunzip(bytes)
     } else {
@@ -526,7 +526,7 @@ fn migrate_within(home: &Path, ledger_dir: &Path, archives: &[PathBuf], wait: Du
         let entry = ledger_dir.join(ledger::filename(hash));
         match confirm(&entry, hash) {
             Err(e) => {
-                let why = Fault::operation(Outcome::Io(Err(e)), &entry, Action::Read);
+                let why = Fault::operation(Outcome::Io(Err(e)), &entry, |p| Action::Read(p));
                 return Err(Failed::Entry(entry, why));
             }
             Ok(Some(why)) => {

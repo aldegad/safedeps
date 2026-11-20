@@ -301,7 +301,7 @@ fn approved_hash(line: &[u8]) -> Option<String> {
 }
 
 fn regular(file: fs::File, store: &Path) -> Result<fs::File, Fault> {
-    if observed(file.metadata(), store, Action::Read)?.is_file() {
+    if observed(file.metadata(), store, |p| Action::Read(p))?.is_file() {
         Ok(file)
     } else {
         Err(Fault::Judgment(b"the approvals store is not a regular file"))
@@ -311,9 +311,9 @@ fn regular(file: fs::File, store: &Path) -> Result<fs::File, Fault> {
 /// The store, opened to be appended to. Each failure keeps the operation
 /// and path that returned it, without rendering the outcome.
 fn open_for_append(dir: &Path) -> Result<fs::File, Fault> {
-    observed(fs::DirBuilder::new().recursive(true).mode(0o700).create(dir), dir, Action::Create)?;
+    observed(fs::DirBuilder::new().recursive(true).mode(0o700).create(dir), dir, |p| Action::Create(p))?;
     let store = path(dir);
-    let file = observed(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(&store), &store, Action::Open)?;
+    let file = observed(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(&store), &store, |p| Action::Open(p))?;
     regular(file, &store)
 }
 
@@ -342,18 +342,18 @@ fn write_locked(file: &fs::File, store: &Path, lines: &[u8]) -> Result<(), Appen
 /// The write, then `sync`. Only a write that put every byte in the store
 /// reaches the sync, so a failed sync is a line a reader sees.
 fn write_then_sync(file: &fs::File, store: &Path, lines: &[u8], sync: impl FnOnce(&fs::File) -> io::Result<()>) -> Result<(), Appended> {
-    let len = observed(file.metadata(), store, Action::Read)?.len();
+    let len = observed(file.metadata(), store, |p| Action::Read(p))?.len();
     let mut out = Vec::with_capacity(lines.len() + 2);
     if len > 0 {
         let mut last = [0u8; 1];
-        observed(file.read_exact_at(&mut last, len - 1), store, Action::Read)?;
+        observed(file.read_exact_at(&mut last, len - 1), store, |p| Action::Read(p))?;
         if last[0] != b'\n' {
             out.extend_from_slice(&[SEAL, b'\n']);
         }
     }
     out.extend_from_slice(lines);
     let mut f: &fs::File = file;
-    observed(f.write_all(&out), store, Action::Write)?;
+    observed(f.write_all(&out), store, |p| Action::Write(p))?;
     sync(file).map_err(|e| Appended::Unsynced(Outcome::Io(Err(e))))
 }
 
@@ -377,12 +377,12 @@ fn index_within(dir: &Path, wait: Duration) -> Result<Index, Fault> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Index { present: false, hashes: Vec::new(), broken: 0 });
         }
-        Err(e) => return Err(Fault::operation(Outcome::Io(Err(e)), &store, Action::Open)),
+        Err(e) => return Err(Fault::operation(Outcome::Io(Err(e)), &store, |p| Action::Open(p))),
     };
-    os::flock_within(&file, os::FileLock::Shared, wait).map_err(|o| Fault::operation(o, &store, Action::Lock))?;
+    os::flock_within(&file, os::FileLock::Shared, wait).map_err(|o| Fault::operation(o, &store, |p| Action::Lock(p)))?;
     let mut bytes = Vec::new();
     let mut f: &fs::File = &file;
-    observed(f.read_to_end(&mut bytes), &store, Action::Read)?;
+    observed(f.read_to_end(&mut bytes), &store, |p| Action::Read(p))?;
     Ok(read(&bytes))
 }
 
@@ -421,10 +421,10 @@ fn index_json(ix: &Index) -> String {
 /// The store, read through `file`, a descriptor that already holds the store
 /// lock. A second open of the store would wait on that lock.
 fn read_locked(file: &fs::File, store: &Path) -> Result<Index, Fault> {
-    let len = usize::try_from(observed(file.metadata(), store, Action::Read)?.len())
+    let len = usize::try_from(observed(file.metadata(), store, |p| Action::Read(p))?.len())
         .map_err(|_| Fault::Judgment(b"the approvals store is too large to read"))?;
     let mut bytes = vec![0u8; len];
-    observed(file.read_exact_at(&mut bytes, 0), store, Action::Read)?;
+    observed(file.read_exact_at(&mut bytes, 0), store, |p| Action::Read(p))?;
     Ok(read(&bytes))
 }
 
@@ -552,15 +552,15 @@ fn log_record(at: &str, text: &[u8]) -> Vec<u8> {
 
 fn log_line(log: &Path, at: &str, text: &[u8]) -> Result<(), Fault> {
     let l = log_record(at, text);
-    let mut f = observed(fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log), log, Action::Open)?;
-    observed(f.write_all(&l), log, Action::Write)
+    let mut f = observed(fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log), log, |p| Action::Open(p))?;
+    observed(f.write_all(&l), log, |p| Action::Write(p))
 }
 
 /// The store, opened and locked for a commit or a revoke. The lock goes with
 /// the file.
 fn locked(dir: &Path, wait: Duration) -> Result<fs::File, Fault> {
     let file = open_for_append(dir)?;
-    os::flock_within(&file, os::FileLock::Exclusive, wait).map_err(|o| Fault::operation(o, &path(dir), Action::Lock))?;
+    os::flock_within(&file, os::FileLock::Exclusive, wait).map_err(|o| Fault::operation(o, &path(dir), |p| Action::Lock(p)))?;
     Ok(file)
 }
 
@@ -584,8 +584,8 @@ trait Steps {
     }
     /// A directory's entries, synced.
     fn sync_dir(&self, dir: &Path) -> Result<(), Fault> {
-        let file = observed(fs::File::open(dir), dir, Action::Open)?;
-        observed(file.sync_all(), dir, Action::Sync)
+        let file = observed(fs::File::open(dir), dir, |p| Action::Open(p))?;
+        observed(file.sync_all(), dir, |p| Action::Sync(p))
     }
     /// The store line, under the lock `file` holds.
     fn append(&self, file: &fs::File, store: &Path, line: &[u8]) -> Result<(), Appended> {
@@ -1306,7 +1306,7 @@ mod tests {
             fs::symlink_metadata(p)
         }
         fn read(&self, file: &fs::File, store: &Path) -> Result<Index, Fault> {
-            observed(self.step("read"), store, Action::Read)?;
+            observed(self.step("read"), store, |p| Action::Read(p))?;
             read_locked(file, store)
         }
         fn unlink(&self, p: &Path) -> io::Result<()> {
@@ -1314,22 +1314,22 @@ mod tests {
             fs::remove_file(p)
         }
         fn log(&self, log: &Path, at: &str, text: &[u8]) -> Result<(), Fault> {
-            observed(self.step(line_kind(text)), log, Action::Write)?;
+            observed(self.step(line_kind(text)), log, |p| Action::Write(p))?;
             log_line(log, at, text)
         }
         fn sync_dir(&self, dir: &Path) -> Result<(), Fault> {
-            observed(self.step("sync-dir"), dir, Action::Sync)?;
+            observed(self.step("sync-dir"), dir, |p| Action::Sync(p))?;
             Real.sync_dir(dir)
         }
         fn append(&self, file: &fs::File, store: &Path, line: &[u8]) -> Result<(), Appended> {
-            observed(self.step("append"), store, Action::Write)?;
+            observed(self.step("append"), store, |p| Action::Write(p))?;
             let code = self.code;
             match self.fail {
                 "unsynced" => write_then_sync(file, store, line, |_| Err(io::Error::from_raw_os_error(code))),
                 "torn" => {
                     let mut w: &fs::File = file;
-                    observed(w.write_all(&line[..line.len() / 2]), store, Action::Write)?;
-                    Err(Appended::NotWritten(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(code))), store, Action::Write)))
+                    observed(w.write_all(&line[..line.len() / 2]), store, |p| Action::Write(p))?;
+                    Err(Appended::NotWritten(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(code))), store, |p| Action::Write(p))))
                 }
                 _ => write_locked(file, store, line),
             }
