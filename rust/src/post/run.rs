@@ -240,20 +240,24 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{cat, jv, sh};
-    use std::{fs, io::Write, os::unix::{fs::{OpenOptionsExt, PermissionsExt}, process::ExitStatusExt}, path::Path,
+    use std::{fs, io::Write, os::unix::{ffi::OsStringExt, fs::{OpenOptionsExt, PermissionsExt}, process::ExitStatusExt}, path::Path,
         process::{Child, Command, ExitStatus, Stdio}, time::{Duration, Instant}};
 
     /// Set in a child of this test binary, it names the directory the parent
     /// made, and the child is the post hook: it runs `main` on one call there
     /// and exits with what `main` returned.
     const HOOK: &str = "SAFEDEPS_MARK_TEST_HOOK";
+    /// Set beside HOOK, the command of that call. Without it the command is
+    /// `npm install mark-fixture`.
+    const COMMAND: &str = "SAFEDEPS_MARK_TEST_COMMAND";
 
-    fn hook_child() {
+    pub(super) fn hook_child() {
         let Some(root) = std::env::var_os(HOOK) else { return };
         let project = Path::new(&root).join("project");
+        let command = std::env::var_os(COMMAND).map(|c| c.into_vec()).unwrap_or_else(|| b"npm install mark-fixture".to_vec());
         let input = jv::dump(&jv::obj(vec![
             ("tool_name", jv::s(b"Bash")),
-            ("tool_input", jv::obj(vec![("command", jv::s(b"npm install mark-fixture"))])),
+            ("tool_input", jv::obj(vec![("command", jv::s(&command))])),
             ("tool_use_id", jv::s(b"toolu_mark")),
             ("cwd", jv::s(sh::bytes(&project))),
         ]));
@@ -262,19 +266,28 @@ mod tests {
         std::process::exit(rc)
     }
 
+    /// The post hook in a child of this test binary that runs the test at
+    /// `path` (its module path under the crate), with `home` as its
+    /// SAFEDEPS_HOME and `command` as its call's command, or `npm install
+    /// mark-fixture` without one. Its working directory is the row's own
+    /// scratch directory, outside the worktree.
+    pub(super) fn child(path: &str, root: &Path, home: &Path, command: Option<&str>) -> Child {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", path, "--nocapture", "--test-threads=1"])
+            .env_clear().env("PATH", "/usr/bin:/bin").env("SAFEDEPS_HOME", home).env(HOOK, root);
+        if let Some(command) = command { child.env(COMMAND, command); }
+        child.current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
+    }
+
     /// The post hook on `npm install mark-fixture`, in a child of this test
-    /// binary that runs `test`, with `home` as its SAFEDEPS_HOME. Its working
-    /// directory is the row's own scratch directory, outside the worktree.
+    /// binary that runs `test` of this module.
     fn spawn(test: &str, root: &Path, home: &Path) -> Child {
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &format!("post::run::tests::{test}"), "--nocapture", "--test-threads=1"])
-            .env_clear().env("PATH", "/usr/bin:/bin").env("SAFEDEPS_HOME", home).env(HOOK, root)
-            .current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
+        child(&format!("post::run::tests::{test}"), root, home, None)
     }
 
     /// The hook's answers, among the test harness's own lines. Their key is
     /// spelled in jq.rs alone, so it is read off an empty answer.
-    fn answers(stdout: &[u8]) -> Vec<Vec<u8>> {
+    pub(super) fn answers(stdout: &[u8]) -> Vec<Vec<u8>> {
         let empty = crate::jq::system_message(b"");
         let key = empty.strip_suffix("\"\"}").expect("an answer ends with its message").as_bytes();
         (0..stdout.len()).filter(|&i| stdout[i..].starts_with(key)).map(|i| {
@@ -291,7 +304,7 @@ mod tests {
 
     /// `line` is `head`, one run of digits (a start the kernel stored), and
     /// `tail`.
-    fn digits_between(line: &[u8], head: &[u8], tail: &[u8]) -> bool {
+    pub(super) fn digits_between(line: &[u8], head: &[u8], tail: &[u8]) -> bool {
         line.len() > head.len() + tail.len() && line.starts_with(head) && line.ends_with(tail)
             && line[head.len()..line.len() - tail.len()].iter().all(u8::is_ascii_digit)
     }
@@ -354,10 +367,10 @@ mod tests {
     /// How long a row waits for its run to open `confirmed`, or to end. A run
     /// that answers at once ends in milliseconds; the bound only ends a row
     /// whose run would wait on the FIFO for ever.
-    const BOUND: Duration = Duration::from_secs(20);
+    pub(super) const BOUND: Duration = Duration::from_secs(20);
 
     /// The writer of `fifo`, once a process has it open for reading.
-    fn reader_came(fifo: &Path) -> std::io::Result<Option<fs::File>> {
+    pub(super) fn reader_came(fifo: &Path) -> std::io::Result<Option<fs::File>> {
         match fs::OpenOptions::new().write(true).custom_flags(O_NONBLOCK).open(fifo) {
             Ok(writer) => Ok(Some(writer)),
             Err(error) if error.raw_os_error() == Some(ENXIO) => Ok(None),
@@ -367,14 +380,14 @@ mod tests {
 
     /// The post run of a row, killed and reaped on every way out of the row,
     /// a panic included.
-    struct Reaped(Option<Child>);
+    pub(super) struct Reaped(pub(super) Option<Child>);
     impl Drop for Reaped {
         fn drop(&mut self) {
             if let Some(child) = self.0.as_mut() { let _ = child.kill(); let _ = child.wait(); }
         }
     }
     impl Reaped {
-        fn ended(&mut self) -> bool { self.0.as_mut().unwrap().try_wait().unwrap().is_some() }
+        pub(super) fn ended(&mut self) -> bool { self.0.as_mut().unwrap().try_wait().unwrap().is_some() }
     }
 
     /// What the row does once its run has opened `confirmed`.
@@ -522,3 +535,6 @@ mod tests {
         assert!(said.starts_with(head) && said.ends_with(&tail), "the backstop's own message, and nothing after it\n{}", String::from_utf8_lossy(said));
     }
 }
+
+#[cfg(test)]
+mod unfinished_tests;
