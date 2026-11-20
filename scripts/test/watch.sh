@@ -583,7 +583,7 @@ row_runtime_source_unreadable() {
     cp -R lib "${t}/lib"
     cp scripts/safedeps-recheck-alert.sh "${t}/scripts/safedeps-recheck-alert.sh"
   done
-  digest=$( (source lib/watch/scan.sh; safedeps_watch_tree_digest "${co}") )
+  digest=$( (source lib/watch/scan.sh; safedeps_watch_tree_digest "${co}" "${d}/digest-step.json") )
   [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || no "the checkout's digest: ${digest}"
   jq -n --arg digest "${digest}" --arg co "${co}" '{version: "fixture", digest: $digest, source_repo: $co, built_at: "2026-11-20T00:00:00Z"}' \
     > "${rt}/.safedeps-runtime.json"
@@ -593,7 +593,8 @@ row_runtime_source_unreadable() {
   chmod 755 "${d}/p/part/locked"
   [[ "${rc}" == 1 ]] || no "the wrapper exited ${rc}, not 1: $(cat "${d}/wrapper.err")"
   st '.last_scan.runtime | .built == true and .stale == null and .source_digest_now == null
-      and (.error | startswith("source checkout unreadable: ") and contains("lib/watch/lock.sh") and (contains("locked") | not))' \
+      and (.error | startswith("source checkout unreadable: ") and contains("lib/watch/lock.sh") and (contains("locked") | not))
+      and .source_unreadable.step == "shasum"' \
     "the runtime that could not read its checkout" '.last_scan.runtime'
   st --arg r "${d}/p/part" '[.errors[] | select(.kind == "root_walk_incomplete")] | length == 1 and .[0].root == $r
       and all(.[0].said[]; contains("lock.sh") | not)' "the walk's row beside it" '.errors'

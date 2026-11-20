@@ -296,7 +296,7 @@ row_runtime_meta() {
   [[ -f "${meta}" ]] || no "the runtime has no .safedeps-runtime.json"
   [[ "$(jq -r '.version' "${meta}")" == "$(HOME="${home}" "${root}/bin/safedeps" --json version | jq -r '.version')" ]] || no "the recorded version is not the bin's"
   [[ "$(jq -r '.source_repo' "${meta}")" == "$(cd -P "${co}" && pwd)" ]] || no "source_repo is not the checkout"
-  [[ "$(jq -r '.digest' "${meta}")" == "$( (source "${co}/lib/watch/scan.sh"; safedeps_watch_tree_digest "${co}") )" ]] \
+  [[ "$(jq -r '.digest' "${meta}")" == "$( (source "${co}/lib/watch/scan.sh"; safedeps_watch_tree_digest "${co}" "$(mktemp "${tmp_root}/step.XXXXXX")") )" ]] \
     || no "the installer and the scan hash the checkout differently"
   info=$(runtime_info "${root}")
   jq -e '.built == true and .stale == false' <<< "${info}" > /dev/null || no "a fresh runtime: ${info}"
@@ -320,19 +320,103 @@ row_runtime_unreadable() {
   chmod 644 "${co}/lib/watch/lock.sh"
   [[ "${rc}" == 0 ]] || no "runtime_info exited ${rc}"
   jq -e '.built == true and .stale == null and .source_digest_now == null
-      and (.error | startswith("source checkout unreadable: ") and contains("shasum") and contains("lib/watch/lock.sh"))' <<< "${info}" > /dev/null \
+      and (.error | startswith("source checkout unreadable: ") and contains("shasum") and contains("lib/watch/lock.sh"))
+      and (.source_unreadable | .step == "shasum" and .exit > 0 and .lines > 0
+           and ("source checkout unreadable: " + .said[0]) == $info.error)' --argjson info "${info}" <<< "${info}" > /dev/null \
     || no "a checkout file shasum cannot read: ${info}"
   chmod 000 "${co}/lib/npm"
   rc=0; info=$(runtime_info "${root}") || rc=$?
   chmod 755 "${co}/lib/npm"
   [[ "${rc}" == 0 ]] || no "runtime_info exited ${rc}"
   jq -e '.stale == null and .source_digest_now == null
-      and (.error | startswith("source checkout unreadable: ") and contains("find") and contains("lib/npm"))' <<< "${info}" > /dev/null \
+      and (.error | startswith("source checkout unreadable: ") and contains("find") and contains("lib/npm"))
+      and (.source_unreadable | .step == "find" and .exit > 0 and .lines > 0
+           and ("source checkout unreadable: " + .said[0]) == $info.error)' --argjson info "${info}" <<< "${info}" > /dev/null \
     || no "a checkout directory find cannot read: ${info}"
   info=$(runtime_info "${root}")
-  jq -e '.stale == false and (has("error") | not)' <<< "${info}" > /dev/null || no "the same checkout read again: ${info}"
+  jq -e '.stale == false and (has("error") | not) and (has("source_unreadable") | not)' <<< "${info}" > /dev/null || no "the same checkout read again: ${info}"
 }
 row "a source checkout the digest cannot read (a file shasum cannot read, a directory find cannot read) is stale null with what that read said, not a digest of what it could read" row_runtime_unreadable
+
+# The digest's steps each keep their own exit and their own words, and only a
+# step that failed gives the reason. step_tools DIR FIND SHASUM writes a find
+# and a shasum into DIR for the front of PATH, each "warn" (the real tool, then
+# a line on stderr, ending 0 when the real one did) or "fail" (a line on
+# stderr and a non-zero exit; find lists what it can first, shasum nothing).
+# "real" writes none. Each one it writes adds its name to DIR/ran when run.
+step_tools() { # DIR FIND SHASUM
+  local dir="$1" real f
+  mkdir -p "${dir}"
+  : > "${dir}/ran"
+  real=$(command -v find)
+  case "$2" in
+    warn) printf '#!/bin/sh\necho find >> "%s/ran"\n"%s" "$@" || exit $?\necho "find: a warning from a walk that finished" >&2\nexit 0\n' "${dir}" "${real}" > "${dir}/find" ;;
+    fail) printf '#!/bin/sh\necho find >> "%s/ran"\n"%s" "$@"\necho "find: lib/npm: fixture walk failed" >&2\nexit 17\n' "${dir}" "${real}" > "${dir}/find" ;;
+  esac
+  real=$(command -v shasum)
+  case "$3" in
+    warn) printf '#!/bin/sh\necho shasum >> "%s/ran"\n"%s" "$@" || exit $?\necho "shasum: a warning from a hash that finished" >&2\nexit 0\n' "${dir}" "${real}" > "${dir}/shasum" ;;
+    fail) printf '#!/bin/sh\necho shasum >> "%s/ran"\necho "shasum: lib/readable: fixture read failed" >&2\nexit 23\n' "${dir}" > "${dir}/shasum" ;;
+  esac
+  for f in find shasum; do
+    [[ ! -e "${dir}/${f}" ]] || chmod +x "${dir}/${f}"
+  done
+}
+# digest_steps FIND SHASUM: a fresh runtime of a fresh checkout, judged with
+# those tools in front of PATH. info holds runtime_info's answer, tools the
+# directory.
+digest_steps() {
+  local d co root
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  root="${d}/out/agent"
+  stage_ok "${co}" "${root}" || return 1
+  tools="${d}/tools"
+  step_tools "${tools}" "$1" "$2"
+  info=$(PATH="${tools}:${PATH}" runtime_info "${root}")
+}
+
+row_digest_failed_step_after_warning() {
+  local info tools
+  digest_steps warn fail
+  jq -e '.built == true and .stale == null and .source_digest_now == null
+      and .error == "source checkout unreadable: shasum: lib/readable: fixture read failed"
+      and .source_unreadable == {step: "shasum", exit: 23, said: ["shasum: lib/readable: fixture read failed"], lines: 1}' <<< "${info}" > /dev/null \
+    || no "find warned and ended 0, then shasum failed: ${info}"
+}
+row "a find that warns and ends 0, then a shasum that fails: the reason is what shasum said, the step is shasum, and stale is null" row_digest_failed_step_after_warning
+
+row_digest_find_fails() {
+  local info tools
+  digest_steps fail real
+  jq -e '.built == true and .stale == null and .source_digest_now == null
+      and .error == "source checkout unreadable: find: lib/npm: fixture walk failed"
+      and .source_unreadable == {step: "find", exit: 17, said: ["find: lib/npm: fixture walk failed"], lines: 1}' <<< "${info}" > /dev/null \
+    || no "find listed what it could and failed: ${info}"
+}
+row "a find that lists what it can and fails: the reason is what find said with its exit, the step is find, and no digest is made of what it listed" row_digest_find_fails
+
+row_digest_first_failure() {
+  local info tools
+  digest_steps fail fail
+  jq -e '.stale == null and .source_digest_now == null
+      and .error == "source checkout unreadable: find: lib/npm: fixture walk failed"
+      and .source_unreadable == {step: "find", exit: 17, said: ["find: lib/npm: fixture walk failed"], lines: 1}' <<< "${info}" > /dev/null \
+    || no "find and shasum both fail: ${info}"
+}
+row "find and shasum both failing: the reason is the first step that failed, find, in its own words" row_digest_first_failure
+
+row_digest_warnings_exit_0() {
+  local info tools
+  digest_steps warn warn
+  # The tools in front of PATH were the ones run: find once, shasum for the
+  # files and for the lines.
+  [[ "$(grep -c '^find$' "${tools}/ran")" -ge 1 && "$(grep -c '^shasum$' "${tools}/ran")" -ge 2 ]] \
+    || no "the warning tools did not run: $(tr '\n' ' ' < "${tools}/ran")"
+  jq -e '.built == true and .stale == false and .source_digest_now == .digest
+      and (has("error") | not) and (has("source_unreadable") | not)' <<< "${info}" > /dev/null \
+    || no "find and shasum warned and ended 0: ${info}"
+}
+row "a find and a shasum that warn and end 0: the digest is made as the installer made it, stale is false and there is no error" row_digest_warnings_exit_0
 
 row_configure() {
   local d co h cfg
