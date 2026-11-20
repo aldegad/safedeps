@@ -303,25 +303,27 @@ struct Opened {
     file: Option<File>,
 }
 
-/// Opens the file at `path` to read it, takes its lock and reads it. None
-/// where the file is gone, because another run claimed it, and where another
-/// run holds its lock, because that run says it. A file this run cannot open
-/// to read cannot be locked either, and what the open returned is said in
-/// place of its bytes and of the lock.
-fn open(path: &Path) -> Option<Opened> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return None,
-        Err(error) => {
-            let unread = Outcome::Io(Err(error)).describe(Action::Read(path), Form::Action);
-            return Some(Opened { unlocked: unlocked(&unread), read: Err(unread), file: None })
-        }
-    };
-    let unlocked = locked(file.try_lock(), path)?;
-    let mut bytes = Vec::new();
-    let read = file.read_to_end(&mut bytes).map(|_| bytes)
-        .map_err(|error| Outcome::Io(Err(error)).describe(Action::Read(path), Form::Action));
-    Some(Opened { read, unlocked, file: Some(file) })
+impl Opened {
+    /// Opens the file at `path` to read it, takes its lock and reads it. None
+    /// where the file is gone, because another run claimed it, and where another
+    /// run holds its lock, because that run says it. A file this run cannot open
+    /// to read cannot be locked either, and what the open returned is said in
+    /// place of its bytes and of the lock.
+    fn take(path: &Path) -> Option<Self> {
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return None,
+            Err(error) => {
+                let unread = Outcome::Io(Err(error)).describe(Action::Read(path), Form::Action);
+                return Some(Opened { unlocked: unlocked(&unread), read: Err(unread), file: None })
+            }
+        };
+        let unlocked = locked(file.try_lock(), path)?;
+        let mut bytes = Vec::new();
+        let read = file.read_to_end(&mut bytes).map(|_| bytes)
+            .map_err(|error| Outcome::Io(Err(error)).describe(Action::Read(path), Form::Action));
+        Some(Opened { read, unlocked, file: Some(file) })
+    }
 }
 
 /// What `File::try_lock` returned for the file at `path`, as `Opened` keeps
@@ -347,7 +349,7 @@ fn claim(home: &Path, from: &Path, owner: (u32, u64), fact: &[u8], (me, my_start
     let held = dir(home).join(format!("{}-{}.json.{}-{}.claim", owner.0, owner.1, me, my_start));
     // The lock comes before the claim. `_lock` holds it until this run
     // returns, after its line and the record that it was said.
-    let Some(Opened { read, unlocked, file: _lock }) = open(from) else { return };
+    let Some(Opened { read, unlocked, file: _lock }) = Opened::take(from) else { return };
     match std::fs::rename(from, &held) {
         Ok(()) => {}
         // Another run claimed it after this run opened it, and that run says it.
@@ -456,7 +458,7 @@ mod tests {
 
     /// The one read of the file at `path`, as a run that holds its lock reads
     /// it.
-    fn read(path: &Path) -> Result<Vec<u8>, Vec<u8>> { open(path).expect("a file whose lock no run holds").read }
+    fn read(path: &Path) -> Result<Vec<u8>, Vec<u8>> { Opened::take(path).expect("a file whose lock no run holds").read }
 
     /// The lock a run takes on a file it says (`Opened`) is held by one open
     /// file at a time, so a run that opens the file while another holds it
@@ -469,11 +471,11 @@ mod tests {
         std::fs::create_dir(dir(&home)).unwrap();
         let mark = dir(&home).join("7-8.json");
         std::fs::write(&mark, b"{}").unwrap();
-        let first = open(&mark).expect("the lock");
+        let first = Opened::take(&mark).expect("the lock");
         assert_eq!((first.read.as_deref().ok(), first.unlocked.as_slice()), (Some(&b"{}"[..]), &b""[..]));
-        assert!(open(&mark).is_none(), "a second open file finds the lock held");
+        assert!(Opened::take(&mark).is_none(), "a second open file finds the lock held");
         drop(first);
-        let second = open(&mark).expect("the lock went with the open file that held it");
+        let second = Opened::take(&mark).expect("the lock went with the open file that held it");
         assert!(second.unlocked.is_empty());
         drop(second);
         let m = mark.display();
@@ -482,7 +484,7 @@ mod tests {
         assert_eq!(locked(Err(TryLockError::WouldBlock), &mark), None);
         assert_eq!(locked(Ok(()), &mark), Some(Vec::new()));
         std::fs::remove_file(&mark).unwrap();
-        assert!(open(&mark).is_none(), "a file that is gone was claimed by another run");
+        assert!(Opened::take(&mark).is_none(), "a file that is gone was claimed by another run");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

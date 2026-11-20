@@ -147,6 +147,7 @@ rust/src/post/journal.rs	open	human	journal-or-reorg	state::write_state_file	oth
 rust/src/post/journal.rs	stage	human	journal-or-reorg	state::write_state_file	other	1
 rust/src/post/journal.rs	unfinished	data	copy-or-publish	fs::rename	-	1
 rust/src/post/journal.rs	unfinished	human	journal-or-reorg	sh::append	data-field+fixed-literal+other	1
+rust/src/post/mark.rs	<module>	boundary	import	std::fs::File	-	1
 rust/src/post/mark.rs	<module>	boundary	import	std::io::Write	-	1
 rust/src/post/mark.rs	add_record	boundary	capability	open	-	1
 rust/src/post/mark.rs	add_record	boundary	capability	std::fs::OpenOptions::new	-	1
