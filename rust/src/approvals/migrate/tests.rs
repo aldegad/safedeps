@@ -204,16 +204,16 @@ impl Partway {
 }
 
 impl Steps for Partway {
-    fn read(&self, file: &fs::File, store: &Path) -> Result<Index, Vec<u8>> {
+    fn read(&self, file: &fs::File, store: &Path) -> Result<Index, Fault> {
         self.reads.set(self.reads.get() + 1);
         if Some(self.reads.get()) == self.fail_read {
-            return Err(Outcome::Io(Err(io::Error::from_raw_os_error(EIO))).describe(Action::Read(store), Form::Action));
+            return Err(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(EIO))), store, Action::Read));
         }
         read_locked(file, store)
     }
     fn append(&self, file: &fs::File, store: &Path, lines: &[u8]) -> Result<(), Appended> {
         write_locked(file, store, &lines[..self.keep]).expect("the bytes that land");
-        Err(Appended::NotWritten(Outcome::Io(Err(io::Error::from_raw_os_error(EFBIG))).describe(Action::Write(store), Form::Action)))
+        Err(Appended::NotWritten(Fault::operation(Outcome::Io(Err(io::Error::from_raw_os_error(EFBIG))), store, Action::Write)))
     }
 }
 
@@ -486,7 +486,7 @@ fn a_store_lock_another_holds_ends_the_run_and_nothing_is_written() {
     let held = locked(&h.home, LOCK_WAIT).unwrap();
     let result = migrate_within(&h.home, &h.ledger, &[], Duration::from_millis(200), &Real);
     match &result {
-        Err(Failed::Store(e)) => assert_eq!(e, format!("the lock of {} did not finish before the deadline", path(&h.home).display()).as_bytes()),
+        Err(Failed::Store(e)) => assert_eq!(e.text(), format!("the lock of {} did not finish before the deadline", path(&h.home).display()).as_bytes()),
         other => panic!("not a store failure: {other:?}"),
     }
     drop(held);
@@ -507,7 +507,7 @@ fn a_store_read_that_fails_before_the_write_ends_the_run_and_nothing_is_written(
     // The read before the write fails: the run has no store to judge by.
     let result = run_with(&h, &Partway::new(0, Some(1)));
     match &result {
-        Err(Failed::Store(e)) => assert_eq!(e, format!("the read of {} returned OS error 5", path(&h.home).display()).as_bytes()),
+        Err(Failed::Store(e)) => assert_eq!(e.text(), format!("the read of {} returned OS error 5", path(&h.home).display()).as_bytes()),
         other => panic!("not a store failure: {other:?}"),
     }
     assert_eq!(store(&h), before);
@@ -570,7 +570,7 @@ fn a_write_that_fails_partway_counts_the_lines_of_the_run_the_store_holds() {
     assert_eq!(ix(&h), Index { present: true, hashes: vec![a.clone(), b.clone(), c.clone()], broken: 2 });
     let r = match &result {
         Err(Failed::Write(e, r)) => {
-            assert_eq!(e, format!("the write to {} returned OS error 27", path(&h.home).display()).as_bytes());
+            assert_eq!(e.text(), format!("the write to {} returned OS error 27", path(&h.home).display()).as_bytes());
             r
         }
         other => panic!("not a failed write: {other:?}"),
@@ -624,7 +624,7 @@ fn a_write_that_fails_and_a_read_after_it_that_fails_give_no_count() {
         other => panic!("not a failed write: {other:?}"),
     };
     assert!(r.inserted().is_none(), "a count nobody read: {:?}", r.inserted());
-    assert!(matches!(&r.landed, Landed::Unknown(e) if e == format!("the read of {} returned OS error 5", path(&h.home).display()).as_bytes()), "{:?}", r.landed);
+    assert!(matches!(&r.landed, Landed::Unknown(e) if e.text() == format!("the read of {} returned OS error 5", path(&h.home).display()).as_bytes()), "{:?}", r.landed);
     let store_path = path(&h.home);
     let live_path = h.home.join(ADVISORY_LOG);
     let (code, out, err) = said(&h, true, &result);
@@ -660,7 +660,7 @@ fn a_sync_that_fails_says_every_line_of_the_run_is_in_the_store() {
     let result = run_with(&h, &SyncFails);
     let r = match &result {
         Err(Failed::Unsynced(e, r)) => {
-            assert_eq!(e, format!("the sync of {} returned OS error 5", path(&h.home).display()).as_bytes());
+            assert_eq!(e.describe(Action::Sync(&path(&h.home)), Form::Action), format!("the sync of {} returned OS error 5", path(&h.home).display()).as_bytes());
             r
         }
         other => panic!("not an unsynced write: {other:?}"),

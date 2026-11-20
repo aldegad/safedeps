@@ -113,7 +113,7 @@
 //! next run ends where a whole run ends: the store vouches for the same
 //! hashes.
 
-use super::{is_hash, line, locked, path, Appended, Real, Steps, Via, ADVISORY_LOG, LOCK_WAIT, RECORD_PREFIX, USAGE};
+use super::{cat, is_hash, line, locked, observed, path, say, Appended, Fault, Real, Steps, Via, ADVISORY_LOG, LOCK_WAIT, RECORD_PREFIX, USAGE};
 use crate::{
     jq, json, ledger, os,
     outcome::{Action, Form, Outcome},
@@ -408,7 +408,7 @@ pub(super) enum Landed {
     Found(usize),
     /// The write answered not written, and the read after it failed as this
     /// says.
-    Unknown(Vec<u8>),
+    Unknown(Fault),
 }
 
 /// Why a run did not finish.
@@ -416,19 +416,19 @@ pub(super) enum Landed {
 pub(super) enum Failed {
     /// Inputs that could not be read, each with what its read returned.
     /// Nothing was written.
-    Inputs(Vec<(PathBuf, Vec<u8>)>),
+    Inputs(Vec<(PathBuf, Fault)>),
     /// A ledger entry that could not be read, and what its read returned.
     /// Nothing was written.
-    Entry(PathBuf, Vec<u8>),
+    Entry(PathBuf, Fault),
     /// The store could not be opened, locked or read, before the write.
     /// Nothing was written.
-    Store(Vec<u8>),
+    Store(Fault),
     /// The write answered not written. The lines before the byte where it
     /// stopped are in the store, and the report's `landed` says how many, or
     /// that the read that would count them failed.
-    Write(Vec<u8>, Report),
+    Write(Fault, Report),
     /// Every line is in the store and a reader sees it, and the sync failed.
-    Unsynced(Vec<u8>, Report),
+    Unsynced(Outcome, Report),
 }
 
 impl Failed {
@@ -445,8 +445,8 @@ impl Failed {
 
 /// An input's text: the bytes of one read, and for an archive named `.gz`
 /// those bytes through gzip. Or what failed, as its outcome says it.
-fn text_of(p: &Path, archive: bool) -> Result<Vec<u8>, Vec<u8>> {
-    let bytes = fs::read(p).map_err(|e| Outcome::Io(Err(e)).describe(Action::Read(p), Form::Action))?;
+fn text_of(p: &Path, archive: bool) -> Result<Vec<u8>, Fault> {
+    let bytes = observed(fs::read(p), p, Action::Read)?;
     if archive && p.as_os_str().as_bytes().ends_with(GZIP_SUFFIX) {
         gunzip(bytes)
     } else {
@@ -455,19 +455,19 @@ fn text_of(p: &Path, archive: bool) -> Result<Vec<u8>, Vec<u8>> {
 }
 
 /// `gzip -dc` fed `bytes`: its output, where it exited 0.
-fn gunzip(bytes: Vec<u8>) -> Result<Vec<u8>, Vec<u8>> {
-    let said = |o: Outcome| o.describe(Action::Gzip, Form::Action);
+fn gunzip(bytes: Vec<u8>) -> Result<Vec<u8>, Fault> {
+    let failed = Fault::Gzip;
     let mut child = Command::new("gzip")
         .arg("-dc")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| said(Outcome::StartFailure(e)))?;
+        .map_err(|e| failed(Outcome::StartFailure(e)))?;
     let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(b"gzip's pipes were not made".to_vec());
+        return Err(Fault::Judgment(b"gzip's pipes were not made"));
     };
     // The feed runs beside the read, so neither waits on a full pipe.
     let feed = std::thread::spawn(move || stdin.write_all(&bytes));
@@ -476,12 +476,12 @@ fn gunzip(bytes: Vec<u8>) -> Result<Vec<u8>, Vec<u8>> {
     drop(stdout);
     let status = child.wait();
     let fed = feed.join();
-    let status = status.map_err(|e| said(Outcome::StatusFailure(e)))?;
+    let status = status.map_err(|e| failed(Outcome::StatusFailure(e)))?;
     if !status.success() {
-        return Err(said(Outcome::status(status)));
+        return Err(failed(Outcome::status(status)));
     }
-    let fed = fed.map_err(|_| b"the feed of gzip ended without an answer".to_vec())?;
-    read.and(fed).map_err(|e| said(Outcome::Io(Err(e))))?;
+    let fed = fed.map_err(|_| Fault::Judgment(b"the feed of gzip ended without an answer"))?;
+    read.and(fed).map_err(|e| failed(Outcome::Io(Err(e))))?;
     Ok(out)
 }
 
@@ -526,7 +526,7 @@ fn migrate_within(home: &Path, ledger_dir: &Path, archives: &[PathBuf], wait: Du
         let entry = ledger_dir.join(ledger::filename(hash));
         match confirm(&entry, hash) {
             Err(e) => {
-                let why = Outcome::Io(Err(e)).describe(Action::Read(&entry), Form::Action);
+                let why = Fault::operation(Outcome::Io(Err(e)), &entry, Action::Read);
                 return Err(Failed::Entry(entry, why));
             }
             Ok(Some(why)) => {
@@ -615,7 +615,7 @@ fn report_json(store: &Path, r: &Report, failed: Option<(&Failed, &[u8])>) -> jq
         Some((f, e)) => {
             fields.extend([("error", jq::s(f.as_str())), ("outcome", jq::arg(e))]);
             if let Landed::Unknown(read) = &r.landed {
-                fields.push(("reread_outcome", jq::arg(read)));
+                fields.push(("reread_outcome", jq::arg(&read.text())));
             }
         }
     }
@@ -630,13 +630,14 @@ fn failed_json(store: &Path, f: &Failed) -> jq::J {
         jq::obj(vec![("command", jq::s("approvals migrate")), ("store", named(store)), ("error", jq::s(f.as_str())), ("inserted", count(0)), what])
     };
     match f {
-        Failed::Write(e, r) | Failed::Unsynced(e, r) => report_json(store, r, Some((f, e))),
+        Failed::Write(e, r) => report_json(store, r, Some((f, &e.text()))),
+        Failed::Unsynced(e, r) => report_json(store, r, Some((f, &e.describe(Action::Sync(store), Form::Action)))),
         Failed::Inputs(list) => {
-            let list = list.iter().map(|(p, why)| jq::obj(vec![("path", named(p)), ("outcome", jq::arg(why))]));
+            let list = list.iter().map(|(p, why)| jq::obj(vec![("path", named(p)), ("outcome", jq::arg(&why.text()))]));
             before(("unreadable", jq::J::Arr(list.collect())))
         }
-        Failed::Entry(p, why) => before(("entry", jq::obj(vec![("path", named(p)), ("outcome", jq::arg(why))]))),
-        Failed::Store(e) => before(("outcome", jq::arg(e))),
+        Failed::Entry(p, why) => before(("entry", jq::obj(vec![("path", named(p)), ("outcome", jq::arg(&why.text()))]))),
+        Failed::Store(e) => before(("outcome", jq::arg(&e.text()))),
     }
 }
 
@@ -679,12 +680,6 @@ fn report_text(store: &Path, r: &Report) -> Vec<u8> {
 /// puts the rest in.
 fn failed_text(store: &Path, f: &Failed) -> Vec<u8> {
     let mut err = Vec::new();
-    let mut say = |parts: &[&[u8]]| {
-        for p in parts {
-            err.extend_from_slice(p);
-        }
-        err.push(b'\n');
-    };
     const SAYS: &[u8] = b"safedeps-core approvals: ";
     const NOT: &[u8] = b"safedeps-core approvals: not migrated: ";
     const AGAIN: &[u8] = b"safedeps-core approvals: run it again: it inserts the lines that are not in the store and counts the lines that are as duplicates";
@@ -692,33 +687,33 @@ fn failed_text(store: &Path, f: &Failed) -> Vec<u8> {
     match f {
         Failed::Inputs(list) => {
             for (p, why) in list {
-                say(&[NOT, p.as_os_str().as_bytes(), b" could not be read: ", why]);
+                why.report(&mut err, &cat(&[NOT, p.as_os_str().as_bytes(), b" could not be read: "]), b"");
             }
             let n = list.len();
-            say(&[NOT, format!("{n} input{} could not be read, so nothing was written", if n == 1 { "" } else { "s" }).as_bytes()]);
+            say(&mut err, &cat(&[NOT, format!("{n} input{} could not be read, so nothing was written", if n == 1 { "" } else { "s" }).as_bytes()]));
         }
-        Failed::Entry(p, why) => say(&[NOT, b"the ledger entry ", p.as_os_str().as_bytes(), b" could not be read (", why, b"), so nothing was written"]),
-        Failed::Store(e) => say(&[NOT, s, b" could not be opened, locked or read (", e, b"), so nothing was written"]),
+        Failed::Entry(p, why) => why.report(&mut err,
+            &cat(&[NOT, b"the ledger entry ", p.as_os_str().as_bytes(), b" could not be read ("]), b"), so nothing was written"),
+        Failed::Store(e) => e.report(&mut err,
+            &cat(&[NOT, s, b" could not be opened, locked or read ("]), b"), so nothing was written"),
         Failed::Write(e, r) => {
-            say(&[SAYS, b"not migrated in full: the write to ", s, b" failed (", e, b")"]);
+            e.report(&mut err, &cat(&[SAYS, b"not migrated in full: the write to ", s, b" failed ("]), b")");
             if let Landed::Unknown(read) = &r.landed {
-                say(&[
-                    SAYS,
-                    format!("how many of the run's {} store lines are in the store is not known: ", r.batch).as_bytes(),
-                    read,
-                ]);
+                read.report(&mut err, &cat(&[SAYS,
+                    format!("how many of the run's {} store lines are in the store is not known: ", r.batch).as_bytes()]), b"");
             } else if let Some((n, left)) = r.inserted() {
-                say(&[SAYS, format!("{n} of the run's {} store lines are in the store and {left} are not", r.batch).as_bytes()]);
+                say(&mut err, &cat(&[SAYS, format!("{n} of the run's {} store lines are in the store and {left} are not", r.batch).as_bytes()]));
             }
-            say(&[AGAIN]);
+            say(&mut err, AGAIN);
         }
         Failed::Unsynced(e, r) => {
-            say(&[
+            say(&mut err, &cat(&[
                 format!("safedeps: unsynced: all {} store lines of the run are in ", r.batch).as_bytes(),
-                s,
-                b", none is left out, and the sync failed (", e, b"). A reader sees them, and nothing says they are on the disk.",
-            ]);
-            say(&[AGAIN]);
+                s, b", none is left out, and the sync failed (",
+                &Outcome::describe(e, Action::Sync(store), Form::Action),
+                b"). A reader sees them, and nothing says they are on the disk.",
+            ]));
+            say(&mut err, AGAIN);
         }
     }
     err
