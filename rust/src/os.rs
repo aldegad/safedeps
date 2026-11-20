@@ -130,6 +130,15 @@ pub fn flock_within(file: &std::fs::File, lock: FileLock, wait: std::time::Durat
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 
+/// open(2)'s O_NONBLOCK, which `OpenOptionsExt::custom_flags` takes: an open
+/// of a FIFO returns at once instead of waiting for a writer, and a read of a
+/// regular file is the same with it or without. <sys/fcntl.h> on macOS,
+/// asm-generic/fcntl.h on Linux.
+#[cfg(target_os = "macos")]
+pub const O_NONBLOCK: i32 = 0x0004;
+#[cfg(not(target_os = "macos"))]
+pub const O_NONBLOCK: i32 = 0o4000;
+
 pub fn set_umask(mask: u32) {
     unsafe {
         umask(mask);

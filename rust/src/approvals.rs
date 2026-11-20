@@ -53,10 +53,11 @@
 //! written before its entry is renamed into place, all under the store lock,
 //! and the rename is the commit point. An entry at the path that the store
 //! does not vouch for is removed before the store line. So when the store
-//! vouches for a hash, an unrevoked entry at its path is a committed one, and
-//! a failed approval leaves at most a store line with no entry, which re-check
-//! counts as unmatched. The commit never removes the staged file. The CLI
-//! does, whatever the commit answered.
+//! vouches for a hash, an unrevoked entry at its path is a committed one, or
+//! the one a migration confirmed under the lock before it wrote the hash's
+//! line (below), and a failed approval leaves at most a store line with no
+//! entry, which re-check counts as unmatched. The commit never removes the
+//! staged file. The CLI does, whatever the commit answered.
 //!
 //! Under the lock, in this order:
 //!
@@ -119,6 +120,18 @@
 //! where the entry at the path is still the file the CLI read. Where it is
 //! not, a commit replaced or removed the entry between the read and the lock,
 //! and the answer is `changed`: the CLI reads the entry again.
+//!
+//! The migration. An approval a check made before this store has no line
+//! here, and its record is its approve line in advisory.log. `migrate`
+//! (approvals/migrate.rs) moves those lines in: one line for each hash its
+//! ledger entry confirms, `via: migrate`. A commit and the migration are the
+//! two that write a store line, and they write it the same way. The migration
+//! holds the store lock, LOCK_EX, from its read of the store to the end of its
+//! write; it reads each entry under the lock, and it writes every line in one
+//! `write_locked`, which seals a torn tail, appends the lines and syncs them.
+//! It writes no ledger entry and no advisory.log line, so the lock orders it
+//! against every commit and revoke, and nothing a commit or a revoke writes
+//! lands between an entry's confirmation and its line.
 //!
 //! What this module assumes. One ledger directory belongs to one home's store.
 //! Where two homes share a `SAFEDEPS_LEDGER_DIR`, a commit of a hash in one
@@ -733,20 +746,26 @@ fn answer_line(answer: &Answer) -> (i32, Vec<u8>) {
     }
 }
 
-const USAGE: &str = "usage: safedeps-core approvals commit <hash> <staged> <entry> (the record on stdin) | revoke <hash> <staged> <entry> <seen> | index\n";
+const USAGE: &str = "usage: safedeps-core approvals commit <hash> <staged> <entry> (the record on stdin) | revoke <hash> <staged> <entry> <seen> | index | migrate [--json] [--] [<archive>...]\n";
 
 /// `safedeps-core approvals commit <hash> <staged> <entry>`, the record on
 /// stdin (one trailing newline is not part of it): the approval committed
 /// (`commit`), and its answer on stdout, `approved` and exit 0 or
 /// `not-approved <failure> <entry>` and exit 1. Exit 2 for an argument that is
-/// not one, and nothing is written. A commit is the one command that writes a
-/// store line.
+/// not one, and nothing is written. A commit and a migration are the two
+/// commands that write a store line, each under the store lock and through
+/// `write_locked`.
 /// `safedeps-core approvals revoke <hash> <staged> <entry> <seen>`: the revoked
 /// entry put in place (`revoke`), and its answer on stdout: `revoked` and exit
 /// 0, or `changed` or `not-revoked` and exit 1. Exit 2 for an argument that is
 /// not one, and nothing is put in place.
 /// `safedeps-core approvals index`: the index on stdout and exit 0, or exit 1
 /// when the store cannot be read.
+/// `safedeps-core approvals migrate [--json] [--] [<archive>...]`: the
+/// approvals of advisory.log and of each archive that their ledger entries
+/// confirm, moved into the store (approvals/migrate.rs). Exit 0 and its report
+/// on stdout, exit 1 and what failed on stderr, exit 2 for an argument that
+/// is not one.
 pub fn cli(args: &[String]) -> i32 {
     os::set_umask(0o077);
     let mut stdin = Vec::new();
@@ -793,6 +812,7 @@ fn run(dir: &Path, args: &[String], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
             let code = if answer == Revoked::Revoked { 0 } else { 1 };
             (code, format!("{}\n", answer.as_str()).into_bytes(), err)
         }
+        ["migrate", rest @ ..] => migrate::command(dir, &ledger::directory_in(dir), rest),
         ["index"] => match index(dir) {
             Ok(ix) => (0, format!("{}\n", index_json(&ix)).into_bytes(), Vec::new()),
             Err(e) => (1, Vec::new(), format!("safedeps-core approvals: {} could not be read: {}\n", store.display(), e).into_bytes()),
@@ -825,7 +845,9 @@ mod tests {
         format!("check approve(clean) ecosystem=npm package=p{} version=1.0.0 hash={}", n, h(n)).into_bytes()
     }
     /// A store line another check wrote: the store's own write, under its
-    /// lock, with no entry and no approve line. No command writes a line
+    /// lock, with no entry and no approve line. A commit writes its line with
+    /// its entry and its approve line, a migration writes one for an entry
+    /// that stands already, and no command writes a line from its arguments
     /// alone; a test uses it to make a store that vouches.
     fn append(dir: &Path, hash: &str, record: &[u8]) -> Result<(), Appended> {
         append_within(dir, hash, record, LOCK_WAIT)
@@ -1894,7 +1916,8 @@ mod tests {
         let mut input = rec(2);
         input.push(b'\n');
         let two = h(2);
-        // No command writes a store line apart from a commit.
+        // No command writes a store line apart from a commit and a migration,
+        // and neither takes the line from its arguments.
         let bads: [&[&str]; 5] = [&["append", two.as_str()], &["append"], &["index", "x"], &["nothing"], &[]];
         for bad in bads {
             assert_eq!(run(&d.0, &args(bad), &input), (2, Vec::new(), USAGE.as_bytes().to_vec()), "{bad:?}");

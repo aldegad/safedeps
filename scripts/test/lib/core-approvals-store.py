@@ -5,9 +5,8 @@ A file size limit (RLIMIT_FSIZE, with SIGXFSZ ignored, so the write fails with
 EFBIG instead of killing the process) stops the store line of the core's own
 commit after as many bytes as the row picks. The core is not changed and no
 row writes a store byte: what the store holds is what the core wrote before
-its write failed. A commit is the one command that writes a store line, and it
-writes that line before its approve line in advisory.log and before its
-rename. The limit binds every regular file the process writes, so each row's
+its write failed. A commit writes its store line before its approve line in
+advisory.log and before its rename. The limit binds every regular file the process writes, so each row's
 advisory.log is a symbolic link to /dev/null, which no limit binds, and the
 limit cuts the store line alone.
 

@@ -12,7 +12,7 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Write(&'a Path), Read(&'a Path), Rename(&'a Path), Lock(&'a Path), Copy, Removal }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Write(&'a Path), Read(&'a Path), Rename(&'a Path), Lock(&'a Path), Copy, Removal, Gzip }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -28,11 +28,11 @@ impl Outcome {
         let action: &[u8] = match action {
             Action::Npm=>b"npm", Action::NpmConfig=>b"npm config", Action::NpmQuery=>b"npm query",
             Action::NpmRebuild=>b"npm rebuild", Action::Curl=>b"curl", Action::Judgment=>b"judgment",
-            Action::Copy=>b"copy", Action::Removal=>b"removal",
+            Action::Copy=>b"copy", Action::Removal=>b"removal", Action::Gzip=>b"gzip",
             Action::Walk(path)=>{named=[b"the walk of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Read(path)=>{named=[b"the read of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Write(path)=>{named=[b"the write of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
-            Action::Read(path)=>{named=[b"the read of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Rename(path)=>{named=[b"the rename of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Lock(path)=>{named=[b"the lock of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
         };

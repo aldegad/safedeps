@@ -1756,6 +1756,36 @@ cmd_doctor() {
     bash "${SAFEDEPS_REPO_DIR}/lib/gates/doctor.sh" "$@"
 }
 
+# ---- approvals ---------------------------------------------------------------
+
+# `safedeps approvals migrate [<archive>...]`: the approvals checks made before
+# the approvals store, moved into it from advisory.log and the archives named.
+# The migration is the core's (`safedeps-core approvals migrate`,
+# rust/src/approvals/migrate.rs): it reads the inputs, judges each line and
+# writes the store lines, under the store lock a commit holds and through a
+# commit's write. This only calls it, in the SAFEDEPS_HOME and the ledger
+# directory this CLI uses. It writes no advisory.log line, so it does not
+# rotate advisory.log either.
+cmd_approvals() {
+  local core_args=()
+  case "${1:-}" in
+    migrate) shift ;;
+    -h|--help) cmd_help approvals; return 0 ;;
+    *) sf_eprintf "safedeps: approvals takes one subcommand, migrate [<archive>...]. Try 'safedeps help approvals'."; return 4 ;;
+  esac
+  if ! sf_core; then
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. The migration is the core's, so nothing was migrated."
+    return 4
+  fi
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    core_args+=(--json)
+  fi
+  if ! SAFEDEPS_HOME="${SAFEDEPS_HOME}" SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR}" \
+    "${SF_CORE}" approvals migrate "${core_args[@]+"${core_args[@]}"}" "$@"; then
+    return 4
+  fi
+}
+
 # ---- help / version ----------------------------------------------------------
 
 cmd_version() {
@@ -1865,6 +1895,27 @@ safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]
   reported as unmeasured.
 EOF
       ;;
+    approvals)
+      cat <<'EOF'
+safedeps approvals migrate [<archive>...] [--json]
+
+  Move into the approvals store the approvals that checks made before it.
+  The migration reads the approve lines of ~/.safedeps/advisory.log and of
+  each archive named: a rotated advisory.log.<stamp>.gz, or a plain file. For
+  each hash a ledger entry confirms, it writes one store line. An entry
+  confirms a hash when it stands at the hash's path and its own fields give
+  that hash again.
+
+  Not moved, and counted: a line whose hash no entry confirms (each hash is
+  named with why), a line that an approve-undone or approve-in-doubt line of
+  its hash takes back, a cache hit, a broken line and an input's torn last
+  line. A line whose hash the store vouches for already is a duplicate, so a
+  second run inserts nothing. An input that cannot be read stops the run
+  before anything is written.
+
+  exit codes: 0 migrated · 4 an input, an entry or the store could not be read or written, or an argument that is not one
+EOF
+      ;;
     migrate)
       cat <<'EOF'
 safedeps migrate [--keep-legacy]
@@ -1914,6 +1965,7 @@ COMMANDS
   re-check                                  Re-query providers for all approved specs.
   watch <scan|status|claim|ack|...>          Daily scan of projects and runtimes.
   migrate                                  Migrate legacy npm-reorg-guard state.
+  approvals migrate [<archive>...]          Move pre-store approvals into the approvals store.
   gates [run]                               Release-time repo gates: secret scan, dep audit, hook/CI check.
   scan secrets [--repo|--worktree|--staged] Run gitleaks secret scan (repo profile aware).
   audit [npm|pnpm|yarn|bun]                 Audit dependency lockfiles (auto-detects ecosystem).
@@ -1995,6 +2047,7 @@ main() {
     re-check|recheck) cmd_recheck "$@" ;;
     watch)    cmd_watch    "$@" ;;
     migrate)  cmd_migrate  "$@" ;;
+    approvals) cmd_approvals "$@" ;;
     gates)    cmd_gates    "$@" ;;
     scan)     cmd_scan     "$@" ;;
     audit)    cmd_audit    "$@" ;;
