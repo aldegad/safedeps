@@ -141,8 +141,9 @@ pub fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
 #[cfg(test)]
 mod wait_tests {
     use super::*;
-    use std::{io::{BufRead, BufReader, Write}, process::{Child, Command, Stdio},
-        time::{Duration, Instant}};
+    use crate::children::{self, owned};
+    use std::{fs, io::{BufRead, BufReader, Write}, os::unix::process::ExitStatusExt, path::{Path, PathBuf},
+        process::{Child, ChildStdin, ChildStdout, Command, Stdio}, time::{Duration, Instant}};
 
     // Own this direct child through its wait, including assertion failures.
     struct Owned(Child);
@@ -150,40 +151,110 @@ mod wait_tests {
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
 
+    /// A row's own directory, outside the worktree, where its children run.
+    /// It is removed on every way out of the row.
+    struct Dir(PathBuf);
+    impl Drop for Dir { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+
+    #[cfg(target_os = "macos")]
+    const STOP: i32 = 17;
+    #[cfg(not(target_os = "macos"))]
+    const STOP: i32 = 19;
+
+    /// Set in a child of this test binary, the child is the fixture: it says
+    /// `ready`; for each line on its stdin it stops itself with SIGSTOP and
+    /// says `continued` once it is continued; and it exits on the line `exit`
+    /// or at the end of its stdin. It is this test binary, which keeps the
+    /// marker of its run as its argv[0] where python3 does not
+    /// (`crate::children`).
+    const FIXTURE: &str = "SAFEDEPS_WAIT_FIXTURE";
+    /// Set in a child of this test binary, it names a row's directory, and the
+    /// child is a run that starts the fixture there, has it stop, writes its
+    /// pid and start to `held`, and waits for its stdin to end.
+    const RUN: &str = "SAFEDEPS_WAIT_RUN";
+
+    /// The roles a child of a row plays: the fixture, RUN and the start of
+    /// another run (`children::role`). A row runs this first, and goes on
+    /// only as the row itself.
+    fn roles(path: &str) {
+        children::role();
+        if std::env::var_os(FIXTURE).is_some() { stops_when_told() }
+        if let Some(dir) = std::env::var_os(RUN) { holds_it_stopped(path, Path::new(&dir)) }
+    }
+
+    fn stops_when_told() -> ! {
+        let mut out = std::io::stdout();
+        // After the harness's own `test <name> ... `, on a line of its own.
+        out.write_all(b"\nready\n").unwrap();
+        out.flush().unwrap();
+        for line in std::io::stdin().lock().lines() {
+            if line.unwrap().trim() == "exit" { std::process::exit(0) }
+            unsafe { kill(std::process::id() as i32, STOP); }
+            out.write_all(b"continued\n").unwrap();
+            out.flush().unwrap();
+        }
+        std::process::exit(0)
+    }
+
+    /// The fixture, as a child of this run in `cwd`, with its stdin, and its
+    /// stdout once it has said `ready`.
+    fn fixture(path: &str, cwd: &Path) -> (Owned, ChildStdin, BufReader<ChildStdout>) {
+        let mut child = Owned(owned(path, cwd).env(FIXTURE, "1").stdin(Stdio::piped()).spawn().unwrap());
+        let input = child.0.stdin.take().unwrap();
+        let mut output = BufReader::new(child.0.stdout.take().unwrap());
+        let mut line = String::new();
+        while line != "ready\n" {
+            line.clear();
+            assert_ne!(output.read_line(&mut line).unwrap(), 0, "the fixture said it was ready");
+        }
+        (child, input, output)
+    }
+
+    fn stopped(pid: u32) -> bool {
+        let state = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&state.stdout).trim().starts_with('T')
+    }
+
+    /// Tells the fixture to stop, and waits until it has.
+    fn stop(pid: u32, input: &mut ChildStdin) {
+        writeln!(input, "stop").unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while !stopped(pid) {
+            assert!(Instant::now() < until, "child did not stop");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn holds_it_stopped(path: &str, dir: &Path) -> ! {
+        let (child, mut input, _output) = fixture(path, dir);
+        let pid = child.0.id();
+        stop(pid, &mut input);
+        let start = crate::post::start(pid).expect("the kernel's start of the fixture");
+        fs::write(dir.join("held.tmp"), format!("{pid} {start}")).unwrap();
+        fs::rename(dir.join("held.tmp"), dir.join("held")).unwrap();
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        drop(child);
+        std::process::exit(0)
+    }
+
     #[test]
     fn stopped_and_continued_children_are_not_exited() {
-        const CHILD: &str = r#"import os,signal,sys
-print('ready',flush=True)
-for line in sys.stdin:
-    if line.strip()=='exit': sys.exit(0)
-    os.kill(os.getpid(),signal.SIGSTOP)
-    print('continued',flush=True)
-"#;
+        const PATH: &str = "os::wait_tests::stopped_and_continued_children_are_not_exited";
+        roles(PATH);
         #[cfg(target_os = "macos")]
         const CONT: i32 = 19;
         #[cfg(not(target_os = "macos"))]
         const CONT: i32 = 18;
+        let dir = Dir(scratch_dir("safedeps-wait").unwrap());
         for ending in [0, SIGTERM, SIGKILL] {
-            let mut child = Owned(Command::new("python3").args(["-u", "-c", CHILD])
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+            let (mut child, mut input, mut output) = fixture(PATH, &dir.0);
             let pid = child.0.id();
-            let mut input = child.0.stdin.take().unwrap();
-            let mut output = BufReader::new(child.0.stdout.take().unwrap());
-            let mut line = String::new();
-            output.read_line(&mut line).unwrap();
-            assert_eq!(line, "ready\n");
             assert!(!child_exited_unreaped(pid).unwrap());
-            writeln!(input, "stop").unwrap();
-            let until = Instant::now() + Duration::from_secs(3);
-            loop {
-                let state = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
-                if String::from_utf8_lossy(&state.stdout).trim().starts_with('T') { break }
-                assert!(Instant::now() < until, "child did not stop");
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            stop(pid, &mut input);
             assert!(!child_exited_unreaped(pid).unwrap(), "stopped child");
             assert_eq!(unsafe { kill(pid as i32, CONT) }, 0);
-            line.clear(); output.read_line(&mut line).unwrap();
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
             assert_eq!(line, "continued\n");
             assert!(!child_exited_unreaped(pid).unwrap(), "continued child");
             if ending == 0 { writeln!(input, "exit").unwrap(); }
@@ -198,6 +269,41 @@ for line in sys.stdin:
             let status = child.0.wait().unwrap();
             assert_eq!(status.success(), ending == 0);
         }
+    }
+
+    /// A run killed while its fixture is stopped leaves the fixture stopped,
+    /// past the next run: no way out of the run runs, and nothing continues
+    /// the fixture. Its argv[0] names its run (`crate::children`), so the
+    /// start of another run leaves it while its run is alive, and the start
+    /// of the next run, once its run is killed, ends it. The run here is a
+    /// child of this row in the role RUN, and the row kills it with SIGKILL.
+    #[test]
+    fn a_stopped_child_a_killed_run_left_is_ended_at_the_next_runs_start() {
+        const PATH: &str = "os::wait_tests::a_stopped_child_a_killed_run_left_is_ended_at_the_next_runs_start";
+        roles(PATH);
+        let dir = Dir(scratch_dir("safedeps-wait-run").unwrap());
+        let mut run = Owned(owned(PATH, &dir.0).env(RUN, &dir.0).stdin(Stdio::piped()).spawn().unwrap());
+        let held = dir.0.join("held");
+        let until = Instant::now() + children::BOUND;
+        while !held.exists() {
+            assert!(run.0.try_wait().unwrap().is_none() && Instant::now() < until, "the run had its fixture stopped within {:?}", children::BOUND);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = fs::read_to_string(&held).unwrap();
+        let (pid, start) = text.split_once(' ').map(|(pid, start)| (pid.parse::<u32>().unwrap(), start.parse::<u64>().unwrap())).unwrap();
+        let _stray = children::Stray(pid, start);
+        let (ended, _) = children::next_start(PATH, &dir.0);
+        assert!(children::ended_for(&ended, pid, start).is_none(), "another run's start left the fixture of a run that is alive: {}", children::shown(&ended));
+        assert!(children::running(pid, start) && stopped(pid), "the fixture is still stopped, as it was");
+        let run_pid = run.0.id();
+        run.0.kill().unwrap();
+        assert_eq!(run.0.wait().unwrap().signal(), Some(9), "the row killed the run");
+        assert!(children::running(pid, start) && stopped(pid), "the fixture outlived its run, stopped");
+        let (ended, _) = children::next_start(PATH, &dir.0);
+        let fact = children::ended_for(&ended, pid, start)
+            .unwrap_or_else(|| panic!("the next run's start ended the stopped fixture its killed run left: {}", children::shown(&ended)));
+        assert!(children::says_gone(&fact, run_pid), "the fact that its run is gone: {}", String::from_utf8_lossy(&fact));
+        assert!(!children::running(pid, start), "the fixture is gone");
     }
 }
 

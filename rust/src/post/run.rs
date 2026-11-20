@@ -279,9 +279,9 @@ mod tests {
     /// mark-fixture` without one. Its working directory is the row's own
     /// scratch directory, outside the worktree. Its argv[0] names this run,
     /// so the start of a later run ends it if this run is killed while it
-    /// waits (`children::owned`).
+    /// waits (`crate::children::owned`).
     pub(super) fn child(path: &str, root: &Path, home: &Path, command: Option<&str>) -> Child {
-        let mut child = super::children::owned(path, root);
+        let mut child = crate::children::owned(path, root);
         child.env("SAFEDEPS_HOME", home).env(HOOK, root);
         if let Some(command) = command { child.env(COMMAND, command); }
         child.spawn().unwrap()
@@ -388,7 +388,7 @@ mod tests {
 
     /// The post run of a row, killed and reaped on every way out of the row,
     /// a panic included. A SIGKILL of the row runs no way out of it, and the
-    /// start of the next run ends what it left (`children`).
+    /// start of the next run ends what it left (`crate::children`).
     pub(super) struct Reaped(pub(super) Option<Child>);
     impl Drop for Reaped {
         fn drop(&mut self) {

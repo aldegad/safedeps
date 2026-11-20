@@ -74,6 +74,8 @@
 mod ask;
 mod callid;
 #[cfg(test)]
+mod children;
+#[cfg(test)]
 mod cli_text;
 mod core;
 mod ere;
