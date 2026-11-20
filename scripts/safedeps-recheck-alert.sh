@@ -173,7 +173,9 @@ fi
 
 # The watch's own news: new findings or transitions, a population that is not
 # fresh, errors the scan published with, a runtime that no longer matches its
-# checkout. Each says itself once; the consumer delivers the events. Roots the
+# checkout. A runtime whose checkout could not be read is neither stale nor
+# fresh: the report says null, the record keeps null and the sentence says
+# unknown. Each says itself once; the consumer delivers the events. Roots the
 # walk did not finish come first, with what find said about the first of
 # them: a run that read none of them otherwise reads as one that found
 # nothing. The record keeps the sentence the notification showed.
@@ -184,7 +186,7 @@ if [[ -z "${SAFEDEPS_RECHECK_FIXTURE_JSON:-}" ]]; then
     | ([(.errors // [])[] | select(.kind == "root_walk_incomplete")]) as $walk
     | ((.summary.roots_walked // 0) + (.summary.roots_walk_incomplete // 0)) as $roots
     | {kind:"watch_attention", at:$at, new_events, population:.population.state, errors:(.errors | length),
-       agent_runtime_stale:(.agent_runtime_stale == true), summary:.summary.line,
+       agent_runtime_stale, summary:.summary.line,
        walk_incomplete:($walk | length), roots:$roots,
        first_walk_incomplete:($walk | first | if . == null then null else {root, exit, said} end)}
     | . + {message: ((if .walk_incomplete > 0 then
@@ -193,7 +195,8 @@ if [[ -z "${SAFEDEPS_RECHECK_FIXTURE_JSON:-}" ]]; then
                         + "); what find could not read in them was not checked. "
                       else "" end)
                      + "\(.new_events) new, population \(.population), \(.errors) errors"
-                     + (if .agent_runtime_stale then ", agent runtime stale" else "" end))}' "${tmp_scan}" 2>/dev/null) || watch_alert=""
+                     + (if .agent_runtime_stale == true then ", agent runtime stale"
+                        elif .agent_runtime_stale == null then ", agent runtime stale unknown" else "" end))}' "${tmp_scan}" 2>/dev/null) || watch_alert=""
   if [[ -n "${watch_alert}" ]]; then
     append_alert "${watch_alert}"
     notify "safedeps watch" "$(jq -r '.message' <<< "${watch_alert}")"

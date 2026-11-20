@@ -269,7 +269,13 @@ safedeps_watch_scan() {
         jq -nc --arg name "${name}" --arg path "${path}" --arg resolved "${resolved}" --argjson partial "$([[ "${list_rc}" -eq 0 ]] && echo false || echo true)" \
           --argjson walk "${walk}" \
           '{name:$name, path:$path, resolved:$resolved, class:"ok", partial:$partial, walk:$walk}' >> "${tmp}/roots.jsonl"
-        [[ "${list_rc}" -eq 0 ]] || jq -nc --arg root "${path}" --argjson walk "${walk}" '{kind:"root_walk_incomplete", root:$root} + $walk' >> "${tmp}/errors.jsonl"
+        # A walk that did not finish did not look everywhere, so a lockfile it
+        # did not list is not missing: a finding of this root that the run
+        # does not see again keeps root_walk_incomplete as its reason.
+        if [[ "${list_rc}" -ne 0 ]]; then
+          jq -nc --arg root "${path}" --argjson walk "${walk}" '{kind:"root_walk_incomplete", root:$root} + $walk' >> "${tmp}/errors.jsonl"
+          jq -nc --arg root "${path}" '{scope:($root + "|*"), reason:"root_walk_incomplete"}' >> "${tmp}/unmeasured-scopes.jsonl"
+        fi
         # What the walk left out is said, not only skipped. A network mount
         # inside the root is unmeasured like a root that is one, with its
         # follow-up; an excluded prefix is named on the root. Either way a
@@ -463,6 +469,8 @@ safedeps_watch_scan() {
     return 3
   fi
 
+  # agent_runtime_stale is the summary's (lib/watch/state.jq): true, false, or
+  # null when the runtime's checkout could not be read and nobody can tell.
   local error_count report
   error_count=$(jq '.errors | length' "${doc}")
   [[ "${error_count}" -eq 0 ]] || rc=1
@@ -472,7 +480,7 @@ safedeps_watch_scan() {
      population: (.population | if . == null then null else {state, count, excluded, generated_at, reason} end),
      summary, diff: {new: (.diff.new | length), closed: (.diff.closed | length), changed: (.diff.changed | length)},
      new_events: (.last_scan.started_at as $at | [.events[] | select(.created_at == $at)] | length),
-     runtime: .last_scan.runtime, agent_runtime_stale: (.last_scan.runtime.stale == true), errors, ledger}' "${doc}")
+     runtime: .last_scan.runtime, agent_runtime_stale: .summary.agent_runtime_stale, errors, ledger}' "${doc}")
   safedeps_watch_receipt "${run_id}" "$(jq -c --arg at "${started}" --arg fin "${finished}" \
     '{run_id, kind, started_at: $at, finished_at: $fin, exit, generation, published: true,
       summary: .summary.line, errors: (.errors | length), runtime}' <<< "${report}")" || true

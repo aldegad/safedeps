@@ -449,6 +449,8 @@ run_wrapper_of() { # WRAPPER
   (cd "${d}" && envd SAFEDEPS_BIN="${WRAPPER_BIN:-${SD}}" "$1" > /dev/null 2> "${d}/wrapper.err") || rc=$?
 }
 last_alert() { tail -n 1 "${home}/recheck-alerts.jsonl" 2>/dev/null; }
+# The scan report the last wrapper run logged (one JSON line in recheck.log).
+last_report() { grep '^{' "${home}/recheck.log" 2>/dev/null | tail -n 1; }
 
 row_walk_incomplete() {
   new_world; register whole part
@@ -476,6 +478,8 @@ row_walk_incomplete() {
   # What the walk could list was measured: both top-level lockfiles. The line says the walk first.
   st '.summary.roots_walked == 1 and .summary.roots_walk_incomplete == 1 and .summary.osv_measured == 2'
   st '.summary.line | startswith("population fresh 2; roots walked 1/2 (1 incomplete); osv measured 2;")'
+  # A checkout runs its own files: not stale, and the line says nothing of it.
+  st '.summary.agent_runtime_stale == false and (.summary.line | contains("agent runtime") | not)'
   st '[.findings[] | select(.package == "left")] | length == 0' "a lockfile in the locked directory was read" '.findings'
   # The alert says how many of how many, find's first line, and what went unchecked.
   local said
@@ -531,6 +535,39 @@ FIND
 }
 row "find's words as it said them: a root path with spaces and a quote written as \".\", the first three of four lines with the count, and a find that exits 0 with words is a whole walk whose words stay on the root's line" row_walk_said
 
+# A lockfile under a directory the walk could not read was not looked for, so
+# a finding seen there before is not missing: it stays open and stale, and its
+# reason is the walk's. A lockfile gone from a root the walk finished is still
+# lockfile_missing, and only that one gets a lockfile_missing row.
+row_walk_incomplete_not_missing() {
+  new_world; register whole part
+  mkdir -p "${d}/p/part/locked"
+  npm_lock "${d}/p/whole" left@1.0.0
+  npm_lock "${d}/p/part/locked" left@1.0.0
+  fx ".osv[\"left@1.0.0\"] = [$(osv_record GHSA-walk-walk-walk '' left 1.0.1)]"
+  scan_ok
+  local part whole
+  part=$(npm_findings | jq -r --arg r "${d}/p/part" '.[] | select(.root == $r) | .key')
+  whole=$(npm_findings | jq -r --arg r "${d}/p/whole" '.[] | select(.root == $r) | .key')
+  [[ -n "${part}" && -n "${whole}" ]] || no "a finding in each root: $(npm_findings)"
+  chmod 000 "${d}/p/part/locked"
+  if ls "${d}/p/part/locked" > /dev/null 2>&1; then
+    chmod 755 "${d}/p/part/locked"
+    no "chmod 000 did not stop a read of the locked directory (is the battery running as root?)"
+  fi
+  mv "${d}/p/whole/package-lock.json" "${d}/lock.aside"
+  scan
+  chmod 755 "${d}/p/part/locked"
+  [[ "${rc}" == 1 ]] || no "the scan exited ${rc}, not 1 (published with errors): ${out}"
+  st --arg r "${d}/p/part" '[.errors[] | select(.kind == "root_walk_incomplete")] | length == 1 and .[0].root == $r' "the walk's error row" '.errors'
+  st --arg k "${part}" '.findings[$k] | .state == "open" and .stale_measurement == true and .unmeasured_reason == "root_walk_incomplete"' \
+    "the finding the walk could not reach" ".findings[\"${part}\"]"
+  st --arg k "${whole}" '.findings[$k] | .state == "open" and .stale_measurement == true and .unmeasured_reason == "lockfile_missing"' \
+    "the finding whose lockfile is gone from a root walked whole" ".findings[\"${whole}\"]"
+  st --arg r "${d}/p/whole" '[.unmeasured[] | select(.kind == "lockfile_missing")] | length == 1 and .[0].root == $r' "the lockfile_missing rows" '.unmeasured'
+}
+row "a finding under a directory the walk could not read stays open and stale with root_walk_incomplete, not lockfile_missing; a lockfile gone from a root walked whole is still lockfile_missing" row_walk_incomplete_not_missing
+
 # The runtime digest reads the checkout the runtime was built from. When that
 # checkout cannot be read, the digest is not made from what could be read: the
 # runtime says it cannot tell (stale null) with the read's words, and the alert
@@ -560,11 +597,25 @@ row_runtime_source_unreadable() {
     "the runtime that could not read its checkout" '.last_scan.runtime'
   st --arg r "${d}/p/part" '[.errors[] | select(.kind == "root_walk_incomplete")] | length == 1 and .[0].root == $r
       and all(.[0].said[]; contains("lock.sh") | not)' "the walk's row beside it" '.errors'
-  last_alert | jq -e '.agent_runtime_stale == false and (.message | contains("stale") | not)
-      and (.message | startswith("1 of 2 roots not read in full (") and contains("locked"))' > /dev/null \
+  # Not known is null, neither stale nor fresh, and the summary line says so
+  # with the read's words; the alert says unknown, not stale.
+  st '.last_scan.runtime.error as $e | .summary.agent_runtime_stale == null
+      and (.summary.line | endswith("; agent runtime stale unknown (" + $e + ")"))' "the summary of a runtime nobody could judge"
+  last_report | jq -e 'has("agent_runtime_stale") and .agent_runtime_stale == null' > /dev/null \
+    || no "the scan report: $(last_report | jq -c '{agent_runtime_stale, runtime}')"
+  last_alert | jq -e 'has("agent_runtime_stale") and .agent_runtime_stale == null
+      and (.message | startswith("1 of 2 roots not read in full (") and contains("locked"))
+      and (.message | endswith(", 1 errors, agent runtime stale unknown"))' > /dev/null \
     || no "the alert: $(last_alert)"
+  # The same runtime with its checkout readable again is judged: fresh, false,
+  # and the line says nothing of it.
+  WRAPPER_BIN="${rt}/bin/safedeps" run_wrapper_of "${rt}/scripts/safedeps-recheck-alert.sh"
+  [[ "${rc}" == 0 ]] || no "the wrapper with the checkout readable exited ${rc}: $(cat "${d}/wrapper.err")"
+  st '.last_scan.runtime.stale == false and .summary.agent_runtime_stale == false and (.summary.line | contains("agent runtime") | not)' \
+    "the runtime read again" '.last_scan.runtime'
+  last_report | jq -e '.agent_runtime_stale == false' > /dev/null || no "the scan report read again: $(last_report | jq -c '{agent_runtime_stale, runtime}')"
 }
-row "a runtime whose source checkout cannot be read says stale null with the read's words, not a digest of what it could read; the alert does not say stale, and the walk that did not finish beside it keeps its own words" row_runtime_source_unreadable
+row "a runtime whose source checkout cannot be read says stale null with the read's words, not a digest of what it could read; the report's agent_runtime_stale is null, the summary line and the alert say unknown, not stale, and the walk that did not finish beside it keeps its own words; read again, the same runtime is false and the line is silent" row_runtime_source_unreadable
 
 # ---- Java ------------------------------------------------------------------------------
 row_jdk() {
