@@ -2,8 +2,26 @@
 
 [한국어](CHANGELOG.ko.md)
 
-## Unreleased
+## 2.25.0
 
+- Added `${SAFEDEPS_HOME}/approvals.jsonl`, an append-only approval provenance store that `safedeps` never rotates, compacts, truncates, renames, or rewrites.
+  Fresh `clean`, `patched`, `clean closure`, and `patched closure` approvals write and sync a JSONL record (`at`, `hash`, `via`, `record`) under an exclusive `flock(2)` lock before appending to `advisory.log` and renaming the staged ledger entry; an unsynced approval stops before writing the `approve` line and renaming the ledger entry, so a store line can exist without a ledger entry and is counted as `unmatched` (a necessary limit, not an all-or-nothing guarantee across records).
+  `re-check` now reads only `approvals.jsonl` as provenance—never falling back to live or archived `advisory.log`—so log rotation no longer triggers false forgery reports.
+  Provenance is checked by recomputing the hash (ecosystem, package, version, and project context) from ledger entry fields with no spec-only matching, and `re-check` reports `approvals_store: {present, broken, unmatched}`.
+- A cache hit is an approval the approvals store vouches for. A ledger entry the store does not vouch for is checked again from the start.
+  Cache hits do not append to `approvals.jsonl`.
+- Breaking: `re-check` now reports unvouched ledger entries under `suspected_forgery` with reason `unvouched`, replacing `missing_advisory_log_approval` with no old alias.
+- Hardened store and binary failure handling to fail closed.
+  `check` approval writing now requires the machine core (`safedeps-core`) and refuses if it is missing, writing no approval or ledger entry; missing `safedeps-core` returns `core_missing` (CLI exit `4`, naming the missing path), an unreadable store returns `approvals_store_unreadable` (CLI exit `4`, no judgments), and store lock acquisition times out after 10 seconds with an error rather than falling back unlocked.
+  `approvals_store_in_doubt` indicates the check's own staged entry is not confirmed standing while records may still exist.
+- Added `safedeps [--json] approvals migrate [<archive>...]` (distinct from legacy `safedeps migrate`) to import verified approvals from live `advisory.log` and any named existing archives (including `.gz`) without provider calls or ledger/log writes.
+  Without migration, existing unvouched ledger entries after upgrading are checked again from the start (including a provider requery) once per entry until migrated or rechecked.
+  Migration reports five counts (`inserted`, `not_inserted`, `duplicates`, `unconfirmed`, `taken_back`) summing to `approve_lines` when known, honors `approve-undone` and `approve-in-doubt` take-backs, is idempotent on re-run, and reports named failures (`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`, `approvals_store_write_failed`, `approvals_store_unsynced`).
+- Updated the daily watch LaunchAgent installer to copy the machine core (`bin/native/<os>-<arch>/safedeps-core`) alongside `bin/safedeps`, `lib/`, and the wrapper, include the core binary in the runtime source digest, and refuse with `core-missing` before replacing the runtime if the core is missing, unusable, or a symlink.
+  Reinstall the agent from a checkout containing the core binary (passing your `--hour` and `--minute` schedule); until reinstalled, the old runtime keeps running the old log logic and reports `agent_runtime_stale: true`.
+  Scheduled runs that hit `core_missing` record `recheck_failed` with the re-check exit status and error and still raise the watch alert for that run.
+- Added the `approvals-provenance` regression battery covering real `check` and `re-check` across shell log rotation with an empty live log, synthetic overlapping archives and truncated live logs (not measured concurrent rotations), forged-entry rejection, normal approval and cache flows, and legacy migration idempotency.
+- Included this machine's `bin/native/<os>-<arch>/safedeps-core` in the runtime digest; when the source core is missing, scan records runtime metadata diagnostics with `source_digest_now: null`, `stale: null`, and `source_unreadable` (`step: find`, `find`'s nonzero `exit`, and `said` containing the core path) instead of `stale: true`, without failing the scan, adding an error row, or raising an alert by itself, while installer status exits `1` with `core-missing` and the path without a JSON digest or stale judgment (unsupported platforms where `safedeps_watch_core_file` cannot name a path keep scan's existing omission while the installer refuses with `core-missing`).
 - Documented what the daily watch costs. Its ledger re-check asks OSV live for every entry on every run, so a full scan grows with the ledger. Without `GITHUB_TOKEN`, the GHSA cross-check is skipped once GitHub's unauthenticated limit is reached, with a WARN line for each skip. A manual `safedeps re-check` during a scan exits `75`.
 
 ## 2.24.0

@@ -2,8 +2,26 @@
 
 [English](CHANGELOG.md)
 
-## Unreleased
+## 2.25.0
 
+- 추가 전용 승인 출처 저장소 `${SAFEDEPS_HOME}/approvals.jsonl`을 추가했습니다. `safedeps`는 이 파일을 rotate, compact, truncate, rename하거나 다시 쓰지 않습니다.
+  새로 승인된 `clean`, `patched`, `clean closure`, `patched closure` 항목은 배타적 `flock(2)` lock 안에서 JSONL 레코드(`at`, `hash`, `via`, `record`)를 쓰고 sync한 뒤 `advisory.log`에 기록하고 staged ledger 항목을 rename합니다. sync되지 않은 승인은 `approve` 줄 기록과 ledger rename 전에 중단되므로 ledger 항목 없이 저장소 줄만 남을 수 있으며 이는 `unmatched`로 집계됩니다(레코드 간 all-or-nothing 보장이 아닌 불가피한 한계입니다).
+  이제 `re-check`는 출처 확인에 `approvals.jsonl`만 읽고 현재 `advisory.log`나 아카이브로 fallback하지 않으므로, 로그 로테이션 때문에 거짓 위조 보고가 생기지 않습니다.
+  출처는 ledger 항목 필드에서 ecosystem, package, version, 프로젝트 컨텍스트를 포함한 해시를 다시 계산해 확인하며 spec만으로 일치시키지 않습니다. `re-check` 보고서에는 `approvals_store: {present, broken, unmatched}`가 포함됩니다.
+- cache hit는 approvals store가 보증하는 승인에만 성립합니다. 저장소가 보증하지 않는 ledger 항목은 처음부터 다시 검사합니다.
+  cache hit는 `approvals.jsonl`에 기록을 추가하지 않습니다.
+- 호환성 변경: `re-check`가 `suspected_forgery` 아래에서 보증되지 않은 ledger 항목을 보고할 때 사유 이름을 `missing_advisory_log_approval`에서 `unvouched`로 바꿨으며, 이전 별칭은 유지하지 않습니다.
+- 저장소와 바이너리 오류 처리를 fail-closed로 강화했습니다.
+  이제 `check`의 승인 기록은 머신 코어(`safedeps-core`)를 필요로 하며 코어가 없으면 거부하고 승인이나 ledger 항목을 기록하지 않습니다. `safedeps-core`가 없으면 `core_missing`(CLI exit `4`, 누락된 경로 포함)을, 저장소를 읽을 수 없으면 `approvals_store_unreadable`(CLI exit `4`, 판정 없음)을 반환하며, 저장소 lock 획득은 10초 후 오류로 종료하고 lock 없이 진행하지 않습니다.
+  `approvals_store_in_doubt`는 이 check가 준비한 항목이 확정되었는지 확인하지 못했음을 뜻하며 기록이 남아 있을 수 있습니다.
+- provider 호출이나 ledger/로그 쓰기 없이 현재 `advisory.log`와 지정한 기존 아카이브(`.gz` 포함)에서 검증된 승인을 가져오는 `safedeps [--json] approvals migrate [<archive>...]`를 추가했습니다(이전 `safedeps migrate`와는 별개입니다).
+  업그레이드 후 마이그레이션하지 않은 기존 미보증 ledger 항목은 마이그레이션하거나 다시 확인하기 전까지 항목당 한 번씩 provider 재조회를 포함해 처음부터 다시 검사합니다.
+  마이그레이션은 수치를 알 수 있을 때 합계가 `approve_lines`가 되는 다섯 개 수치(`inserted`, `not_inserted`, `duplicates`, `unconfirmed`, `taken_back`)를 보고하고, `approve-undone`과 `approve-in-doubt` 철회를 반영하며, 재실행 시 멱등하게 동작하고 명명된 오류(`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`, `approvals_store_write_failed`, `approvals_store_unsynced`)를 보고합니다.
+- daily watch LaunchAgent installer가 `bin/safedeps`, `lib/`, wrapper와 함께 머신 코어(`bin/native/<os>-<arch>/safedeps-core`)를 복사하고 runtime source digest에 포함하도록 갱신했습니다. 코어가 없거나 사용할 수 없거나 심볼릭 링크이면 기존 runtime을 덮어쓰기 전에 `core-missing`으로 거부합니다.
+  코어 바이너리가 있는 checkout에서 기존 `--hour`와 `--minute` 일정을 지정해 agent를 다시 설치하세요. 다시 설치하기 전에는 이전 runtime이 기존 로그 로직으로 계속 동작하며 `agent_runtime_stale: true`를 보고합니다.
+  예약 실행에서 `core_missing`이 발생하면 `recheck_failed`에 re-check 종료 상태와 오류를 기록하고 해당 실행의 watch 경고도 그대로 올립니다.
+- 빈 라이브 로그로 이어지는 셸 로그 로테이션 동안의 실제 `check`와 `re-check`, 인위적으로 겹친 아카이브와 잘린 라이브 로그(실제 동시 로테이션 측정은 아님), 위조 항목 거부, 일반 승인 및 cache 흐름, 레거시 마이그레이션 멱등성을 검증하는 `approvals-provenance` 회귀 테스트 묶음을 추가했습니다.
+- 런타임 다이제스트에 현재 머신의 `bin/native/<os>-<arch>/safedeps-core`를 포함했습니다. 소스 코어가 누락되어도 스캔은 자체적으로 실패하거나 오류 행을 추가하거나 경고를 올리지 않으며, `stale: true` 대신 런타임 메타데이터 진단으로 `source_digest_now: null`, `stale: null`, 그리고 `step: find`, `find`의 0이 아닌 종료 코드인 `exit`, 코어 경로가 포함된 `said`를 담은 `source_unreadable`을 기록합니다. 반면 인스톨러 상태 확인은 JSON 다이제스트나 stale 판정 없이 `core-missing`과 경로를 출력하고 코드 `1`로 종료합니다(`safedeps_watch_core_file`이 경로를 지정할 수 없는 미지원 플랫폼에서는 스캔의 기존 생략 동작을 유지하며 인스톨러는 `core-missing`으로 거부합니다).
 - daily watch의 비용을 문서화했습니다. ledger re-check는 매 실행마다 모든 항목에 대해 OSV에 실시간으로 질의하므로, full scan 비용은 ledger 크기에 따라 늘어납니다. `GITHUB_TOKEN`이 없으면 GitHub의 비인증 한도에 도달한 뒤부터 GHSA 교차 확인을 건너뛰며, 건너뛸 때마다 WARN 줄을 남깁니다. scan 중에 수동으로 `safedeps re-check`를 실행하면 `75`로 종료합니다.
 
 ## 2.24.0

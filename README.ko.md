@@ -500,6 +500,22 @@ node scripts/install/install-safedeps-hooks.mjs
 
 에이전트 폴더 자체를 canonical 로컬 소스로 사용하려면 앞서의 GitHub 설정 방식을 사용하세요.
 
+### Approvals Store 및 마이그레이션
+
+`safedeps`는 승인 출처 기록을 `${SAFEDEPS_HOME}/approvals.jsonl`에 저장합니다(기본값 `~/.safedeps/approvals.jsonl`, 별도 환경 변수는 없습니다). 이 저장소는 추가 전용(append-only)이며, `safedeps`는 파일을 rotate, compact, truncate, rename하거나 다시 쓰지 않습니다. 새로 승인된 `clean`, `patched`, `clean closure`, `patched closure` 항목마다 `at`, `hash`, `via`, `record` 필드를 담은 JSONL 레코드가 덧붙으며, `hash`는 ecosystem, package, version, 프로젝트 컨텍스트를 포함합니다. cache hit는 유효한 ledger 항목 해시와 `approvals.jsonl`의 보증이 모두 있을 때만 인정되며, cache hit 자체는 저장소에 기록을 추가하지 않습니다. `re-check`는 출처 확인에 `approvals.jsonl`만 읽고 `advisory.log`나 아카이브로 fallback하지 않으며, 보증되지 않은 항목은 `unvouched` 사유로 보고합니다. ledger와 서명 없는 이 저장소는 같은 사용자 환경에서의 편의 캐시일 뿐, 같은 사용자 권한의 공격자를 막는 변조 방지 보안 경계는 아닙니다.
+
+업그레이드한 뒤 `approvals.jsonl`이 보증하지 않는 기존 ledger 항목은 마이그레이션하거나 다시 확인하기 전까지 항목당 한 번씩 provider 재조회를 포함해 처음부터 다시 검사합니다. provider 호출 없이 기존 감사 로그에서 검증된 승인 기록을 옮기려면 업그레이드 후 마이그레이션을 한 번 실행하세요. 마이그레이션은 항상 현재 `advisory.log`를 먼저 읽은 뒤 사용자가 지정한 아카이브 파일을 읽으며(`.gz` 파일은 `gzip -dc`로 읽음), 아카이브를 자동으로 찾지 않습니다. 필요한 기존 아카이브 경로를 지정해 실행합니다(이전 npm-reorg 상태용 `safedeps migrate`와는 다른 명령입니다).
+
+```bash
+safedeps --json approvals migrate /path/to/advisory.log.archive.gz
+```
+
+`approve_lines`가 포함된 모든 마이그레이션 보고서에는 `inserted`, `not_inserted`, `duplicates`, `unconfirmed`, `taken_back` 다섯 개 수치가 들어가며, 수치를 알 수 있을 때 이 다섯 값의 합은 `approve_lines`와 같습니다(성공 시 `not_inserted`는 `0`). `cache`, `broken`, `torn` 줄은 따로 세며 가져오지 않습니다. cache 기록만 있는 항목은 `check`를 다시 실행하세요. 확인되지 않은 해시에는 `no_entry`, `not_an_entry`, `hash_mismatch` 사유가 함께 기록되며, 마이그레이션을 다시 실행해도 멱등하게 동작해 이전에 넣은 항목은 `duplicates`로 셉니다.
+
+쓰기 전 실패(`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`)는 아무것도 쓰지 않고 끝납니다(`inserted: 0`). 쓰기 실패(`approvals_store_write_failed`)는 같은 lock 안에서 자신이 쓴 해시를 다시 읽어 `inserted`와 `not_inserted`를 계산하며, 다시 읽기에 실패하면 둘 다 `"unknown"`으로 두고 `reread_outcome`을 함께 보고합니다. 끝에 잘린 줄이 남으면 다음 쓰기 때 broken 줄로 봉인합니다. `approvals_store_unsynced`는 줄을 썼지만 sync에 실패한 상태이며 여전히 실패로 처리합니다. 마이그레이션 실패와 사용법 오류는 CLI에서 종료 코드 `4`로 끝납니다(core는 실패 시 `1`, 사용법 오류 시 `2`). 마이그레이션은 안전하게 재시도할 수 있으며, 부분 성공은 성공이 아닙니다. `re-check`에서 저장소를 읽을 수 없으면 `approvals_store_unreadable`(종료 코드 `4`, 판정 없음)을, `safedeps-core` 바이너리가 없으면 `core_missing`(종료 코드 `4`, 누락된 경로 포함)을 반환합니다.
+
+ledger 디렉터리 하나는 하나의 `SAFEDEPS_HOME` 저장소에 속합니다. 여러 home 사이에서 `SAFEDEPS_LEDGER_DIR`을 공유하는 동작은 막지 않으며 서로 다른 저장소의 lock도 직렬화되지 않으므로, 한 home의 커밋이 다른 home의 보증되지 않은 항목을 지울 수 있습니다.
+
 ### Daily Watch With macOS Alerts
 
 daily watch를 하루 한 번 실행하기 위해 사용자별 LaunchAgent를 설치합니다.
@@ -528,6 +544,12 @@ scan은 root 아래의 어떤 것도 열기 전에 모든 root를 mount table과
 모든 실행은 요약 줄 하나를 출력합니다. 이 줄은 `osv measured` 앞에 walk를 `roots walked N/M (K incomplete)` 형식으로 표시합니다. N은 walk가 끝난 `ok` 클래스의 root인 `roots_walked`입니다. K는 walk가 끝나지 않은 `ok` 클래스의 root인 `roots_walk_incomplete`입니다. M은 N + K입니다. 괄호 안 부분은 `(0 incomplete)`인 경우에도 항상 표시합니다. root를 읽지 않은 경우 `osv measured 0`은 "아무것도 찾지 못함"을 의미하지 않습니다. scan이 agent runtime이 stale인지 판단할 수 없으면 이 줄은 `; agent runtime stale unknown (<error>)`로 끝나며, 여기서 `<error>`는 `last_scan.runtime.error`입니다. `complete`는 population이 fresh이고, 측정되지 않은 항목이 없으며, 차단된 항목이 없을 때만 true입니다.
 
 scan은 결과를 `~/.safedeps/watch/state.json`에 게시합니다. 각 래퍼 실행은 `runtime_version`이 포함된 한 줄을 `~/.safedeps/recheck.log`에 기록합니다. 경고는 `~/.safedeps/recheck-alerts.jsonl`과 macOS 알림으로 전달됩니다. 래퍼는 새로운 이벤트가 있거나, population이 fresh가 아니거나, 실행에 오류가 있거나, agent runtime이 stale일 때 실행당 한 번 경고합니다. 알림에는 `<n> new, population <state>, <e> errors`라고 표시되며, 해당 값이 true일 때 `, agent runtime stale`이, `agent_runtime_stale`이 null일 때 `, agent runtime stale unknown`이 추가됩니다. 스캔에 `root_walk_incomplete` 오류가 하나라도 있으면 알림은 `K of M roots not read in full (<said>); what find could not read in them was not checked.`로 시작합니다. K는 walk가 완료되지 않은 `ok` 클래스 root의 수입니다. M은 `ok` 클래스 root의 수입니다. `<said>`는 첫 번째 해당 root에 대해 find가 출력한 첫 번째 줄입니다. find가 거기서 아무것도 출력하지 않았다면, 괄호 안에는 `exit <n>, nothing said`라고 적힙니다. `recheck-alerts.jsonl`의 `watch_attention` 레코드에는 `message`, `walk_incomplete`, `roots`, `first_walk_incomplete`가 포함됩니다. `message`는 알림의 문구입니다. `walk_incomplete`는 K이고 `roots`는 M입니다. `first_walk_incomplete`는 첫 번째 해당 root의 `{root, exit, said}`이며, 그런 root가 없으면 null입니다. busy scan은 알림 없이 `recheck-alerts.jsonl`에 기록됩니다. 래퍼는 ledger에 관한 기존 재검사 경고도 계속 발생시킵니다: 새로운 CVE 또는 KEV, 철회된 spec, 건너뛴 provider, 위조 의심 항목. 보고서에 `agent_runtime_stale: true`가 있으면 agent를 다시 설치합니다. `agent_runtime_stale`은 `last_scan.runtime`의 `stale`이 true일 때만 true입니다. source checkout을 읽을 수 없으면 scan은 runtime이 stale인지 판단할 수 없습니다. 이때 `last_scan.runtime`에는 `source_digest_now: null`, `stale: null`, `source_unreadable`과 `source checkout unreadable:`로 시작하는 `error`가 있습니다. `source_unreadable`은 실패한 단계의 이름을 알려 줍니다. 그 단계는 `find`, `sort`, `shasum`, `digest` 중 하나입니다. 이 경우 `agent_runtime_stale`은 false가 아니라 `null`입니다. `watch_attention` 레코드에는 보고서가 준 그대로 true, false 또는 null 값이 유지됩니다. 읽을 수 없는 checkout은 오류 행을 추가하지 않으며 그 자체로 경고를 발생시키지 않습니다. 래퍼가 다른 이유로 경고할 때만 알림에 `, agent runtime stale unknown`이 표시됩니다.
+
+`~/.safedeps/recheck-alerts.jsonl`의 `recheck_failed` 레코드에는 두 가지 형태가 있습니다. `safedeps watch scan`이 ledger re-check 실패(`ledger_stage_failed`, 예: 종료 코드 `4`와 `error: "core_missing"`)로 끝나면 `recheck_failed`에는 그 ledger re-check의 `exit_status`와 `error`가 담기며, 래퍼는 이어서 해당 실행의 `watch_attention` 경고도 올린 뒤 `1`로 종료합니다. 스캔 명령 자체가 결과를 게시하지 못하고 끝나면 `recheck_failed`에는 그 명령의 `exit_status`와 `stderr`가 담깁니다.
+
+예약 실행에서 `core_missing`이 보고되면 설치된 agent runtime에 머신용 `safedeps-core` 바이너리가 빠진 것입니다. `bin/native/<os>-<arch>/safedeps-core`가 있는 checkout에서 agent를 다시 설치하세요(`node scripts/install/install-safedeps-recheck-agent.mjs install`에 기존 `--hour`와 `--minute` 일정 지정). 패키지만 다시 설치해서는 LaunchAgent runtime이 갱신되지 않습니다.
+
+런타임 다이제스트에는 현재 머신의 코어인 `bin/native/<os>-<arch>/safedeps-core`가 포함됩니다. 소스 체크아웃에 해당 코어가 없어도 스캔은 `stale: true`를 보고하지 않으며 이 사실만으로 실패하지 않습니다. 대신 런타임 메타데이터 진단으로 `source_digest_now: null`, `stale: null`, 그리고 `step: find`, `find`의 0이 아닌 종료 코드인 `exit`, 코어 경로가 포함된 `said`를 담은 `source_unreadable`을 기록하며, `stale`이 미확정인 것만으로는 오류 행을 추가하거나 경고를 올리지 않습니다. 인스톨러 상태 확인은 설치(install) 및 스테이징(stage)과 동일한 필수 코어 검사를 수행하며, JSON 다이제스트나 stale 판정 없이 `core-missing`과 경로를 출력하고 코드 `1`로 종료합니다. 유효한 소스가 변경되어 `stale: true`가 된 경우에는 여전히 유효한 소스에서 에이전트를 재설치하는 것이 해결 방법이며, 소스 코어가 누락된 경우에는 인스톨러가 런타임을 다시 빌드하기 전에 소스를 먼저 복구해야 합니다. `safedeps_watch_core_file`이 경로를 지정할 수 없는 알 수 없는 플랫폼(OS가 `darwin`/`linux`가 아니거나 `BASH_VERSINFO[5]`의 아키텍처가 `arm64`/`aarch64`/`x86_64`/`amd64`가 아닌 경우)에서는 스캔이 미지원 플랫폼을 포괄하지 않고 기존 생략 동작을 유지하지만, 인스톨러는 `core-missing`으로 거부합니다.
 
 `safedeps watch scan`의 exit code:
 

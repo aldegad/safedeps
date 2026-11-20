@@ -46,7 +46,7 @@ safedeps check <ecosystem> <pkg>@<range> --json
 | `closure_vulnerable` | Do not install. A dependency the install would bring in has an advisory; `closure_vulnerabilities` names it. Propose an alternative. |
 | `kev_hard_block` | Do not install. Recommend an alternative — actively exploited in the wild. |
 | `provider_unavailable` | Do not install. OSV did not answer, its answer or one of its advisory records could not be read or was not whole, or no CISA KEV catalog could be read. No OSV answer from an earlier run is used. Retry later or tell the human. |
-| `error` | Read `error`. Fix the spec (e.g. an unpublished version) and retry. `ledger_write_failed`, `approvals_store_failed` and `approvals_store_in_doubt` mean the approval could not be written, `core_missing` means the safedeps-core binary that writes it is missing, and `check_did_not_finish` means the check stopped before it could answer. In each, nothing is approved: tell the human. `ledger_entry_left: true` means a ledger entry the check could not take back is still there: tell the human that too. |
+| `error` | Read `error`. Fix the spec (e.g. an unpublished version) and retry. `ledger_write_failed` and `approvals_store_failed` mean the approval could not be committed, `approvals_store_in_doubt` means this check's own ledger entry is not confirmed standing (records may still exist), `core_missing` means the `safedeps-core` binary is missing, and `check_did_not_finish` means the check stopped before it could answer. In each case, do not treat the spec as approved: tell the human. |
 
 Install only after approval. If the approved version differs from your argument, the hook blocks again — re-narrow and retry.
 
@@ -88,6 +88,22 @@ Remote repository governance is opt-in and cost-aware. `doctor` may report `lane
 Running `safedeps gates run --root <repo> --strict` locally is the safe first step.
 
 ---
+
+## Approvals store and migration
+
+Fresh `clean`, `patched`, `clean closure`, and `patched closure` approvals write provenance to `${SAFEDEPS_HOME}/approvals.jsonl`. A cache hit requires both a valid ledger entry hash and a store vouch; after upgrading, any unvouched ledger entry is checked again from the start (including a provider requery) once per entry until migrated or rechecked.
+
+Run migration once after upgrading to import verified approvals from live `advisory.log` (always read first) and any named existing archive files (`.gz` supported), without provider calls or ledger/log writes (distinct from legacy `safedeps migrate`):
+
+```bash
+safedeps [--json] approvals migrate [<archive>...]
+```
+
+Every migration report carrying `approve_lines` reports five counts—`inserted`, `not_inserted`, `duplicates`, `unconfirmed` (`no_entry`, `not_an_entry`, `hash_mismatch`), and `taken_back`—summing to `approve_lines` when known (`not_inserted` is `0` on success; `cache`, `broken`, and `torn` are counted separately and never imported). Re-running is idempotent (`duplicates`).
+
+Pre-write failures (`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`) write nothing. `approvals_store_write_failed` rereads its own hashes under the lock or reports `"unknown"` for `inserted` and `not_inserted` with `reread_outcome`; `approvals_store_unsynced` means written lines were not synced; `core_missing` names the missing `safedeps-core` path. CLI failures and usage errors exit `4`. Retrying migration is safe, and a partial outcome is not a success.
+
+After upgrading, reinstall the daily watch LaunchAgent from a checkout containing `bin/native/<os>-<arch>/safedeps-core` (`node scripts/install/install-safedeps-recheck-agent.mjs install` with the host's `--hour` and `--minute`); otherwise scheduled runs stay on the old runtime (`agent_runtime_stale: true`) or fail with `core_missing`.
 
 ## Daily watch
 
@@ -210,7 +226,7 @@ safedeps version
 
 - `ledger`: `command`, `count`, and `specs`, each with `hash`, `ecosystem`, `package`, `version`, `version_range`, `approved_at`, `expires_at`, `approved_by`, `expired` and `revoked`.
 - `revoke`: `command`, `revoked`, `reason`, and `spec`, the ledger entry after revocation.
-- `re-check`: `command`, `checked`, `still_clean`, and the lists `newly_vulnerable`, `kev_hit`, `revoked`, `suspected_forgery` and `errors`. Each `errors` row has a `kind`: `ledger_entry_unreadable` with `file`, or `revoke_failed` or `provider_unavailable` with `ecosystem`, `package`, `version` and `file`. A `provider_unavailable` row is a ledger entry the providers gave no answer for: it is neither still clean nor revoked, and it stays in the ledger. A report with errors exits 1 after it is printed.
+- `re-check`: `command`, `checked`, `still_clean`, `approvals_store` (`{present, broken, unmatched}`), and the lists `newly_vulnerable`, `kev_hit`, `revoked`, `suspected_forgery` (unvouched entries carry reason `unvouched`) and `errors`. `approvals_store.present` is `false` when the store is missing, `broken` counts corrupt store lines without stopping other judgments, and `unmatched` is a diagnostic count of unique stored hashes absent from the ledger (not a warning). Each `errors` row has a `kind`: `ledger_entry_unreadable` with `file`, or `revoke_failed` or `provider_unavailable` with `ecosystem`, `package`, `version` and `file`. A `provider_unavailable` row is a ledger entry the providers gave no answer for: it is neither still clean nor revoked, and it stays in the ledger. A report with errors exits 1 after it is printed; if the store cannot be read (`approvals_store_unreadable`) or `safedeps-core` is missing (`core_missing`, naming the path), `re-check` exits 4 with no judgments.
 
 Any of the three answers `command` and `error: "ledger_unlisted"` with exit 4 when the ledger's files could not be listed. That is no reading of the ledger, not an empty one.
 
