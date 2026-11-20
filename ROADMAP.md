@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.22.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.23.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily watch uses no LLM tokens and is opt-in: the same macOS `launchd` user agent, installed by `install-safedeps-recheck-agent.mjs`, now runs `safedeps --json watch scan` daily. On top of the ledger re-check, it judges the lockfiles under the registered project roots and reports the update status of the host's JDKs. It writes `~/.safedeps/watch/state.json`, `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl`. It raises a macOS notification on new events, a population that is not fresh, a run with errors, a stale agent runtime, and the ledger alerts kept from the re-check (new CVE/KEV/revoke/provider-skip/suspected-forgery). A busy scan is recorded in `recheck-alerts.jsonl` without a notification. Network is used only for OSV / CISA KEV / GHSA queries, the OpenJDK Vulnerability Group advisories, the Adoptium API, and the native audits of pnpm, yarn and bun against the npm registry's advisory database.
 

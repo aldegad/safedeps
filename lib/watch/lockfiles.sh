@@ -82,10 +82,11 @@ safedeps_watch_kind_of() {
 }
 
 # Lists the files of every kind under ROOT (resolved, local) into OUT, one
-# NUL-terminated path relative to ROOT. Returns find's exit: a walk that met a
-# directory it could not read listed what it could, and the caller records it.
+# NUL-terminated path relative to ROOT. What the walk said goes to SAID, a file
+# the caller names. Returns find's exit: a walk that met a directory it could
+# not read listed what it could, and the caller records the exit and SAID.
 safedeps_watch_list_files() {
-  local root="$1" out="$2" name line prune rc=0
+  local root="$1" out="$2" said="$3" name line prune rc=0
   local -a expr=() names=() prunes=()
   for name in ${SAFEDEPS_WATCH_PRUNE_NAMES}; do
     names+=(-o -name "${name}")
@@ -98,7 +99,7 @@ safedeps_watch_list_files() {
   done <<< "${SAFEDEPS_WATCH_FILE_KINDS}"
   ( cd "${root}" && find . -xdev -maxdepth "${SAFEDEPS_WATCH_MAX_DEPTH}" \
       \( \( -type d \( -false "${names[@]}" \) \) "${prunes[@]+${prunes[@]/#${root}/.}}" \) -prune \
-      -o -type f \( -false "${expr[@]}" \) -print0 ) > "${out}" 2>/dev/null || rc=$?
+      -o -type f \( -false "${expr[@]}" \) -print0 ) > "${out}" 2> "${said}" || rc=$?
   return "${rc}"
 }
 

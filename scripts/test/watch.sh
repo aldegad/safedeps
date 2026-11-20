@@ -435,6 +435,137 @@ row_symlink_root_over_mount() {
 }
 row "a registered root that is a symlink to a local tree with a network mount inside it: walked resolved, the mount pruned and reported unmeasured with its follow-up, the root not whole, a finding it hid kept open with its reason" row_symlink_root_over_mount
 
+# ---- a walk that does not finish says so, with find's words ------------------------------
+# A walk find does not finish is recorded with find's exit and its words, and
+# the summary and the alert count it, so "osv measured 0" never stands alone
+# for roots nobody read. A directory chmod 000 here is EACCES; an operating
+# system that refuses a read says EPERM. Both take the same path: the walk
+# lists what it can, and find's exit and words are kept as find gave them.
+
+# The wrapper's world: one run of scripts/safedeps-recheck-alert.sh, as launchd
+# runs it. WRAPPER_BIN names the CLI it runs (the checkout's by default).
+run_wrapper_of() { # WRAPPER
+  rc=0
+  (cd "${d}" && envd SAFEDEPS_BIN="${WRAPPER_BIN:-${SD}}" "$1" > /dev/null 2> "${d}/wrapper.err") || rc=$?
+}
+last_alert() { tail -n 1 "${home}/recheck-alerts.jsonl" 2>/dev/null; }
+
+row_walk_incomplete() {
+  new_world; register whole part
+  npm_lock "${d}/p/whole" right@2.0.0
+  npm_lock "${d}/p/part" right@2.0.0
+  mkdir -p "${d}/p/part/locked"
+  npm_lock "${d}/p/part/locked" left@1.0.0
+  chmod 000 "${d}/p/part/locked"
+  if ls "${d}/p/part/locked" > /dev/null 2>&1; then
+    chmod 755 "${d}/p/part/locked"
+    no "chmod 000 did not stop a read of the locked directory (is the battery running as root?)"
+  fi
+  run_wrapper_of "${ROOT_DIR}/scripts/safedeps-recheck-alert.sh"
+  chmod 755 "${d}/p/part/locked"
+  [[ "${rc}" == 1 ]] || no "the wrapper exited ${rc}, not 1 (published with errors): $(cat "${d}/wrapper.err")"
+  # One error row, for the root the walk did not finish, with find's exit and words.
+  st --arg r "${d}/p/part" '[.errors[] | select(.kind == "root_walk_incomplete")]
+      | length == 1 and .[0].root == $r and .[0].exit == 1 and .[0].lines == 1 and (.[0].said | length) == 1
+        and (.[0].said[0] | contains("./locked") and contains("Permission denied"))' "the walk's error row" '.errors'
+  st --arg d "${d}" '[.errors[] | select(.kind == "root_walk_incomplete") | .said[] | select(contains($d))] | length == 0' "said names the root by its path" '.errors'
+  # The root lines carry the same three facts; the whole root's walk said nothing.
+  st --arg r "${d}/p/part" '.roots[$r] | .partial == true and .walk.exit == 1 and .walk.lines == 1 and (.walk.said | length) == 1' "the part root's line" '.roots'
+  st --arg r "${d}/p/whole" '.roots[$r] | .partial == false and .walk == {exit: 0, said: [], lines: 0}' "the whole root's line" '.roots'
+  st --arg p "${d}/p/part" '.roots[$p].walk.said == ([.errors[] | select(.kind == "root_walk_incomplete")][0].said)' "the root line and the error row" '.roots'
+  # What the walk could list was measured: both top-level lockfiles. The line says the walk first.
+  st '.summary.roots_walked == 1 and .summary.roots_walk_incomplete == 1 and .summary.osv_measured == 2'
+  st '.summary.line | startswith("population fresh 2; roots walked 1/2 (1 incomplete); osv measured 2;")'
+  st '[.findings[] | select(.package == "left")] | length == 0' "a lockfile in the locked directory was read" '.findings'
+  # The alert says how many of how many, find's first line, and what went unchecked.
+  local said
+  said=$(jq -r '[.errors[] | select(.kind == "root_walk_incomplete")][0].said[0]' "${home}/watch/state.json")
+  last_alert | jq -e --arg r "${d}/p/part" --arg said "${said}" '
+      .kind == "watch_attention" and .walk_incomplete == 1 and .roots == 2
+      and .first_walk_incomplete.root == $r and .first_walk_incomplete.said == [$said]
+      and .message == ("1 of 2 roots not read in full (" + $said + "); what find could not read in them was not checked. 0 new, population fresh, 1 errors")' > /dev/null \
+    || no "the alert: $(last_alert)"
+}
+row "a root with a directory the walk cannot read: one root_walk_incomplete row with find's exit, first lines (the root as \".\") and line count, the same on the root's line, none for the root walked whole; the summary line counts the roots walked before osv measured, and the alert says how many of how many and what find said" row_walk_incomplete
+
+# What find said, as find said it, through a find that stands in for the OS:
+# words that name the root by its absolute path (spaces and a quote in it),
+# more than three lines, and a find that exits 0 and still says something.
+row_walk_said() {
+  new_world
+  local real_find
+  real_find=$(PATH=/usr/bin:/bin command -v find)
+  mkdir -p "${d}/p/it's a root" "${d}/p/quiet"
+  npm_lock "${d}/p/it's a root" right@2.0.0
+  npm_lock "${d}/p/quiet" right@2.0.0
+  printf "it's a root\t%s\nquiet\t%s\n" "${d}/p/it's a root" "${d}/p/quiet" > "${d}/pop.tsv"
+  cat > "${d}/fakebin/find" <<FIND
+#!/bin/sh
+case "\$PWD" in
+  */"it's a root")
+    "${real_find}" "\$@"
+    printf 'find: %s: Operation not permitted\n' "\$PWD" >&2
+    printf 'find: %s/deep dir: Operation not permitted\n' "\$PWD" >&2
+    printf 'find: %s/a: Operation not permitted\n' "\$PWD" >&2
+    printf 'find: %s/b: Operation not permitted\n' "\$PWD" >&2
+    exit 1 ;;
+  */quiet)
+    "${real_find}" "\$@" || exit \$?
+    printf 'find: a word on the side\n' >&2
+    exit 0 ;;
+  *) exec "${real_find}" "\$@" ;;
+esac
+FIND
+  chmod +x "${d}/fakebin/find"
+  run_wrapper_of "${ROOT_DIR}/scripts/safedeps-recheck-alert.sh"
+  [[ "${rc}" == 1 ]] || no "the wrapper exited ${rc}, not 1: $(cat "${d}/wrapper.err")"
+  st --arg r "${d}/p/it's a root" '[.errors[] | select(.kind == "root_walk_incomplete")]
+      == [{kind: "root_walk_incomplete", root: $r, exit: 1, lines: 4,
+           said: ["find: .: Operation not permitted", "find: ./deep dir: Operation not permitted", "find: ./a: Operation not permitted"]}]' \
+    "the first three lines, the root as \".\", and the count of all four" '.errors'
+  # Exit 0 is a whole walk, whatever find said; what it said is still on the root's line.
+  st --arg r "${d}/p/quiet" '.roots[$r] | .partial == false and .walk == {exit: 0, said: ["find: a word on the side"], lines: 1}' "a find that exited 0 and spoke" '.roots'
+  st '.summary.roots_walked == 1 and .summary.roots_walk_incomplete == 1 and .summary.osv_measured == 2'
+  last_alert | jq -e '.message == "1 of 2 roots not read in full (find: .: Operation not permitted); what find could not read in them was not checked. 0 new, population fresh, 1 errors"' > /dev/null \
+    || no "the alert: $(last_alert)"
+}
+row "find's words as it said them: a root path with spaces and a quote written as \".\", the first three of four lines with the count, and a find that exits 0 with words is a whole walk whose words stay on the root's line" row_walk_said
+
+# The runtime digest reads the checkout the runtime was built from. When that
+# checkout cannot be read, the digest is not made from what could be read: the
+# runtime says it cannot tell (stale null) with the read's words, and the alert
+# does not say stale. A walk that does not finish beside it keeps its own words.
+row_runtime_source_unreadable() {
+  new_world; register whole part
+  npm_lock "${d}/p/whole" right@2.0.0
+  mkdir -p "${d}/p/part/locked"
+  local co="${d}/co" rt="${d}/rt" t digest
+  for t in "${co}" "${rt}"; do
+    mkdir -p "${t}/bin" "${t}/scripts"
+    cp bin/safedeps "${t}/bin/safedeps"
+    cp -R lib "${t}/lib"
+    cp scripts/safedeps-recheck-alert.sh "${t}/scripts/safedeps-recheck-alert.sh"
+  done
+  digest=$( (source lib/watch/scan.sh; safedeps_watch_tree_digest "${co}") )
+  [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || no "the checkout's digest: ${digest}"
+  jq -n --arg digest "${digest}" --arg co "${co}" '{version: "fixture", digest: $digest, source_repo: $co, built_at: "2026-11-20T00:00:00Z"}' \
+    > "${rt}/.safedeps-runtime.json"
+  chmod 000 "${co}/lib/watch/lock.sh" "${d}/p/part/locked"
+  WRAPPER_BIN="${rt}/bin/safedeps" run_wrapper_of "${rt}/scripts/safedeps-recheck-alert.sh"
+  chmod 644 "${co}/lib/watch/lock.sh"
+  chmod 755 "${d}/p/part/locked"
+  [[ "${rc}" == 1 ]] || no "the wrapper exited ${rc}, not 1: $(cat "${d}/wrapper.err")"
+  st '.last_scan.runtime | .built == true and .stale == null and .source_digest_now == null
+      and (.error | startswith("source checkout unreadable: ") and contains("lib/watch/lock.sh") and (contains("locked") | not))' \
+    "the runtime that could not read its checkout" '.last_scan.runtime'
+  st --arg r "${d}/p/part" '[.errors[] | select(.kind == "root_walk_incomplete")] | length == 1 and .[0].root == $r
+      and all(.[0].said[]; contains("lock.sh") | not)' "the walk's row beside it" '.errors'
+  last_alert | jq -e '.agent_runtime_stale == false and (.message | contains("stale") | not)
+      and (.message | startswith("1 of 2 roots not read in full (") and contains("locked"))' > /dev/null \
+    || no "the alert: $(last_alert)"
+}
+row "a runtime whose source checkout cannot be read says stale null with the read's words, not a digest of what it could read; the alert does not say stale, and the walk that did not finish beside it keeps its own words" row_runtime_source_unreadable
+
 # ---- Java ------------------------------------------------------------------------------
 row_jdk() {
   new_world; register older same pre down

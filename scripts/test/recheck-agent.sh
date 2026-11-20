@@ -285,7 +285,7 @@ runtime_info() { # RUNTIME
   ( SAFEDEPS_REPO_DIR="$1" SAFEDEPS_VERSION=unused HOME="${home}"
     # shellcheck source=../../lib/watch/scan.sh
     source "$1/lib/watch/scan.sh"
-    safedeps_watch_runtime_info )
+    safedeps_watch_runtime_info "$(mktemp "${tmp_root}/said.XXXXXX")" )
 }
 row_runtime_meta() {
   local d co root meta info
@@ -305,6 +305,34 @@ row_runtime_meta() {
   jq -e '.stale == true' <<< "${info}" > /dev/null || no "a runtime whose checkout moved on: ${info}"
 }
 row "the runtime records its version and the digest of its checkout, and reads stale once the checkout moves on" row_runtime_meta
+
+# A checkout the digest cannot read has no digest: a file shasum cannot read
+# and a directory find cannot read each leave stale null, with the first line
+# that read said. A hash of what could be read would differ from the record
+# and read as stale for a checkout that did not move.
+row_runtime_unreadable() {
+  local d co root info rc
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  root="${d}/out/agent"
+  stage_ok "${co}" "${root}" || return 1
+  chmod 000 "${co}/lib/watch/lock.sh"
+  rc=0; info=$(runtime_info "${root}") || rc=$?
+  chmod 644 "${co}/lib/watch/lock.sh"
+  [[ "${rc}" == 0 ]] || no "runtime_info exited ${rc}"
+  jq -e '.built == true and .stale == null and .source_digest_now == null
+      and (.error | startswith("source checkout unreadable: ") and contains("shasum") and contains("lib/watch/lock.sh"))' <<< "${info}" > /dev/null \
+    || no "a checkout file shasum cannot read: ${info}"
+  chmod 000 "${co}/lib/npm"
+  rc=0; info=$(runtime_info "${root}") || rc=$?
+  chmod 755 "${co}/lib/npm"
+  [[ "${rc}" == 0 ]] || no "runtime_info exited ${rc}"
+  jq -e '.stale == null and .source_digest_now == null
+      and (.error | startswith("source checkout unreadable: ") and contains("find") and contains("lib/npm"))' <<< "${info}" > /dev/null \
+    || no "a checkout directory find cannot read: ${info}"
+  info=$(runtime_info "${root}")
+  jq -e '.stale == false and (has("error") | not)' <<< "${info}" > /dev/null || no "the same checkout read again: ${info}"
+}
+row "a source checkout the digest cannot read (a file shasum cannot read, a directory find cannot read) is stale null with what that read said, not a digest of what it could read" row_runtime_unreadable
 
 row_configure() {
   local d co h cfg

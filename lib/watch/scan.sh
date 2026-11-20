@@ -95,32 +95,52 @@ safedeps_watch_new_run_id() {
 # The files a runtime is built from, hashed the way the installer hashes them
 # (scripts/install/install-safedeps-recheck-agent.mjs runtimeDigest): one
 # "<sha256>  <path>" line per file, paths in byte order, and the hash of that.
+# A read that fails ends it with no digest: it returns non-zero and what the
+# read said is on stderr. A hash of what could be read is not the tree's, and
+# the installer has none for such a tree either.
 safedeps_watch_tree_digest() {
-  local root="$1"
-  ( cd "${root}" 2>/dev/null \
-      && find bin/safedeps lib scripts/safedeps-recheck-alert.sh -type f 2>/dev/null | LC_ALL=C sort \
-      | while IFS= read -r p; do printf '%s  %s\n' "$(shasum -a 256 "${p}" | cut -d' ' -f1)" "${p}"; done \
-      | shasum -a 256 | cut -d' ' -f1 )
+  local root="$1" list sorted p sums="" digest
+  local -a files=()
+  list=$(cd "${root}" && find bin/safedeps lib scripts/safedeps-recheck-alert.sh -type f) || return 1
+  sorted=$(LC_ALL=C sort <<< "${list}") || return 1
+  while IFS= read -r p; do
+    if [[ -n "${p}" ]]; then files+=("${p}"); fi
+  done <<< "${sorted}"
+  if [[ "${#files[@]}" -gt 0 ]]; then
+    sums=$(cd "${root}" && shasum -a 256 "${files[@]}") || return 1
+    sums+=$'\n'
+  fi
+  digest=$(printf '%s' "${sums}" | shasum -a 256) || return 1
+  printf '%s\n' "${digest%% *}"
 }
 
 # What this run is: {version, digest, source_repo, built_at, stale}. A runtime
 # the installer built carries .safedeps-runtime.json; a checkout carries none
 # and answers with its own version and digest. stale is true when the checkout
-# the runtime was built from has moved on, null when that cannot be told.
+# the runtime was built from has moved on, null when that cannot be told. A
+# checkout that could not be read is one that cannot be told: stale is null
+# and error carries the first line the failed read said. SAID is a file for
+# those words.
 safedeps_watch_runtime_info() {
-  local meta="${SAFEDEPS_REPO_DIR}/.safedeps-runtime.json" digest_now="" repo
+  local said="$1" meta="${SAFEDEPS_REPO_DIR}/.safedeps-runtime.json" digest_now="" repo digest_rc=0 unreadable=""
   if [[ ! -f "${meta}" ]]; then
     jq -nc --arg version "${SAFEDEPS_VERSION}" '{version:$version, built:false, digest:null, source_repo:null, built_at:null, stale:null}'
     return 0
   fi
   repo=$(jq -r '.source_repo // ""' "${meta}" 2>/dev/null)
   if [[ -n "${repo}" && -f "${repo}/bin/safedeps" ]]; then
-    digest_now=$(safedeps_watch_tree_digest "${repo}")
+    digest_now=$(safedeps_watch_tree_digest "${repo}" 2> "${said}") || digest_rc=$?
+    if [[ "${digest_rc}" -ne 0 ]]; then
+      digest_now=""
+      unreadable=$(head -n 1 "${said}" 2>/dev/null) || unreadable=""
+      [[ -n "${unreadable}" ]] || unreadable="exit ${digest_rc}, nothing said"
+    fi
   fi
-  jq -c --arg now "${digest_now}" '
+  jq -c --arg now "${digest_now}" --arg unreadable "${unreadable}" '
     {version, built:true, digest, source_repo, built_at,
      source_digest_now: (if $now == "" then null else $now end),
-     stale: (if $now == "" then null else ($now != .digest) end)}' "${meta}" 2>/dev/null \
+     stale: (if $now == "" then null else ($now != .digest) end)}
+    + (if $unreadable == "" then {} else {error: ("source checkout unreadable: " + $unreadable)} end)' "${meta}" 2>/dev/null \
     || jq -nc --arg version "${SAFEDEPS_VERSION}" '{version:$version, built:true, digest:null, stale:null, error:"runtime metadata unreadable"}'
 }
 
@@ -162,7 +182,7 @@ safedeps_watch_scan() {
     return 3
   fi
   printf '%s\n' "${prior}" > "${tmp}/prior.json"
-  runtime_info=$(safedeps_watch_runtime_info)
+  runtime_info=$(safedeps_watch_runtime_info "${tmp}/digest.said")
 
   : > "${tmp}/roots.jsonl"
   : > "${tmp}/findings.jsonl"
@@ -218,7 +238,7 @@ safedeps_watch_scan() {
   [[ "${mounts_ok}" -eq 1 ]] || jq -nc '{kind:"mount_table_unreadable"}' >> "${tmp}/errors.jsonl"
 
   # ---- each root -----------------------------------------------------------------
-  local name path class_line class detail resolved list_rc rel base kc fkind fclass since
+  local name path class_line class detail resolved list_rc walk rel base kc fkind fclass since
   local skip_class skip_path skip_fs skip_rel
   while IFS= read -r -d '' name && IFS= read -r -d '' path; do
     if [[ "${mounts_ok}" -ne 1 ]]; then
@@ -232,10 +252,24 @@ safedeps_watch_scan() {
       ok)
         resolved="${detail}"
         list_rc=0
-        safedeps_watch_list_files "${resolved}" "${tmp}/files.bin" || list_rc=$?
+        # Emptied first, so a root never reads as what the last one said.
+        : > "${tmp}/walk.said"
+        safedeps_watch_list_files "${resolved}" "${tmp}/files.bin" "${tmp}/walk.said" || list_rc=$?
+        # What the walk returned and said: find's exit, its first three lines
+        # with the root written as ".", and how many lines it said. The exit
+        # alone decides whether the walk was whole; the words are recorded
+        # either way, and safedeps names no reason of its own. Words that
+        # cannot be read back are null, not none.
+        walk=$(jq -nc --argjson exit "${list_rc}" --arg root "${resolved}" --rawfile said "${tmp}/walk.said" '
+          ($said | split("\n") | if length > 0 and last == "" then .[:-1] else . end) as $lines
+          | {exit: $exit,
+             said: ($lines[:3] | map(split($root + "/") | join("./") | split($root + ":") | join(".:"))),
+             lines: ($lines | length)}') \
+          || walk="{\"exit\":${list_rc},\"said\":null,\"lines\":null}"
         jq -nc --arg name "${name}" --arg path "${path}" --arg resolved "${resolved}" --argjson partial "$([[ "${list_rc}" -eq 0 ]] && echo false || echo true)" \
-          '{name:$name, path:$path, resolved:$resolved, class:"ok", partial:$partial}' >> "${tmp}/roots.jsonl"
-        [[ "${list_rc}" -eq 0 ]] || jq -nc --arg root "${path}" '{kind:"root_walk_incomplete", root:$root}' >> "${tmp}/errors.jsonl"
+          --argjson walk "${walk}" \
+          '{name:$name, path:$path, resolved:$resolved, class:"ok", partial:$partial, walk:$walk}' >> "${tmp}/roots.jsonl"
+        [[ "${list_rc}" -eq 0 ]] || jq -nc --arg root "${path}" --argjson walk "${walk}" '{kind:"root_walk_incomplete", root:$root} + $walk' >> "${tmp}/errors.jsonl"
         # What the walk left out is said, not only skipped. A network mount
         # inside the root is unmeasured like a root that is one, with its
         # follow-up; an excluded prefix is named on the root. Either way a
