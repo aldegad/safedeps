@@ -1313,7 +1313,7 @@ core_below() {
 # staged file still there: it put no entry in place, and the core may have
 # written its store line, so it never says that nothing was written.
 staged_in_doubt() {
-  grep -qE '^safedeps: in-doubt: the commit of sha256:[0-9a-f]{64} ended with signal-9 before it answered\. Its staged entry is still there, so it put no entry in place\.' "$1/stderr" \
+  grep -qE '^safedeps: in-doubt: the commit of sha256:[0-9a-f]{64} ended before it answered\. Its staged entry is still there, so it put no entry in place\.' "$1/stderr" \
     || no "$(basename "$1")'s stderr: $(cat "$1/stderr")"
   ! grep -q 'nothing was written' "$1/stderr" || no "$(basename "$1")'s stderr says nothing was written: $(cat "$1/stderr")"
 }
@@ -1818,6 +1818,24 @@ TAIL
   stand_in_cli="${tree}/bin/safedeps"
 }
 
+commit_without_answer_has_no_inferred_exit_cause() {
+  local body said first=""
+  for body in 'kill -KILL $$' 'exit 137'; do
+    stand_in "${body}"
+    fresh_home
+    rc=0
+    json=$(env SAFEDEPS_HOME="${home}" "${stand_in_cli}" --json check pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+    [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+    jq -e '.error == "approvals_store_in_doubt"' <<< "${json}" >/dev/null || no "${json}"
+    said=$(grep '^safedeps: in-doubt: the commit of ' "${home}/stderr")
+    [[ "${said}" == *"ended before it answered. Its staged entry is still there"* ]] || no "${said}"
+    [[ "${said}" != *signal* && "${said}" != *exit* ]] || no "an unobserved cause: ${said}"
+    if [[ -n "${first}" ]]; then [[ "${said}" == "${first}" ]] || no "the two non-answers differ"; fi
+    first="${said}"
+  done
+}
+row "a killed commit and a commit exiting 137 give the same file observation without an inferred exit cause" commit_without_answer_has_no_inferred_exit_cause
+
 # A check whose core dies after its commit is done and before it answers: the
 # stand-in runs the real commit, then kills itself. The check's file is at the
 # entry's path, so the approval stands, and the check says so.
@@ -1833,7 +1851,7 @@ killed_after_commit() {
   one_check_line "${home}" clean "${hash}"
   [[ "$(entries "${home}")" == "${home}/approved-specs/${hash/:/-}.json" ]] || no "the ledger holds: $(entries "${home}")"
   [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${home}/approved-specs")"
-  grep -qxF "safedeps: the commit of ${hash} ended with signal-9 before it answered. Its entry is at the ledger entry's path, so the approval stands." "${home}/stderr" \
+  grep -qxF "safedeps: the commit of ${hash} ended before it answered. Its entry is at the ledger entry's path, so the approval stands." "${home}/stderr" \
     || no "stderr: $(cat "${home}/stderr")"
 }
 row "a check whose core dies after its rename and before it answers finds its own entry in place, and the approval stands" killed_after_commit
@@ -1851,7 +1869,7 @@ killed_after_commit_and_replaced() {
   [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json} $(cat "${home}/stderr")"
   jq -e '.approved == false and .error == "approvals_store_in_doubt" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' <<< "${json}" >/dev/null \
     || no "the report: ${json}"
-  grep -qE '^safedeps: in-doubt: the commit of sha256:[0-9a-f]{64} ended with signal-9 before it answered\. ' "${home}/stderr" \
+  grep -qE '^safedeps: in-doubt: the commit of sha256:[0-9a-f]{64} ended before it answered\. ' "${home}/stderr" \
     || no "stderr: $(cat "${home}/stderr")"
   grep -qF "This check's file is neither at the staged path nor at the entry's path." "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
   for said in "approval stands" "not approved" "nothing was written" "nothing is approved"; do
@@ -1884,8 +1902,8 @@ rename_fails_over_an_entry_no_check_approved() {
     || no "the report: ${json}"
   vouched "${home}" | grep -qxF "${hash}" || no "control: the store does not vouch for ${hash}, so the row shows nothing"
   [[ -z "$(entries "${home}")" ]] || no "an entry stands, and the store vouches for its hash: $(entries "${home}")"
-  removed_at=$(log_at "${home}" "check unvouched-entry-removal hash=${hash} entry=${entry} outcome=ok")
-  undone_at=$(log_at "${home}" "check approve-undone hash=${hash} outcome=os-error-2")
+  removed_at=$(log_at "${home}" "check unvouched-entry-removal hash=${hash} entry=${entry} outcome=removal returned without error")
+  undone_at=$(log_at "${home}" "check approve-undone hash=${hash} outcome=the rename to ${entry} returned OS error 2")
   [[ -n "${removed_at}" && -n "${undone_at}" && "${removed_at}" -lt "${undone_at}" ]] || no "advisory.log: $(cat "${home}/advisory.log")"
   [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${home}/approved-specs")"
 }

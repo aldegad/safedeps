@@ -99,7 +99,7 @@ KILL_TRIES = 3
 PARTWAY_ENTRIES = 5
 PARTWAY_LANDED = 2
 # What a write the file size limit stops answers, as the core reports it.
-EFBIG = "os-error-27"
+EFBIG = "returned OS error 27"
 # The counts every migration report gives: the approve lines, then the five
 # that add up to them.
 COUNTS = ("approve_lines", "inserted", "not_inserted", "duplicates", "unconfirmed", "taken_back")
@@ -550,9 +550,10 @@ def expect_write_failed(rc, report, err, approve, inserted, duplicates, when):
     outcome, its counts, the five after the approve lines adding up to them,
     and the stderr lines that say how many lines are in and out and that a
     run after it puts the rest in."""
+    expected = f"the write to {report.get('store')} {EFBIG}"
     error = (rc, report.get("error"), report.get("outcome"))
-    if error != (1, "approvals_store_write_failed", EFBIG):
-        raise Failed(f"{when}: exit, error and outcome {error!r}, want (1, 'approvals_store_write_failed', {EFBIG!r}): {err!r}")
+    if error != (1, "approvals_store_write_failed", expected):
+        raise Failed(f"{when}: exit, error and outcome {error!r}, want (1, 'approvals_store_write_failed', {expected!r}): {err!r}")
     lines = approve - duplicates
     got = [report.get(k) for k in COUNTS]
     want = [approve, inserted, lines - inserted, duplicates, 0, 0]

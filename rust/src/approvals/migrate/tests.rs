@@ -86,6 +86,20 @@ fn undone(s: i64, hash: &str) -> String {
     format!("[{}] check approve-undone hash={hash} outcome=os-error-28\n", at(s))
 }
 
+#[test]
+fn old_and_described_undone_outcomes_in_one_archive_both_take_back() {
+    let h = home();
+    let [a, b, c] = ["a", "b", "c"].map(|p| entry(&h, p, None));
+    live(&h, &[]);
+    let archive = archive(&h, "mixed.log", &[
+        approve(1, "clean", &a), approve(1, "clean", &b), approve(1, "clean", &c),
+        undone(2, &a),
+        format!("[{}] check approve-undone hash={b} outcome=the rename to /fixture/entry with spaces returned OS error 18\n", at(2)),
+    ]);
+    assert_eq!(totals(&run(&h, &[archive])), [3, 1, 0, 0, 2]);
+    assert_eq!(ix(&h).hashes, vec![c]);
+}
+
 fn in_doubt(s: i64, hash: &str) -> String {
     format!("[{}] check approve-in-doubt hash={hash}\n", at(s))
 }
@@ -498,7 +512,7 @@ fn a_store_read_that_fails_before_the_write_ends_the_run_and_nothing_is_written(
     }
     assert_eq!(store(&h), before);
     let (code, out, _) = said(&h, true, &result);
-    let want = format!(r#"{{"command":"approvals migrate","store":"{}","error":"approvals_store_failed","inserted":0,"outcome":"os-error-5"}}"#, path(&h.home).display()) + "\n";
+    let want = format!(r#"{{"command":"approvals migrate","store":"{}","error":"approvals_store_failed","inserted":0,"outcome":"the read of {0} returned OS error 5"}}"#, path(&h.home).display()) + "\n";
     assert_eq!((code, out), (1, want));
     let (_, _, err) = said(&h, false, &result);
     assert!(err.ends_with("), so nothing was written\n") && err.lines().count() == 1, "{err}");
@@ -570,12 +584,12 @@ fn a_write_that_fails_partway_counts_the_lines_of_the_run_the_store_holds() {
     let live_path = h.home.join(ADVISORY_LOG);
     let (code, out, err) = said(&h, true, &result);
     let want = format!(
-        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":6,"approve":6,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":6,"inserted":2,"not_inserted":2,"duplicates":2,"unconfirmed":0,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[],"error":"approvals_store_write_failed","outcome":"os-error-27"}}"#,
+        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":6,"approve":6,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":6,"inserted":2,"not_inserted":2,"duplicates":2,"unconfirmed":0,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[],"error":"approvals_store_write_failed","outcome":"the write to {0} returned OS error 27"}}"#,
         store_path.display(),
         live_path.display()
     ) + "\n";
     assert_eq!((code, out), (1, want));
-    let failed = format!("safedeps-core approvals: not migrated in full: the write to {} failed (os-error-27)\n", store_path.display());
+    let failed = format!("safedeps-core approvals: not migrated in full: the write to {} failed (the write to {0} returned OS error 27)\n", store_path.display());
     let counted = "safedeps-core approvals: 2 of the run's 4 store lines are in the store and 2 are not\n";
     assert_eq!(err, [failed.as_str(), counted, AGAIN].concat());
     let (code, out, err2) = said(&h, false, &result);
@@ -615,12 +629,12 @@ fn a_write_that_fails_and_a_read_after_it_that_fails_give_no_count() {
     let live_path = h.home.join(ADVISORY_LOG);
     let (code, out, err) = said(&h, true, &result);
     let want = format!(
-        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":3,"approve":3,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":3,"inserted":"unknown","not_inserted":"unknown","duplicates":0,"unconfirmed":0,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[],"error":"approvals_store_write_failed","outcome":"os-error-27","reread_outcome":"os-error-5"}}"#,
+        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":3,"approve":3,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":3,"inserted":"unknown","not_inserted":"unknown","duplicates":0,"unconfirmed":0,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[],"error":"approvals_store_write_failed","outcome":"the write to {0} returned OS error 27","reread_outcome":"the read of {0} returned OS error 5"}}"#,
         store_path.display(),
         live_path.display()
     ) + "\n";
     assert_eq!((code, out), (1, want));
-    let failed = format!("safedeps-core approvals: not migrated in full: the write to {} failed (os-error-27)\n", store_path.display());
+    let failed = format!("safedeps-core approvals: not migrated in full: the write to {} failed (the write to {0} returned OS error 27)\n", store_path.display());
     let unknown = format!(
         "safedeps-core approvals: how many of the run's 3 store lines are in the store is not known: the read of {} returned OS error 5\n",
         store_path.display()
@@ -658,13 +672,13 @@ fn a_sync_that_fails_says_every_line_of_the_run_is_in_the_store() {
     let live_path = h.home.join(ADVISORY_LOG);
     let (code, out, err) = said(&h, true, &result);
     let want = format!(
-        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":3,"approve":3,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":3,"inserted":2,"not_inserted":0,"duplicates":1,"unconfirmed":0,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[],"error":"approvals_store_unsynced","outcome":"os-error-5"}}"#,
+        r#"{{"command":"approvals migrate","store":"{}","inputs":[{{"path":"{}","lines":3,"approve":3,"cache":0,"undone":0,"in_doubt":0,"broken":0,"torn":0}}],"approve_lines":3,"inserted":2,"not_inserted":0,"duplicates":1,"unconfirmed":0,"taken_back":0,"cache":0,"broken":0,"torn":0,"unconfirmed_hashes":[],"error":"approvals_store_unsynced","outcome":"the sync of {0} returned OS error 5"}}"#,
         store_path.display(),
         live_path.display()
     ) + "\n";
     assert_eq!((code, out), (1, want));
     let unsynced = format!(
-        "safedeps: unsynced: all 2 store lines of the run are in {}, none is left out, and the sync failed (os-error-5). A reader sees them, and nothing says they are on the disk.\n",
+        "safedeps: unsynced: all 2 store lines of the run are in {}, none is left out, and the sync failed (the sync of {0} returned OS error 5). A reader sees them, and nothing says they are on the disk.\n",
         store_path.display()
     );
     assert_eq!(err, [unsynced.as_str(), AGAIN].concat());
@@ -740,7 +754,7 @@ fn the_command_reads_its_options_and_prints_its_report() {
     fs::create_dir(path(&f.home)).unwrap();
     let (code, out, err) = super::super::run(&f.home, &["migrate".to_string(), "--json".to_string()], b"");
     let want = format!(
-        r#"{{"command":"approvals migrate","store":"{}","error":"approvals_store_failed","inserted":0,"outcome":"os-error-21"}}"#,
+        r#"{{"command":"approvals migrate","store":"{}","error":"approvals_store_failed","inserted":0,"outcome":"the open of {0} returned OS error 21"}}"#,
         path(&f.home).display()
     ) + "\n";
     assert_eq!((code, String::from_utf8(out).unwrap()), (1, want));

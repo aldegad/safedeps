@@ -99,6 +99,27 @@ make_checkout() { # DIR
   chmod 755 "$1/${CORE}"
 }
 
+row_machine_core_process_results() {
+  local d co node_bin kind expected rc
+  node_bin=$(command -v node)
+  for kind in start signal exit; do
+    d=$(new_dir); co="${d}/checkout"
+    make_checkout "${co}"
+    mkdir "${d}/commands"
+    case "${kind}" in
+      start) printf '#!/bin/sh\nexit 0\n' > "${d}/commands/bash"; chmod 644 "${d}/commands/bash"; expected='could not start bash: OS error -13' ;;
+      signal) printf '#!/bin/sh\nkill -KILL $$\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='bash terminated by signal SIGKILL' ;;
+      exit) printf '#!/bin/sh\nexit 7\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='ran bash: exit 7' ;;
+    esac
+    rc=0
+    HOME="${d}/home" PATH="${d}/commands" "${node_bin}" "${co}/${INSTALLER}" stage --root "${d}/runtime" > "${d}/out" 2> "${d}/err" || rc=$?
+    [[ "${rc}" != 0 && ! -e "${d}/runtime" ]] || no "${kind}: the failed machine reading built a runtime"
+    grep -qF "(${expected})" "${d}/err" || no "${kind}: $(cat "${d}/err")"
+    ! grep -qE 'spawnSync|EACCES|exit null' "${d}/err" || no "${kind}: raw or collapsed process error"
+  done
+}
+row "the machine-core reading distinguishes a failed start, a signal and an exit" row_machine_core_process_results
+
 home="${tmp_root}/home"
 mkdir -p "${home}"
 LAST_RC=0

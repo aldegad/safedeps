@@ -1281,7 +1281,36 @@ mod tests {
     }
     /// The line step 0 writes when it removed the entry of 1 at `entry`.
     fn removal(entry: &Path) -> String {
-        format!("{} hash={} entry={} outcome=ok", REMOVAL, h(1), entry.display())
+        format!("{} hash={} entry={} outcome=removal returned without error", REMOVAL, h(1), entry.display())
+    }
+
+    #[test]
+    fn a_failed_commit_reports_the_observed_operation_and_its_path() {
+        for step in ["lstat", "read", "unlink", "removal-line", "sync-dir", "append", "unsynced", "approve-line", "rename"] {
+            let d = scratch();
+            let entry = stand(&d.0, 1, "unvouched");
+            let (staged, _) = stage(&d.0, 1, "new entry");
+            let (hash, record) = (h(1), rec(1));
+            let expected = match step {
+                "lstat" => format!("the read of {}", entry.display()),
+                "read" => format!("the read of {}", path(&d.0).display()),
+                "unlink" => "removal".to_string(),
+                "removal-line" | "approve-line" => format!("the write to {}", d.0.join(ADVISORY_LOG).display()),
+                "sync-dir" => format!("the sync of {}", dir_of(&entry).display()),
+                "append" => format!("the write to {}", path(&d.0).display()),
+                "unsynced" => format!("the sync of {}", path(&d.0).display()),
+                "rename" => format!("the rename to {}", entry.display()),
+                _ => unreachable!(),
+            } + " returned OS error 5";
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &record, &hash), LOCK_WAIT, &driven(step, 5), &mut err);
+            assert_ne!(answer, Answer::Approved, "{step}");
+            let err = String::from_utf8(err).unwrap();
+            assert!(err.contains(&expected), "{step}: expected {expected:?}, got {err:?}");
+            if matches!(step, "unsynced" | "rename") {
+                assert!(logged(&d.0).last().unwrap().ends_with(&format!(" outcome={expected}")));
+            }
+        }
     }
     /// The path of the entry of 1 in `home`; and where `stood`, the entry A
     /// approved standing there, a store line that vouches for it, and its
@@ -1377,7 +1406,7 @@ mod tests {
         // (the step that fails, its error, the failure, the store lines the
         // commit adds, advisory.log), each where nothing stood at the path and
         // where an entry the store vouches for stood there.
-        let undone = format!("check approve-undone hash={} outcome=os-error-18", h(1));
+        let undone = format!("check approve-undone hash={} outcome=the rename to {{entry}} returned OS error 18", h(1));
         let cases: [(&'static str, i32, Failure, usize, Vec<String>); 3] = [
             ("append", 27, Failure::Store, 0, Vec::new()),
             ("approve-line", 13, Failure::LedgerWrite, 1, Vec::new()),
@@ -1400,7 +1429,7 @@ mod tests {
                 assert!(as_it_was(&entry, was), "{step} stood={stood}: the path does not hold what it held");
                 assert!(staged.exists(), "{step} stood={stood}: the commit removed the staged entry");
                 assert_eq!(store_lines(&d.0), usize::from(stood) + lines, "{step} stood={stood}");
-                assert_eq!(logged(&d.0), log, "{step} stood={stood}");
+                assert_eq!(logged(&d.0), log.iter().map(|l| l.replace("{entry}", &entry.display().to_string())).collect::<Vec<_>>(), "{step} stood={stood}");
             }
         }
     }
@@ -1454,8 +1483,8 @@ mod tests {
             assert!(as_it_was(&entry, was), "stood={stood}: the path does not hold what it held");
             assert!(staged.exists(), "stood={stood}");
             let err = String::from_utf8(err).unwrap();
-            assert!(err.starts_with(&format!("safedeps: unsynced: the approvals store line of {} was written and not synced (os-error-5).", h(1))), "{err}");
-            assert_eq!(logged(&d.0), vec![format!("check approve-unsynced hash={} outcome=os-error-5", h(1))], "stood={stood}");
+            assert!(err.starts_with(&format!("safedeps: unsynced: the approvals store line of {} was written and not synced (the sync of {} returned OS error 5).", h(1), path(&d.0).display())), "{err}");
+            assert_eq!(logged(&d.0), vec![format!("check approve-unsynced hash={} outcome=the sync of {} returned OS error 5", h(1), path(&d.0).display())], "stood={stood}");
             assert_eq!(index(&d.0).unwrap().hashes, vec![h(1)]);
             assert_eq!(store_lines(&d.0), usize::from(stood) + 1, "stood={stood}");
         }
@@ -1646,7 +1675,7 @@ mod tests {
             let answer = commit(&d.0, &approval(1, &staged, &entry, &r, &hash), &mut err);
             assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched), "stood={stood}");
             assert!(as_it_was(&entry, was), "stood={stood}: the path does not hold what it held");
-            assert_eq!(logged(&d.0), vec![record(1), format!("check approve-undone hash={} outcome=os-error-2", h(1))], "stood={stood}");
+            assert_eq!(logged(&d.0), vec![record(1), format!("check approve-undone hash={} outcome=the rename to {} returned OS error 2", h(1), entry.display())], "stood={stood}");
             assert_eq!(store_lines(&d.0), usize::from(stood) + 1, "stood={stood}");
             assert!(String::from_utf8(err).unwrap().contains("could not be put in place"), "stood={stood}");
         }
