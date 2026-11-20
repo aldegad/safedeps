@@ -103,7 +103,7 @@ row_machine_core_process_results() {
   local d co node_bin kind expected rc
   kind="$1"
   node_bin=$(command -v node)
-    d=$(new_dir); co="${d}/checkout"
+    d=$(new_dir); d=$(cd "${d}" && pwd -P); co="${d}/checkout"
     make_checkout "${co}"
     mkdir "${d}/commands"
     case "${kind}" in
