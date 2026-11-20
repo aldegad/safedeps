@@ -112,6 +112,8 @@ def merge_scan($prior; $m):
   # anything.
   # A lockfile under a part of the root the walk left out (a network mount
   # inside it, an excluded prefix) was not looked for, so it is not missing.
+  # Nor is one under a root whose walk did not finish: scan.sh names that root's
+  # scope root|* with root_walk_incomplete.
   | def stale_reason:
       . as $f
       | ([($m.unmeasured_prefixes // [])[] | . as $p | select($p.root == $f.root and ($f.scope | startswith($p.prefix))) | $p.reason] | first) as $hidden
@@ -217,13 +219,23 @@ def merge_scan($prior; $m):
 # The one line every report and the routine print. A sentence that says every
 # project was measured is only true when population is fresh and nothing is
 # unmeasured or blocked; the line says the numbers, and the caller says the
-# sentence only then.
+# sentence only then. The roots a walk was made of come before what was
+# measured in them: a root walked partway is counted as incomplete, so a small
+# "osv measured" never stands alone for roots that were not read.
+# agent_runtime_stale is the runtime of the last scan: true or false for a
+# runtime the installer built, by the digest of its checkout; false for a
+# checkout, which runs its own files; null when a built runtime's checkout
+# could not be read, and then the line says unknown, with the read's words.
 def summary:
   ([.findings[] | select(is_closed | not)]) as $live
   | ([.roots[] | .lockfiles[]? ]) as $lf
+  | ([.roots[] | select(.class == "ok")]) as $walked
+  | (.last_scan.runtime // {}) as $rt
   | {population: (.population.state // "missing"),
      population_count: (.population.count // 0),
      excluded: (.population.excluded // 0),
+     roots_walked: ([$walked[] | select(.partial == false)] | length),
+     roots_walk_incomplete: ([$walked[] | select(.partial != false)] | length),
      osv_measured: ([$lf[] | select(.kind == "npm" and .status == "measured")] | length),
      native_audit: ([$lf[] | select(.kind == "native" and .status == "measured")] | length),
      unmeasured: (.unmeasured | length),
@@ -238,11 +250,15 @@ def summary:
      stale_findings: ([$live[] | select(.stale_measurement == true)] | length),
      pending_events: ([.events[] | select(.status == ev_pending)] | length),
      claimed_events: ([.events[] | select(.status == ev_claimed)] | length),
-     unknown_events: ([.events[] | select(.status == ev_unknown)] | length)}
+     unknown_events: ([.events[] | select(.status == ev_unknown)] | length),
+     agent_runtime_stale: (if $rt.built == true then $rt.stale else false end)}
   | . + {complete: (.population == "fresh" and .unmeasured == 0 and .blocked == 0),
-         line: ("population \(.population) \(.population_count); osv measured \(.osv_measured); native audit \(.native_audit); unmeasured \(.unmeasured)"
+         line: ("population \(.population) \(.population_count); roots walked \(.roots_walked)/\(.roots_walked + .roots_walk_incomplete) (\(.roots_walk_incomplete) incomplete); osv measured \(.osv_measured); native audit \(.native_audit); unmeasured \(.unmeasured)"
                 + (if .unmeasured > 0 then " (" + (.unmeasured_by_kind | to_entries | map("\(.key) \(.value)") | join(", ")) + ")" else "" end)
-                + "; blocked \(.blocked); open \(.open) (fixable \(.fixable), triage \(.triage), no fix \(.no_fix))")};
+                + "; blocked \(.blocked); open \(.open) (fixable \(.fixable), triage \(.triage), no fix \(.no_fix))"
+                + (if .agent_runtime_stale == null then
+                     "; agent runtime stale unknown" + (if ($rt.error // "") == "" then "" else " (\($rt.error))" end)
+                   else "" end))};
 
 # ---- delivery ----------------------------------------------------------------
 # Claims up to $limit pending events for $consumer. The caller holds the lock

@@ -92,35 +92,105 @@ safedeps_watch_new_run_id() {
   printf '%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$"
 }
 
+# What a command returned and said, as {exit, said, lines}: EXIT, the first
+# three lines of FILE (what it wrote to stderr) and how many lines that was.
+# With ROOT, the root's path in the words is written as "." (<root>/ as ./,
+# <root>: as .:). Words that cannot be read back are null, not none.
+safedeps_watch_said_json() {
+  local rc="$1" file="$2" root="${3:-}"
+  jq -nc --argjson exit "${rc}" --arg root "${root}" --rawfile said "${file}" '
+    ($said | split("\n") | if length > 0 and last == "" then .[:-1] else . end) as $lines
+    | {exit: $exit,
+       said: ($lines[:3] | if $root == "" then . else map(split($root + "/") | join("./") | split($root + ":") | join(".:")) end),
+       lines: ($lines | length)}' \
+    || printf '{"exit":%s,"said":null,"lines":null}\n' "${rc}"
+}
+
 # The files a runtime is built from, hashed the way the installer hashes them
 # (scripts/install/install-safedeps-recheck-agent.mjs runtimeDigest): one
 # "<sha256>  <path>" line per file, paths in byte order, and the hash of that.
+#
+# Each step keeps its own exit and its own words (RECORD.<step>), and the exit
+# alone says whether it failed: what a step that ended 0 wrote is no reason.
+# The first step that fails, in the order they run, ends the digest. It prints
+# no digest, returns 1 and writes RECORD as {step, exit, said, lines}, with the
+# words of that step alone. A hash of what could be read is not the tree's,
+# and the installer has none for such a tree either. RECORD is a file the
+# caller names; the words of each step are removed before it returns.
+#   find    cd to ROOT and list the files (cd's words when cd fails)
+#   sort    put the paths in byte order
+#   shasum  hash each file
+#   digest  hash the "<sha256>  <path>" lines
 safedeps_watch_tree_digest() {
-  local root="$1"
-  ( cd "${root}" 2>/dev/null \
-      && find bin/safedeps lib scripts/safedeps-recheck-alert.sh -type f 2>/dev/null | LC_ALL=C sort \
-      | while IFS= read -r p; do printf '%s  %s\n' "$(shasum -a 256 "${p}" | cut -d' ' -f1)" "${p}"; done \
-      | shasum -a 256 | cut -d' ' -f1 )
+  local root="$1" record="${2:-}" step="" rc=0 list="" sorted="" p sums="" digest=""
+  local -a files=()
+  [[ -n "${record}" ]] || { printf 'safedeps_watch_tree_digest: no RECORD file named\n' >&2; return 1; }
+  [[ "${record}" == /* ]] || record="${PWD}/${record}"
+  list=$( { cd "${root}" && find bin/safedeps lib scripts/safedeps-recheck-alert.sh -type f; } 2> "${record}.find" ) \
+    || { rc=$?; step=find; }
+  if [[ -z "${step}" ]]; then
+    sorted=$(LC_ALL=C sort 2> "${record}.sort" <<< "${list}") || { rc=$?; step=sort; }
+  fi
+  if [[ -z "${step}" ]]; then
+    while IFS= read -r p; do
+      if [[ -n "${p}" ]]; then files+=("${p}"); fi
+    done <<< "${sorted}"
+    if [[ "${#files[@]}" -gt 0 ]]; then
+      sums=$( { cd "${root}" && shasum -a 256 "${files[@]}"; } 2> "${record}.shasum" ) || { rc=$?; step=shasum; }
+    fi
+  fi
+  # The lines end with one newline each, as shasum wrote them; a here-string
+  # gives back the one the substitution took. No file, no line: empty input.
+  if [[ -z "${step}" ]]; then
+    if [[ "${#files[@]}" -gt 0 ]]; then
+      digest=$(shasum -a 256 2> "${record}.digest" <<< "${sums}") || { rc=$?; step=digest; }
+    else
+      digest=$(shasum -a 256 2> "${record}.digest" < /dev/null) || { rc=$?; step=digest; }
+    fi
+  fi
+  if [[ -n "${step}" ]]; then
+    jq -c --arg step "${step}" '{step: $step} + .' <<< "$(safedeps_watch_said_json "${rc}" "${record}.${step}")" > "${record}" \
+      || printf '{"step":"%s","exit":%s,"said":null,"lines":null}\n' "${step}" "${rc}" > "${record}"
+  fi
+  rm -f "${record}.find" "${record}.sort" "${record}.shasum" "${record}.digest"
+  [[ -z "${step}" ]] || return 1
+  printf '%s\n' "${digest%% *}"
 }
 
 # What this run is: {version, digest, source_repo, built_at, stale}. A runtime
 # the installer built carries .safedeps-runtime.json; a checkout carries none
 # and answers with its own version and digest. stale is true when the checkout
-# the runtime was built from has moved on, null when that cannot be told.
+# the runtime was built from has moved on, null when that cannot be told. A
+# checkout that could not be read is one that cannot be told: stale is null,
+# source_unreadable is the record of the step that failed ({step, exit, said,
+# lines}) and error carries the first line that step said. RECORD is a file
+# for that record.
 safedeps_watch_runtime_info() {
-  local meta="${SAFEDEPS_REPO_DIR}/.safedeps-runtime.json" digest_now="" repo
+  local record="$1" meta="${SAFEDEPS_REPO_DIR}/.safedeps-runtime.json" digest_now="" repo unreadable='null'
   if [[ ! -f "${meta}" ]]; then
     jq -nc --arg version "${SAFEDEPS_VERSION}" '{version:$version, built:false, digest:null, source_repo:null, built_at:null, stale:null}'
     return 0
   fi
   repo=$(jq -r '.source_repo // ""' "${meta}" 2>/dev/null)
   if [[ -n "${repo}" && -f "${repo}/bin/safedeps" ]]; then
-    digest_now=$(safedeps_watch_tree_digest "${repo}")
+    : > "${record}"
+    if ! digest_now=$(safedeps_watch_tree_digest "${repo}" "${record}"); then
+      digest_now=""
+      unreadable=$(jq -ce 'select(type == "object" and (.step | type) == "string")' "${record}" 2>/dev/null) \
+        || unreadable='{"step":null,"exit":null,"said":null,"lines":null}'
+    fi
   fi
-  jq -c --arg now "${digest_now}" '
+  jq -c --arg now "${digest_now}" --argjson unreadable "${unreadable}" '
     {version, built:true, digest, source_repo, built_at,
      source_digest_now: (if $now == "" then null else $now end),
-     stale: (if $now == "" then null else ($now != .digest) end)}' "${meta}" 2>/dev/null \
+     stale: (if $now == "" then null else ($now != .digest) end)}
+    + (if $unreadable == null then {} else
+        {source_unreadable: $unreadable,
+         error: ("source checkout unreadable: "
+                 + (if ($unreadable.said | type) == "array" and ($unreadable.said | length) > 0 then $unreadable.said[0]
+                    elif $unreadable.said == [] then "exit \($unreadable.exit), nothing said"
+                    elif $unreadable.step == null then "the read left no record"
+                    else "exit \($unreadable.exit), words not read" end))} end)' "${meta}" 2>/dev/null \
     || jq -nc --arg version "${SAFEDEPS_VERSION}" '{version:$version, built:true, digest:null, stale:null, error:"runtime metadata unreadable"}'
 }
 
@@ -162,7 +232,7 @@ safedeps_watch_scan() {
     return 3
   fi
   printf '%s\n' "${prior}" > "${tmp}/prior.json"
-  runtime_info=$(safedeps_watch_runtime_info)
+  runtime_info=$(safedeps_watch_runtime_info "${tmp}/digest-step.json")
 
   : > "${tmp}/roots.jsonl"
   : > "${tmp}/findings.jsonl"
@@ -218,7 +288,7 @@ safedeps_watch_scan() {
   [[ "${mounts_ok}" -eq 1 ]] || jq -nc '{kind:"mount_table_unreadable"}' >> "${tmp}/errors.jsonl"
 
   # ---- each root -----------------------------------------------------------------
-  local name path class_line class detail resolved list_rc rel base kc fkind fclass since
+  local name path class_line class detail resolved list_rc walk rel base kc fkind fclass since
   local skip_class skip_path skip_fs skip_rel
   while IFS= read -r -d '' name && IFS= read -r -d '' path; do
     if [[ "${mounts_ok}" -ne 1 ]]; then
@@ -232,10 +302,25 @@ safedeps_watch_scan() {
       ok)
         resolved="${detail}"
         list_rc=0
-        safedeps_watch_list_files "${resolved}" "${tmp}/files.bin" || list_rc=$?
+        # Emptied first, so a root never reads as what the last one said.
+        : > "${tmp}/walk.said"
+        safedeps_watch_list_files "${resolved}" "${tmp}/files.bin" "${tmp}/walk.said" || list_rc=$?
+        # What the walk returned and said: find's exit, its first three lines
+        # with the root written as ".", and how many lines it said. The exit
+        # alone decides whether the walk was whole; the words are recorded
+        # either way, and safedeps names no reason of its own. Words that
+        # cannot be read back are null, not none.
+        walk=$(safedeps_watch_said_json "${list_rc}" "${tmp}/walk.said" "${resolved}")
         jq -nc --arg name "${name}" --arg path "${path}" --arg resolved "${resolved}" --argjson partial "$([[ "${list_rc}" -eq 0 ]] && echo false || echo true)" \
-          '{name:$name, path:$path, resolved:$resolved, class:"ok", partial:$partial}' >> "${tmp}/roots.jsonl"
-        [[ "${list_rc}" -eq 0 ]] || jq -nc --arg root "${path}" '{kind:"root_walk_incomplete", root:$root}' >> "${tmp}/errors.jsonl"
+          --argjson walk "${walk}" \
+          '{name:$name, path:$path, resolved:$resolved, class:"ok", partial:$partial, walk:$walk}' >> "${tmp}/roots.jsonl"
+        # A walk that did not finish did not look everywhere, so a lockfile it
+        # did not list is not missing: a finding of this root that the run
+        # does not see again keeps root_walk_incomplete as its reason.
+        if [[ "${list_rc}" -ne 0 ]]; then
+          jq -nc --arg root "${path}" --argjson walk "${walk}" '{kind:"root_walk_incomplete", root:$root} + $walk' >> "${tmp}/errors.jsonl"
+          jq -nc --arg root "${path}" '{scope:($root + "|*"), reason:"root_walk_incomplete"}' >> "${tmp}/unmeasured-scopes.jsonl"
+        fi
         # What the walk left out is said, not only skipped. A network mount
         # inside the root is unmeasured like a root that is one, with its
         # follow-up; an excluded prefix is named on the root. Either way a
@@ -429,6 +514,8 @@ safedeps_watch_scan() {
     return 3
   fi
 
+  # agent_runtime_stale is the summary's (lib/watch/state.jq): true, false, or
+  # null when the runtime's checkout could not be read and nobody can tell.
   local error_count report
   error_count=$(jq '.errors | length' "${doc}")
   [[ "${error_count}" -eq 0 ]] || rc=1
@@ -438,7 +525,7 @@ safedeps_watch_scan() {
      population: (.population | if . == null then null else {state, count, excluded, generated_at, reason} end),
      summary, diff: {new: (.diff.new | length), closed: (.diff.closed | length), changed: (.diff.changed | length)},
      new_events: (.last_scan.started_at as $at | [.events[] | select(.created_at == $at)] | length),
-     runtime: .last_scan.runtime, agent_runtime_stale: (.last_scan.runtime.stale == true), errors, ledger}' "${doc}")
+     runtime: .last_scan.runtime, agent_runtime_stale: .summary.agent_runtime_stale, errors, ledger}' "${doc}")
   safedeps_watch_receipt "${run_id}" "$(jq -c --arg at "${started}" --arg fin "${finished}" \
     '{run_id, kind, started_at: $at, finished_at: $fin, exit, generation, published: true,
       summary: .summary.line, errors: (.errors | length), runtime}' <<< "${report}")" || true
