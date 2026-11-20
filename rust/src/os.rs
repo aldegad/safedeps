@@ -234,6 +234,7 @@ pub enum WallRole {
     PostTempName,
     BackstopTouch,
     BackstopFallback,
+    JudgmentMarkOpened,
 }
 
 /// One raw reading. Every accessor is pure; retaining this value retains the

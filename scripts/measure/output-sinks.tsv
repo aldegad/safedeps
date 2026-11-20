@@ -120,6 +120,7 @@ rust/src/post.rs	probe	data	raw-or-serialized	write_all	-	3
 rust/src/post.rs	probe	human	log-or-report	say	other	1
 rust/src/post/call.rs	<module>	boundary	import	std::fs	-	1
 rust/src/post/call.rs	backstop_trace	human	log-or-report	state::log_advisory	other	1
+rust/src/post/call.rs	take	boundary	capability	Mark::open	-	1
 rust/src/post/call.rs	take	human	log-or-report	state::log_advisory	data-field+fixed-literal+other	1
 rust/src/post/call.rs	take	human	log-or-report	state::log_advisory	fixed-literal+other	3
 rust/src/post/effect.rs	<module>	boundary	import	std::io::Write	-	1
@@ -146,6 +147,10 @@ rust/src/post/journal.rs	open	human	journal-or-reorg	state::write_state_file	oth
 rust/src/post/journal.rs	stage	human	journal-or-reorg	state::write_state_file	other	1
 rust/src/post/journal.rs	unfinished	data	copy-or-publish	fs::rename	-	1
 rust/src/post/journal.rs	unfinished	human	journal-or-reorg	sh::append	data-field+fixed-literal+other	1
+rust/src/post/mark.rs	close	human	log-or-report	state::log_advisory	data-field+fixed-literal+other+result-renderer	1
+rust/src/post/mark.rs	open	data	raw-or-serialized	state::write_state_file	-	1
+rust/src/post/mark.rs	open	human	log-or-report	state::log_advisory	data-field+fixed-literal+other	1
+rust/src/post/mark.rs	open	human	log-or-report	state::log_advisory	data-field+fixed-literal+result-renderer	1
 rust/src/post/npm.rs	<module>	boundary	import	std::fs	-	1
 rust/src/post/npm.rs	fresh_integrities	human	log-or-report	state::log_advisory	fixed-literal+other	1
 rust/src/post/npm.rs	observe	data	raw-or-serialized	state::write_state_file	-	1
@@ -169,9 +174,9 @@ rust/src/post/npm.rs	record_inner	human	log-or-report	say	fixed-literal+other	3
 rust/src/post/npm.rs	record_inner	human	log-or-report	state::log_advisory	fixed-literal+other	5
 rust/src/post/npm.rs	sources	human	log-or-report	state::log_advisory	fixed-literal+other	2
 rust/src/post/process.rs	<module>	boundary	foreign-function	kill	-	1
-rust/src/post/process.rs	info	boundary	foreign-call	proc_pidinfo	-	1
+rust/src/post/process.rs	bsd	boundary	foreign-call	proc_pidinfo	-	1
+rust/src/post/process.rs	bsd	boundary	foreign-function	proc_pidinfo	-	1
 rust/src/post/process.rs	info	boundary	foreign-call	sysconf	-	1
-rust/src/post/process.rs	info	boundary	foreign-function	proc_pidinfo	-	1
 rust/src/post/process.rs	info	boundary	foreign-function	sysconf	-	1
 rust/src/post/process.rs	owner	boundary	foreign-call	kill	-	1
 rust/src/post/providers.rs	<module>	boundary	import	std::fs	-	1

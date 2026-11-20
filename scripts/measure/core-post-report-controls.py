@@ -136,18 +136,21 @@ cases={
 }
 # Keep these whole branch replacements tied to the checked-in source. Each
 # anchor must select exactly one branch before any archive mutation is made.
+# Each mutant consumes the record and ends with nothing said. Inside the
+# pending branch the hook removes the record only after the call's judgment
+# mark is written, so that mutant removes it itself.
 call_source=(root/'rust/src/post/call.rs').read_text()
-for name,shape,start,end,diagnostic in [
+for name,shape,start,end,body,diagnostic in [
  ('Gone','pending-gone','        if record == Record::Install && !sh::is_file(&store.meta()) {',
-  '        if matches!(record, Record::Unread',
+  '        if matches!(record, Record::Unread',' return Ok(None); }\n',
   'a pending state whose snapshot has no meta file was consumed, and advisory.log names it 0 times, not once'),
  ('Empty','pending-empty','            if record == Record::Install && snapshot_id.is_empty() {',
-  '        } else if !found',
+  '        } else if !found',' sh::rm_f(p); return Ok(None); }\n',
   'a record that names no snapshot was consumed, and advisory.log names it 0 times, not once'),
 ]:
     if call_source.count(start)!=1 or call_source.count(end)!=1:raise SystemExit(name+': branch anchor is not unique')
     old=call_source[call_source.index(start):call_source.index(end)]
-    cases[name]=('fault',shape,'call.rs',old,start+' return Ok(None); }\n',diagnostic)
+    cases[name]=('fault',shape,'call.rs',old,start+body,diagnostic)
 not_object='''                record = Record::Unread;
                 state::log_advisory(home, &cat(&[b"post-verify: the pre-guard's record ", sh::bytes(p), b" is not one JSON object; this hook set the record aside"]));'''
 cases['NotObject']=('fault','pending-object','call.rs',not_object,

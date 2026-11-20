@@ -5,18 +5,26 @@ use crate::ledger;
 
 extern "C" {fn kill(pid:i32,signal:i32)->i32;}
 
+// proc_bsdinfo, Darwin SDK sys/proc_info.h; MAXCOMLEN is 16.
 #[cfg(target_os="macos")]
-fn info(pid:i32)->Option<(Vec<u8>,i64)>{
-    // proc_bsdinfo, Darwin SDK sys/proc_info.h; MAXCOMLEN is 16.
-    #[repr(C)]
-    struct Bsd {flags:u32,status:u32,xstatus:u32,pid:u32,ppid:u32,uid:u32,gid:u32,ruid:u32,rgid:u32,svuid:u32,svgid:u32,reserved:u32,
-        comm:[u8;16],name:[u8;32],nfiles:u32,pgid:u32,jobc:u32,tdev:u32,tpgid:u32,nice:i32,start_sec:u64,start_usec:u64}
+#[repr(C)]
+struct Bsd {flags:u32,status:u32,xstatus:u32,pid:u32,ppid:u32,uid:u32,gid:u32,ruid:u32,rgid:u32,svuid:u32,svgid:u32,reserved:u32,
+    comm:[u8;16],name:[u8;32],nfiles:u32,pgid:u32,jobc:u32,tdev:u32,tpgid:u32,nice:i32,start_sec:u64,start_usec:u64}
+/// The kernel's record of pid, None when it gave none or one for another pid.
+#[cfg(target_os="macos")]
+fn bsd(pid:i32)->Option<Bsd>{
     extern "C" {fn proc_pidinfo(pid:i32,flavor:i32,arg:u64,buffer:*mut std::ffi::c_void,size:i32)->i32;}
     let mut b: Bsd=unsafe{std::mem::zeroed()};let size=std::mem::size_of::<Bsd>() as i32;
     // PROC_PIDTBSDINFO needs nonzero arg to include zombies. xnu's
     // bsd/kern/proc_info.c sets findzomb only when this arg is nonzero.
     if unsafe{proc_pidinfo(pid,3,1,&mut b as *mut _ as *mut _,size)}!=size{return None}
-    if b.pid!=pid as u32 || b.start_usec>=1_000_000 || b.start_sec>i64::MAX as u64{return None}
+    if b.pid!=pid as u32{return None}
+    Some(b)
+}
+#[cfg(target_os="macos")]
+fn info(pid:i32)->Option<(Vec<u8>,i64)>{
+    let b=bsd(pid)?;
+    if b.start_usec>=1_000_000 || b.start_sec>i64::MAX as u64{return None}
     let mut status=vec![match b.status{4=>b'T',5=>b'Z',_=>b'R'}];
     // ps/print.c state(), with PROC_FLAG_* from sys/proc_info.h.
     // https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c
@@ -54,6 +62,30 @@ fn info(pid:i32)->Option<(Vec<u8>,i64)>{
 }
 #[cfg(not(any(target_os="macos",target_os="linux")))]
 fn info(_pid:i32)->Option<(Vec<u8>,i64)>{None}
+
+/// The start the kernel stored for pid, as the one number it keeps: on macOS
+/// p_starttime in microseconds since the epoch (the field sysctl
+/// KERN_PROC_PID also gives), on Linux and WSL1 field 22 of /proc/<pid>/stat,
+/// in clock ticks since boot. Exec, a time zone, a locale and PATH do not move
+/// it, and no wall clock is read to make it. None when the kernel gave no
+/// usable record, which is not known and never a start of 0.
+#[cfg(target_os="macos")]
+pub fn start(pid:u32)->Option<u64>{
+    let b=bsd(i32::try_from(pid).ok()?)?;
+    if b.start_sec==0 || b.start_usec>=1_000_000{return None}
+    b.start_sec.checked_mul(1_000_000)?.checked_add(b.start_usec)
+}
+#[cfg(target_os="linux")]
+pub fn start(pid:u32)->Option<u64>{
+    let stat=std::fs::read(format!("/proc/{}/stat",i32::try_from(pid).ok()?)).ok()?;
+    // comm can hold anything, so the fields follow its last ')'.
+    let close=stat.iter().rposition(|b|*b==b')')?;
+    let field=stat[close+1..].split(|b|b.is_ascii_whitespace()).filter(|f|!f.is_empty()).nth(19)?;
+    if !field.iter().all(u8::is_ascii_digit){return None}
+    std::str::from_utf8(field).ok()?.parse::<u64>().ok().filter(|n|*n>0)
+}
+#[cfg(not(any(target_os="macos",target_os="linux")))]
+pub fn start(_pid:u32)->Option<u64>{None}
 
 /// 0 running, 1 gone/unresolved, 2 stopped. Start-time comparison precedes
 /// the stopped answer so a reused stopped pid cannot own an older journal.

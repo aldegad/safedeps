@@ -1,6 +1,7 @@
 //! Consume only this call's trace entry or pending record, while state.lock
 //! is held. A trace entry owns the call even when its content is unreadable.
-use super::{jv, sh, report::cat, snapshot::{self, Store}, trace};
+//! A call taken is marked (`mark::Mark`) before its records are removed.
+use super::{jv, mark::Mark, sh, report::cat, snapshot::{self, Store}, trace};
 use crate::{callid, ere::Regex, grammar, json::Value, md5, os, state};
 use crate::jq::{capture_field as field, stream_has};
 use std::{fs, path::{Path, PathBuf}};
@@ -33,6 +34,8 @@ pub struct Call {
     /// one this hook is given (the command ran a `cd`). It is kept and read
     /// against its baseline time only (trace::backstop).
     pub moved: bool,
+    /// This run's judgment mark, removed once the judgment returns.
+    pub mark: Mark,
 }
 fn string(v: &Value, key: &str) -> W {
     jv::field(v, key).ok().and_then(jv::text).map(|s| jv::captured(&[s.to_vec()])).unwrap_or_default()
@@ -57,13 +60,16 @@ impl Call {
         let mut found = false;
         let mut trace_none = b"the pre-guard left no trace entry for this call".to_vec();
         let mut moved = false;
+        // The call's own records go only after its mark is written, so a kill
+        // at any point leaves at least one of the two on disk.
+        let mut consumed: Vec<PathBuf> = Vec::new();
         if let Some(id) = &id {
             let base = call_base(&home.join("pending/backstop"), id);
             let file = base.with_extension("json");
             if sh::is_file(&file) {
                 found = true;
                 entry = sh::cat_captured(&file).unwrap_or_default();
-                sh::rm_f(&file);
+                consumed.push(file);
                 if entry.is_empty() {
                     trace_none = b"the trace entry for this call could not be read".to_vec();
                     sh::rm_f(&base.with_extension("trace"));
@@ -115,7 +121,7 @@ impl Call {
                 record = Record::Unread;
                 state::log_advisory(home, &cat(&[b"post-verify: the pre-guard's record ", sh::bytes(p), b" is not one JSON object; this hook set the record aside"]));
             }
-            sh::rm_f(p);
+            consumed.push(p.clone());
             if record == Record::Install && snapshot_id.is_empty() {
                 state::log_advisory(home, &cat(&[b"post-verify: the pre-guard's record ", sh::bytes(p), b" names no snapshot; this hook set the record aside, and the command goes to the command-independent backstop"]));
                 record = Record::Empty;
@@ -123,6 +129,8 @@ impl Call {
         } else if !found && Regex::new(&grammar::patterns().backstop_re, true).map_err(|_| 1)?.grep_lines(&command).is_empty() {
             return Ok(None)
         }
+        let mark = Mark::open(home, &command, &project, id.as_deref());
+        for file in &consumed { sh::rm_f(file); }
         drop(lock);
         let mut store = Store::new(home.into(), project, snapshot_id);
         if record == Record::Install && !sh::is_file(&store.meta()) {
@@ -133,7 +141,7 @@ impl Call {
         if matches!(record, Record::Unread | Record::Empty | Record::Gone) {
             trace_none = cat(&[b"the command reached the backstop through a pre-guard record, and ", &trace_none]);
         }
-        Ok(Some(Self { store, current, command, codex, record, entry, trace_none, moved }))
+        Ok(Some(Self { store, current, command, codex, record, entry, trace_none, moved, mark }))
     }
     pub fn backstop_trace(&self) -> bool {
         let home = &self.store.home;

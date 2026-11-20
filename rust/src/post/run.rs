@@ -207,8 +207,16 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
     if state::ensure_dirs(&home).is_err() { return 1 }
     let journal = Journal::new(&home);
     let unfinished = journal.unfinished();
+    // Every way out of judge comes back here, so this is where the mark goes.
+    // A run that never comes back (the runtime's kill, a panic, which aborts)
+    // leaves it.
     let result = Call::take(&home, input).and_then(|call| match call {
-        Some(mut call) => judge(&mut call, &journal, input, post_started), None => Ok(None),
+        Some(mut call) => {
+            let judged = judge(&mut call, &journal, input, post_started);
+            call.mark.close(&home, &call.command);
+            judged
+        }
+        None => Ok(None),
     });
     let (rc, message) = match result { Ok(m) => (0,m), Err(rc) => (rc,None) };
     let message = match (unfinished.is_empty(), message) {

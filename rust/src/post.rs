@@ -19,6 +19,7 @@ mod snapshot;
 pub use snapshot::{LOCKS, MANIFESTS};
 mod process;
 mod journal;
+mod mark;
 mod rollback;
 mod npm;
 mod providers;
@@ -42,6 +43,7 @@ mod run;
 /// rebuild, which keep their own clocks. The 5 seconds after it, before the
 /// runtime's 30, are the room those take. No test shows that room is enough
 /// for every tree, and past the runtime's kill the install stands unjudged.
+/// What the killed run leaves is its judgment mark (`mark.rs`).
 pub(crate) const LIMIT: std::time::Duration = std::time::Duration::from_secs(25);
 /// A request with less than this left before `LIMIT` is not started: what it
 /// could do in the time left is not an answer to wait for.
