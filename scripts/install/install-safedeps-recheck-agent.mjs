@@ -270,8 +270,10 @@ function machineCore(root = repoRoot) {
   if (run.status === 3) {
     return { machine, core: null };
   }
-  const detail = [run.error ? run.error.message : '', run.stderr].map((x) => (x || '').trim()).filter(Boolean).join('\n');
-  throw new Error(`could not read which core this machine runs from ${scan} (${run.error ? 'bash did not start' : `exit ${run.status}`})${detail ? `: ${detail}` : ''}`);
+  const outcome = run.error
+    ? `could not start bash: ${Number.isInteger(run.error.errno) ? `OS error ${run.error.errno}` : 'error without an OS code'}`
+    : run.signal ? `bash terminated by signal ${run.signal}` : `ran bash: exit ${run.status}`;
+  throw new Error(`could not read which core this machine runs from ${scan} (${outcome})`);
 }
 
 // The core the runtime is built with: this machine's, from this checkout, as a
