@@ -235,7 +235,8 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{cat, jv, sh};
-    use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path, process::{Command, ExitStatus, Stdio}, time::Instant};
+    use std::{fs, io::Write, os::unix::{fs::{OpenOptionsExt, PermissionsExt}, process::ExitStatusExt}, path::Path,
+        process::{Child, Command, ExitStatus, Stdio}, time::{Duration, Instant}};
 
     /// Set in a child of this test binary, it names the directory the parent
     /// made, and the child is the post hook: it runs `main` on one call there
@@ -256,40 +257,23 @@ mod tests {
         std::process::exit(rc)
     }
 
-    /// What a post run left when its mark could not be written.
-    struct Run { status: ExitStatus, pid: u32, stdout: Vec<u8>, said: Vec<Vec<u8>>, log: Option<Vec<u8>>, marks: usize, judging: Vec<u8> }
-
-    /// Runs the post hook in a child of this test binary on `npm install
-    /// mark-fixture`, in a project with no record and no lockfile: the
-    /// command-independent backstop takes the call, opens its mark, and finds
-    /// nothing to judge. `judging/` is mode 0500, so the mark cannot be
-    /// written. With `log_takes_nothing`, advisory.log is a directory, so no
-    /// line can be appended to it either.
-    fn unwritable_mark(test: &str, log_takes_nothing: bool) -> Run {
-        let root = crate::os::scratch_dir("safedeps-mark-run").unwrap();
-        let home = root.join("home");
-        let judging = home.join("judging");
-        fs::create_dir_all(&judging).unwrap();
-        fs::create_dir(root.join("project")).unwrap();
-        if log_takes_nothing { fs::create_dir(home.join("advisory.log")).unwrap(); }
-        fs::set_permissions(&judging, fs::Permissions::from_mode(0o500)).unwrap();
-        let child = Command::new(std::env::current_exe().unwrap())
+    /// The post hook on `npm install mark-fixture`, in a child of this test
+    /// binary that runs `test`, with `home` as its SAFEDEPS_HOME. Its working
+    /// directory is the row's own scratch directory, outside the worktree.
+    fn spawn(test: &str, root: &Path, home: &Path) -> Child {
+        Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &format!("post::run::tests::{test}"), "--nocapture", "--test-threads=1"])
-            .env_clear().env("PATH", "/usr/bin:/bin").env("SAFEDEPS_HOME", &home).env(HOOK, &root)
-            .current_dir(&root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-        let pid = child.id();
-        let out = child.wait_with_output().unwrap();
-        let marks = fs::read_dir(&judging).unwrap().count();
-        let log = fs::read(home.join("advisory.log")).ok();
-        let judging_text = sh::bytes(&judging).to_vec();
-        fs::set_permissions(&judging, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::remove_dir_all(&root).unwrap();
-        // The hook's answer, among the test harness's own lines. Its key is
-        // spelled in jq.rs alone, so it is read off an empty answer.
+            .env_clear().env("PATH", "/usr/bin:/bin").env("SAFEDEPS_HOME", home).env(HOOK, root)
+            .current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
+    }
+
+    /// The hook's answers, among the test harness's own lines. Their key is
+    /// spelled in jq.rs alone, so it is read off an empty answer.
+    fn answers(stdout: &[u8]) -> Vec<Vec<u8>> {
         let empty = crate::jq::system_message(b"");
         let key = empty.strip_suffix("\"\"}").expect("an answer ends with its message").as_bytes();
-        let said = (0..out.stdout.len()).filter(|&i| out.stdout[i..].starts_with(key)).map(|i| {
-            let line = &out.stdout[i..];
+        (0..stdout.len()).filter(|&i| stdout[i..].starts_with(key)).map(|i| {
+            let line = &stdout[i..];
             let line = &line[..line.iter().position(|b| *b == b'\n').unwrap_or(line.len())];
             let read = jv::read(line);
             let [crate::json::Value::Obj(fields)] = read.values.as_slice() else { panic!("one object: {:?}", String::from_utf8_lossy(line)) };
@@ -297,8 +281,39 @@ mod tests {
             let message = jv::text(message).expect("a string").to_vec();
             assert_eq!(crate::jq::system_message(&message).as_bytes(), line, "the answer is one message object");
             message
-        }).collect();
-        Run { status: out.status, pid, stdout: out.stdout, said, log, marks, judging: judging_text }
+        }).collect()
+    }
+
+    /// `line` is `head`, one run of digits (a start the kernel stored), and
+    /// `tail`.
+    fn digits_between(line: &[u8], head: &[u8], tail: &[u8]) -> bool {
+        line.len() > head.len() + tail.len() && line.starts_with(head) && line.ends_with(tail)
+            && line[head.len()..line.len() - tail.len()].iter().all(u8::is_ascii_digit)
+    }
+
+    /// What a post run left when its mark could not be written.
+    struct Run { status: ExitStatus, pid: u32, stdout: Vec<u8>, said: Vec<Vec<u8>>, log: Option<Vec<u8>>, marks: usize, judging: Vec<u8> }
+
+    /// Runs the post hook in a child of this test binary, in a project with no
+    /// record and no lockfile: the command-independent backstop takes the
+    /// call, opens its mark, and finds nothing to judge. `judging/` is mode
+    /// 0500, so the mark cannot be written, and advisory.log takes the line.
+    fn unwritable_mark(test: &str) -> Run {
+        let root = crate::os::scratch_dir("safedeps-mark-run").unwrap();
+        let home = root.join("home");
+        let judging = home.join("judging");
+        fs::create_dir_all(&judging).unwrap();
+        fs::create_dir(root.join("project")).unwrap();
+        fs::set_permissions(&judging, fs::Permissions::from_mode(0o500)).unwrap();
+        let child = spawn(test, &root, &home);
+        let pid = child.id();
+        let out = child.wait_with_output().unwrap();
+        let marks = fs::read_dir(&judging).unwrap().count();
+        let log = fs::read(home.join("advisory.log")).ok();
+        let judging_text = sh::bytes(&judging).to_vec();
+        fs::set_permissions(&judging, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        Run { status: out.status, pid, said: answers(&out.stdout), stdout: out.stdout, log, marks, judging: judging_text }
     }
 
     /// The hook's answer is one message, and it is the line for a mark the
@@ -307,8 +322,7 @@ mod tests {
         let head = cat(&[b"safedeps: this run wrote no judgment mark: the write of ", &run.judging, b"/", run.pid.to_string().as_bytes(), b"-"]);
         let tail = b".json returned OS error 13. Without that mark, a judgment the runtime kills before it returns leaves no record.";
         let [said] = run.said.as_slice() else { return false };
-        said.len() > head.len() + tail.len() && said.starts_with(&head) && said.ends_with(tail)
-            && said[head.len()..said.len() - tail.len()].iter().all(u8::is_ascii_digit)
+        digits_between(said, &head, tail)
     }
 
     /// The control: advisory.log takes the line, and the hook's answer says it
@@ -316,7 +330,7 @@ mod tests {
     #[test]
     fn a_mark_that_cannot_be_written_is_said_in_the_log_and_in_the_hook_answer() {
         hook_child();
-        let run = unwritable_mark("a_mark_that_cannot_be_written_is_said_in_the_log_and_in_the_hook_answer", false);
+        let run = unwritable_mark("a_mark_that_cannot_be_written_is_said_in_the_log_and_in_the_hook_answer");
         assert!(run.status.success(), "{:?}", run.status);
         assert_eq!(run.marks, 0, "no mark and no temporary file");
         let log = run.log.as_deref().expect("advisory.log is a file");
@@ -325,15 +339,181 @@ mod tests {
         assert!(says_the_mark_was_not_written(&run), "the hook's answer says it too\n{:?}", String::from_utf8_lossy(&run.stdout));
     }
 
-    /// The counterexample: advisory.log takes no line, and the hook's answer
-    /// still says it.
+    #[cfg(target_os = "macos")]
+    const O_NONBLOCK: i32 = 0x0004;
+    #[cfg(not(target_os = "macos"))]
+    const O_NONBLOCK: i32 = 0o4000;
+    /// What an open of a FIFO for writing, without blocking, returns while no
+    /// process has it open for reading.
+    const ENXIO: i32 = 6;
+    /// How long a row waits for its run to open `confirmed`, or to end. A run
+    /// that answers at once ends in milliseconds; the bound only ends a row
+    /// whose run would wait on the FIFO for ever.
+    const BOUND: Duration = Duration::from_secs(20);
+
+    /// The writer of `fifo`, once a process has it open for reading.
+    fn reader_came(fifo: &Path) -> std::io::Result<Option<fs::File>> {
+        match fs::OpenOptions::new().write(true).custom_flags(O_NONBLOCK).open(fifo) {
+            Ok(writer) => Ok(Some(writer)),
+            Err(error) if error.raw_os_error() == Some(ENXIO) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The post run of a row, killed and reaped on every way out of the row,
+    /// a panic included.
+    struct Reaped(Option<Child>);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() { let _ = child.kill(); let _ = child.wait(); }
+        }
+    }
+    impl Reaped {
+        fn ended(&mut self) -> bool { self.0.as_mut().unwrap().try_wait().unwrap().is_some() }
+    }
+
+    /// What the row does once its run has opened `confirmed`.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Then {
+        /// SIGKILL, in the middle of the judgment.
+        Kill,
+        /// Close the writer: the record reads empty, and the judgment goes on.
+        LetGo,
+    }
+
+    /// A post run the backstop judges, and what the row saw while it ran.
+    struct Judged {
+        run: Run,
+        /// The run opened `confirmed` for reading.
+        reached: bool,
+        /// The names in `judging/`, and the kernel's start of the run, when
+        /// the run had `confirmed` open.
+        marks_then: Vec<String>,
+        start_then: Option<u64>,
+        home: Vec<u8>,
+        project: Vec<u8>,
+    }
+
+    /// Runs the post hook in a child of this test binary on `npm install
+    /// mark-fixture`, in a project whose package-lock.json cannot be read. The
+    /// command-independent backstop takes the call, opens its mark, finds the
+    /// closure unreadable, and next reads the confirmed record. That record,
+    /// `confirmed` in the home, is a FIFO, so the row sees whether the run
+    /// opens it, and the run waits there until the row does what `then` says.
+    /// Without `mark`, `judging/` is mode 0500. With `log_takes_nothing`,
+    /// advisory.log is a directory.
+    fn judged(test: &str, mark: bool, log_takes_nothing: bool, then: Then) -> Judged {
+        let root = crate::os::scratch_dir("safedeps-mark-run").unwrap();
+        let (home, project) = (root.join("home"), root.join("project"));
+        let judging = home.join("judging");
+        fs::create_dir_all(&judging).unwrap();
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("package-lock.json"), b"{broken").unwrap();
+        let fifo = home.join("confirmed");
+        assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        if log_takes_nothing { fs::create_dir(home.join("advisory.log")).unwrap(); }
+        if !mark { fs::set_permissions(&judging, fs::Permissions::from_mode(0o500)).unwrap(); }
+        let mut child = Reaped(Some(spawn(test, &root, &home)));
+        let pid = child.0.as_ref().unwrap().id();
+        let until = Instant::now() + BOUND;
+        let mut writer = None;
+        let mut failed = None;
+        while !child.ended() && Instant::now() < until {
+            match reader_came(&fifo) {
+                Ok(Some(opened)) => { writer = Some(opened); break }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(error) => { failed = Some(error); break }
+            }
+        }
+        let reached = writer.is_some();
+        let (marks_then, start_then) = if reached {
+            let mut names: Vec<String> = fs::read_dir(&judging).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            (names, crate::post::process::start(pid))
+        } else { (Vec::new(), None) };
+        if reached && then == Then::LetGo {
+            drop(writer.take());
+            let until = Instant::now() + BOUND;
+            while !child.ended() && Instant::now() < until { std::thread::sleep(Duration::from_millis(20)); }
+        }
+        let mut process = child.0.take().unwrap();
+        if process.try_wait().unwrap().is_none() { process.kill().unwrap(); }
+        let out = process.wait_with_output().unwrap();
+        drop(writer);
+        let marks = fs::read_dir(&judging).unwrap().count();
+        let log = fs::read(home.join("advisory.log")).ok();
+        let run = Run { status: out.status, pid, said: answers(&out.stdout), stdout: out.stdout, log, marks, judging: sh::bytes(&judging).to_vec() };
+        let (home_text, project_text) = (sh::bytes(&home).to_vec(), crate::os::realpath(sh::bytes(&project)));
+        fs::set_permissions(&judging, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        if let Some(error) = failed { panic!("{}: {error}", fifo.display()) }
+        Judged { run, reached, marks_then, start_then, home: home_text, project: project_text }
+    }
+
+    /// The hook's answer is one message: the report that this install was not
+    /// judged, with what each of the two writes returned, the command and the
+    /// project.
+    fn says_not_judged(judged: &Judged) -> bool {
+        let run = &judged.run;
+        let head = cat(&[b"safedeps: this install was not judged.\n\nThis run wrote no judgment mark: the write of ", &run.judging, b"/",
+            run.pid.to_string().as_bytes(), b"-"]);
+        let tail = cat(&[b".json returned OS error 13.\nIt wrote no line to advisory.log either: the write of ", &judged.home,
+            b"/advisory.log returned OS error 21.\nWith neither, a judgment the runtime killed would leave no record, so this run did not start one.\n",
+            b"No closure check ran, and nothing was rolled back.\nCommand: npm install mark-fixture\nProject: ", &judged.project]);
+        let [said] = run.said.as_slice() else { return false };
+        digits_between(said, &head, &tail)
+    }
+
+    /// Decision 6: a run that wrote neither its mark nor the advisory.log line
+    /// for it starts no judgment. It answers at once that this install was not
+    /// judged, and it never opens the confirmed record, which no writer here
+    /// would ever fill.
     #[test]
-    fn a_mark_that_cannot_be_written_is_said_when_the_log_takes_no_line() {
+    fn a_run_that_can_leave_no_record_answers_before_it_judges() {
         hook_child();
-        let run = unwritable_mark("a_mark_that_cannot_be_written_is_said_when_the_log_takes_no_line", true);
-        assert!(run.status.success(), "{:?}", run.status);
-        assert_eq!(run.marks, 0, "no mark and no temporary file");
-        assert!(run.log.is_none(), "advisory.log is a directory");
-        assert!(says_the_mark_was_not_written(&run), "the hook's answer says it\n{:?}", String::from_utf8_lossy(&run.stdout));
+        let judged = judged("a_run_that_can_leave_no_record_answers_before_it_judges", false, true, Then::Kill);
+        assert!(!judged.reached, "the run opened the confirmed record\n{:?}", String::from_utf8_lossy(&judged.run.stdout));
+        assert!(judged.run.status.success(), "the run ended by itself within {BOUND:?}: {:?}", judged.run.status);
+        assert_eq!(judged.run.marks, 0, "no mark and no temporary file");
+        assert!(judged.run.log.is_none(), "advisory.log is a directory");
+        assert!(says_not_judged(&judged), "the hook's answer is the report that this install was not judged\n{:?}", String::from_utf8_lossy(&judged.run.stdout));
+    }
+
+    /// A run that wrote no mark but wrote the advisory.log line judges as
+    /// before, and a kill in the middle of its judgment leaves that line.
+    #[test]
+    fn a_run_whose_log_took_the_line_judges_and_a_kill_leaves_the_line() {
+        hook_child();
+        let judged = judged("a_run_whose_log_took_the_line_judges_and_a_kill_leaves_the_line", false, false, Then::Kill);
+        assert!(judged.reached, "the run judged as far as the confirmed record\n{:?}", String::from_utf8_lossy(&judged.run.stdout));
+        assert_eq!(judged.run.status.signal(), Some(9), "the row killed the run: {:?}", judged.run.status);
+        assert_eq!(judged.run.marks, 0, "no mark and no temporary file");
+        assert!(judged.run.said.is_empty(), "a killed run gives no answer");
+        let log = judged.run.log.as_deref().expect("advisory.log is a file");
+        let head = cat(&[b"post-verify: this run wrote no judgment mark: the write of ", &judged.run.judging, b"/", judged.run.pid.to_string().as_bytes(), b"-"]);
+        let said = log.split(|b| *b == b'\n').filter_map(|line| line.iter().position(|b| *b == b'\t').map(|tab| &line[tab + 1..]))
+            .filter(|text| text.starts_with(&head)).collect::<Vec<_>>();
+        let [line] = said.as_slice() else { panic!("one line outlived the kill\n{}", String::from_utf8_lossy(log)) };
+        assert!(digits_between(line, &head, b".json returned OS error 13. Command: npm install mark-fixture"), "{}", String::from_utf8_lossy(line));
+    }
+
+    /// A run that wrote its mark judges as before: the mark is on disk while
+    /// the judgment reads the confirmed record, the judgment returns its own
+    /// message, and the mark goes.
+    #[test]
+    fn a_run_that_wrote_its_mark_judges_as_before() {
+        hook_child();
+        let judged = judged("a_run_that_wrote_its_mark_judges_as_before", true, false, Then::LetGo);
+        assert!(judged.reached, "the run judged as far as the confirmed record\n{:?}", String::from_utf8_lossy(&judged.run.stdout));
+        let start = judged.start_then.expect("the kernel's start of the run");
+        assert_eq!(judged.marks_then, vec![format!("{}-{}.json", judged.run.pid, start)], "the run's own mark, while it judged");
+        assert!(judged.run.status.success(), "the run ended by itself: {:?}", judged.run.status);
+        assert_eq!(judged.run.marks, 0, "the mark went when the judgment returned");
+        let log = judged.run.log.as_deref().expect("advisory.log is a file");
+        assert!(!log.windows(b"judgment mark".len()).any(|w| w == b"judgment mark"), "{}", String::from_utf8_lossy(log));
+        let [said] = judged.run.said.as_slice() else { panic!("one answer\n{:?}", String::from_utf8_lossy(&judged.run.stdout)) };
+        let head = b"safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.\n\nDetected problems:\n";
+        let tail = cat(&[b"\n\nno confirmed snapshot is recorded for ", &judged.project]);
+        assert!(said.starts_with(head) && said.ends_with(&tail), "the backstop's own message, and nothing after it\n{}", String::from_utf8_lossy(said));
     }
 }
