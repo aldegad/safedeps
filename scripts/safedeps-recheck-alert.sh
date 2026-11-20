@@ -107,6 +107,56 @@ if [[ "${status}" -ne 0 ]]; then
   exit "${status}"
 fi
 
+# The watch's own news: new findings or transitions, a population that is not
+# fresh, errors the scan published with, a runtime that no longer matches its
+# checkout. A runtime whose checkout could not be read is neither stale nor
+# fresh: the report says null, the record keeps null and the sentence says
+# unknown. Each says itself once; the consumer delivers the events. Roots the
+# walk did not finish come first, with what find said about the first of
+# them: a run that read none of them otherwise reads as one that found
+# nothing. The record keeps the sentence the notification showed.
+say_watch_news() {
+  local watch_alert
+  [[ -z "${SAFEDEPS_RECHECK_FIXTURE_JSON:-}" ]] || return 0
+  watch_alert=$(jq -c --arg at "${run_at}" '
+    select((.new_events // 0) > 0 or ((.population.state // "fresh") != "fresh") or ((.errors // []) | length) > 0
+           or (.agent_runtime_stale == true))
+    | ([(.errors // [])[] | select(.kind == "root_walk_incomplete")]) as $walk
+    | ((.summary.roots_walked // 0) + (.summary.roots_walk_incomplete // 0)) as $roots
+    | {kind:"watch_attention", at:$at, new_events, population:.population.state, errors:(.errors | length),
+       agent_runtime_stale, summary:.summary.line,
+       walk_incomplete:($walk | length), roots:$roots,
+       first_walk_incomplete:($walk | first | if . == null then null else {root, exit, said} end)}
+    | . + {message: ((if .walk_incomplete > 0 then
+                        "\(.walk_incomplete) of \(.roots) roots not read in full ("
+                        + (.first_walk_incomplete.said[0]? // "exit \(.first_walk_incomplete.exit), nothing said")
+                        + "); what find could not read in them was not checked. "
+                      else "" end)
+                     + "\(.new_events) new, population \(.population), \(.errors) errors"
+                     + (if .agent_runtime_stale == true then ", agent runtime stale"
+                        elif .agent_runtime_stale == null then ", agent runtime stale unknown" else "" end))}' "${tmp_scan}" 2>/dev/null) || watch_alert=""
+  if [[ -n "${watch_alert}" ]]; then
+    append_alert "${watch_alert}"
+    notify "safedeps watch" "$(jq -r '.message' <<< "${watch_alert}")"
+  fi
+}
+
+# A scan that published while its ledger stage failed has no ledger report
+# (`ledger: null`) and names the failure in its errors: ledger_stage_failed,
+# with the re-check's exit and the error it named. core_missing is a runtime
+# with no core to read the approvals store with. That is the re-check failing,
+# and it is raised by that name: it is no report to read, and no invalid
+# output. The run's own news is said as for any other run, and the run exits 1.
+ledger_failed=$(jq -c 'select(.command == "watch scan" and .ledger == null)
+    | first(.errors[]? | select(.kind == "ledger_stage_failed")) | {exit_status: .exit, error}' "${tmp_scan}" 2>/dev/null) \
+  || ledger_failed=""
+if [[ -n "${ledger_failed}" ]]; then
+  append_alert "$(jq -c --arg at "${run_at}" '{kind:"recheck_failed", at:$at} + .' <<< "${ledger_failed}")"
+  notify "safedeps re-check failed" "Daily dependency approval re-check failed: $(jq -r '.error // "no report"' <<< "${ledger_failed}"). See ~/.safedeps/recheck-alerts.jsonl"
+  say_watch_news
+  exit 1
+fi
+
 # The report's fields are declared in lib/ledger/recheck-report.sh, beside the
 # real file of this script, and are read only now. A runtime without lib/ fails
 # the run above, and that is the recheck_failed alert it has always been.
@@ -171,36 +221,6 @@ if [[ "${newly_vulnerable}" -gt 0 || "${kev_hit}" -gt 0 || "${revoked}" -gt 0 ||
   notify "safedeps attention needed" "${message}. See ~/.safedeps/recheck-alerts.jsonl"
 fi
 
-# The watch's own news: new findings or transitions, a population that is not
-# fresh, errors the scan published with, a runtime that no longer matches its
-# checkout. A runtime whose checkout could not be read is neither stale nor
-# fresh: the report says null, the record keeps null and the sentence says
-# unknown. Each says itself once; the consumer delivers the events. Roots the
-# walk did not finish come first, with what find said about the first of
-# them: a run that read none of them otherwise reads as one that found
-# nothing. The record keeps the sentence the notification showed.
-if [[ -z "${SAFEDEPS_RECHECK_FIXTURE_JSON:-}" ]]; then
-  watch_alert=$(jq -c --arg at "${run_at}" '
-    select((.new_events // 0) > 0 or ((.population.state // "fresh") != "fresh") or ((.errors // []) | length) > 0
-           or (.agent_runtime_stale == true))
-    | ([(.errors // [])[] | select(.kind == "root_walk_incomplete")]) as $walk
-    | ((.summary.roots_walked // 0) + (.summary.roots_walk_incomplete // 0)) as $roots
-    | {kind:"watch_attention", at:$at, new_events, population:.population.state, errors:(.errors | length),
-       agent_runtime_stale, summary:.summary.line,
-       walk_incomplete:($walk | length), roots:$roots,
-       first_walk_incomplete:($walk | first | if . == null then null else {root, exit, said} end)}
-    | . + {message: ((if .walk_incomplete > 0 then
-                        "\(.walk_incomplete) of \(.roots) roots not read in full ("
-                        + (.first_walk_incomplete.said[0]? // "exit \(.first_walk_incomplete.exit), nothing said")
-                        + "); what find could not read in them was not checked. "
-                      else "" end)
-                     + "\(.new_events) new, population \(.population), \(.errors) errors"
-                     + (if .agent_runtime_stale == true then ", agent runtime stale"
-                        elif .agent_runtime_stale == null then ", agent runtime stale unknown" else "" end))}' "${tmp_scan}" 2>/dev/null) || watch_alert=""
-  if [[ -n "${watch_alert}" ]]; then
-    append_alert "${watch_alert}"
-    notify "safedeps watch" "$(jq -r '.message' <<< "${watch_alert}")"
-  fi
-fi
+say_watch_news
 
 [[ "${scan_errors}" -eq 0 ]] || exit 1

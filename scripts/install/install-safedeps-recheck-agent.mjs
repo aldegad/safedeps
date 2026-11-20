@@ -28,8 +28,9 @@ const MARKER = '.safedeps-recheck-runtime';
 // it (safedeps_watch_runtime_info in lib/watch/scan.sh), hashes source_repo the
 // same way, and reports agent_runtime_stale when the two digests differ.
 const RUNTIME_META = '.safedeps-runtime.json';
-// The files a runtime is built from. runtimeDigest hashes them the way
-// safedeps_watch_tree_digest does, so the two must change together.
+// The files a runtime is built from, beside this machine's core (machineCore).
+// runtimeDigest hashes them the way safedeps_watch_tree_digest does, so the
+// two must change together.
 const RUNTIME_SOURCES = ['bin/safedeps', 'lib', 'scripts/safedeps-recheck-alert.sh'];
 const watchDir = path.join(safedepsHome, 'watch');
 const watchConfigPath = path.join(watchDir, 'config.json');
@@ -44,6 +45,9 @@ function usage() {
        install-safedeps-recheck-agent.mjs configure [watch options]
 
 Default schedule: 09:00 local time.
+The runtime carries this machine's core, bin/native/<os>-<arch>/safedeps-core,
+from this checkout: its re-check reads the approvals store with it. A checkout
+without it is refused (core-missing) before anything is built.
 stage builds the agent's runtime as DIR and checks that the built bin loads,
 without launchd. DIR is replaced as a whole, so it must be absent, empty or a
 runtime that stage built before, and it can not be this checkout, hold it or lie
@@ -249,34 +253,101 @@ function rootState(root, ownsRoot) {
   );
 }
 
-function listRuntimeSources(root) {
+// This machine's core as a path under a checkout or a runtime, and the machine
+// it was read from: {machine, core}, core null where no core is built for the
+// machine. The answer is the scan's (safedeps_watch_core_file in
+// lib/watch/scan.sh), so the file both digests count is named in one place:
+// bin/native/<os>-<arch>/safedeps-core, the platform read from the machine
+// bash was built for, as the runtime's CLI reads it when it looks for its core
+// beside itself (sf_core in bin/safedeps).
+function machineCore() {
+  const scan = path.join(repoRoot, 'lib', 'watch', 'scan.sh');
+  const run = spawnSync('bash', ['-c', 'printf "%s\\n" "${BASH_VERSINFO[5]:-}"; source "$1" || exit 2; safedeps_watch_core_file || exit 3', 'safedeps-core-file', scan], { encoding: 'utf8' });
+  const [machine = '', core = ''] = (run.stdout || '').split('\n');
+  if (run.status === 0 && core !== '') {
+    return { machine, core };
+  }
+  if (run.status === 3) {
+    return { machine, core: null };
+  }
+  const detail = [run.error ? run.error.message : '', run.stderr].map((x) => (x || '').trim()).filter(Boolean).join('\n');
+  throw new Error(`could not read which core this machine runs from ${scan} (${run.error ? 'bash did not start' : `exit ${run.status}`})${detail ? `: ${detail}` : ''}`);
+}
+
+// The core the runtime is built with: this machine's, from this checkout, as a
+// path under both. The runtime's re-check reads the approvals store with it,
+// and a runtime without it fails every re-check with core_missing, so a
+// checkout without it is refused here, by that name, before anything is built
+// or written. It has to be a regular file that runs: the digests count regular
+// files, and a symbolic link is none.
+function requireMachineCore() {
+  const { machine, core } = machineCore();
+  const repair = fs.existsSync(path.join(repoRoot, 'rust', 'Cargo.toml'))
+    ? `build it with ${path.join(repoRoot, 'scripts', 'build-core.sh')}`
+    : 'reinstall the package';
+  if (core === null) {
+    throw new Error(
+      `core-missing: no safedeps-core binary is built for this machine (bash was built for ${machine || 'an unnamed machine'}), ` +
+      'and the runtime\'s re-check reads the approvals store with it. Nothing was built.',
+    );
+  }
+  const file = path.join(repoRoot, core);
+  let runs = false;
+  try {
+    runs = fs.lstatSync(file).isFile();
+    fs.accessSync(file, fs.constants.X_OK);
+  } catch {
+    runs = false;
+  }
+  if (!runs) {
+    throw new Error(
+      `core-missing: the safedeps-core binary for this machine is missing: ${file} is not an executable regular file, ` +
+      `and the runtime's re-check reads the approvals store with it. Repair: ${repair}. Nothing was built.`,
+    );
+  }
+  return core;
+}
+
+// The files of RUNTIME_SOURCES and CORE (null for none) under `root`, regular
+// files only, paths in byte order. A source that is not there is counted as
+// nothing, as find skips it in safedeps_watch_tree_digest.
+function listRuntimeSources(root, core) {
   const files = [];
-  const walk = (relative) => {
-    const stat = fs.lstatSync(path.join(root, relative));
+  const walk = (relative, top) => {
+    let stat;
+    try {
+      stat = fs.lstatSync(path.join(root, relative));
+    } catch (error) {
+      if (top && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+        return;
+      }
+      throw error;
+    }
     if (stat.isDirectory()) {
       for (const name of fs.readdirSync(path.join(root, relative))) {
-        walk(path.posix.join(relative, name));
+        walk(path.posix.join(relative, name), false);
       }
     } else if (stat.isFile()) {
       files.push(relative);
     }
   };
-  for (const source of RUNTIME_SOURCES) {
-    walk(source);
+  for (const source of [...RUNTIME_SOURCES, ...(core ? [core] : [])]) {
+    walk(source, true);
   }
   return files.sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
 }
 
 // One "<sha256>  <path>" line per file, paths in byte order, and the sha256 of
-// those lines: safedeps_watch_tree_digest in lib/watch/scan.sh.
-function runtimeDigest(root) {
-  const lines = listRuntimeSources(root)
+// those lines: safedeps_watch_tree_digest in lib/watch/scan.sh. CORE is this
+// machine's core, counted beside the runtime's other files.
+function runtimeDigest(root, core) {
+  const lines = listRuntimeSources(root, core)
     .map((relative) => `${crypto.createHash('sha256').update(fs.readFileSync(path.join(root, relative))).digest('hex')}  ${relative}\n`)
     .join('');
   return crypto.createHash('sha256').update(lines).digest('hex');
 }
 
-function buildRuntime(dir) {
+function buildRuntime(dir, core) {
   copyRuntimeFile(dir, 'bin/safedeps', 0o755);
   // bin/safedeps sources lib/ files under `set -euo pipefail`, and they source
   // each other. A hand-kept list of them missed one twice, and each time the
@@ -286,6 +357,12 @@ function buildRuntime(dir) {
   // lib/ tree is copied, and there is no list to keep in step.
   copyRuntimeTree(dir, 'lib');
   copyRuntimeFile(dir, 'scripts/safedeps-recheck-alert.sh', 0o755);
+  // The CLI finds its core beside itself and nowhere else, so the core goes
+  // where it is in the checkout. Only this machine's: the CLI runs no other.
+  // The runtime has no rust/ for the core's stamp check to read, and needs
+  // none: that check runs on the hook path (pre, post), and the runtime's CLI
+  // runs the core's `approvals` only.
+  copyRuntimeFile(dir, core);
   fs.writeFileSync(path.join(dir, MARKER), 'built by install-safedeps-recheck-agent.mjs; the runtime is replaced as a whole\n', { mode: 0o644 });
 }
 
@@ -293,9 +370,9 @@ function buildRuntime(dir) {
 // answers, the digest is of the files it was built from, and built_at is when
 // a runtime with this digest was first put at `root`: a build that changes
 // nothing keeps the record it found, so it changes nothing.
-function writeRuntimeMeta(dir, root, version) {
-  const digest = runtimeDigest(dir);
-  if (digest !== runtimeDigest(repoRoot)) {
+function writeRuntimeMeta(dir, root, version, core) {
+  const digest = runtimeDigest(dir, core);
+  if (digest !== runtimeDigest(repoRoot, core)) {
     throw new Error('the built runtime does not hash to its checkout; a file changed while it was copied');
   }
   let builtAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -369,15 +446,17 @@ function swapRuntime(staging, root, state) {
 // ours leaves what was there as it was. Removing the old lib/ and copying the
 // new one into its place did not: a symbolic link in lib/ threw after the old
 // lib/ was gone, and `stage --root <this checkout>` deleted the checkout's own.
-function installRuntime(root, { ownsRoot = false } = {}) {
+// CORE is requireMachineCore's answer, asked by the caller before it writes
+// anything of its own.
+function installRuntime(root, core, { ownsRoot = false } = {}) {
   const state = rootState(root, ownsRoot);
   const parent = path.dirname(root);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const staging = fs.mkdtempSync(path.join(parent, `.${path.basename(root)}.new-`));
   let placed = false;
   try {
-    buildRuntime(staging);
-    writeRuntimeMeta(staging, root, smokeRuntime(staging));
+    buildRuntime(staging, core);
+    writeRuntimeMeta(staging, root, smokeRuntime(staging), core);
     swapRuntime(staging, root, state);
     placed = true;
   } finally {
@@ -489,12 +568,13 @@ function install(args) {
   if (!fs.existsSync(wrapperPath)) {
     throw new Error(`wrapper not found: ${wrapperPath}`);
   }
+  const core = requireMachineCore();
 
   fs.mkdirSync(launchAgentsDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(safedepsHome, { recursive: true, mode: 0o700 });
   fs.chmodSync(wrapperPath, 0o755);
   const watch = planWatchConfig(args);
-  installRuntime(agentRoot, { ownsRoot: true });
+  installRuntime(agentRoot, core, { ownsRoot: true });
   writeWatchConfig(watch);
   fs.writeFileSync(launchdStdoutPath, '');
   fs.writeFileSync(launchdStderrPath, '');
@@ -554,7 +634,9 @@ function status() {
   const runtime = readJson(path.join(agentRoot, RUNTIME_META));
   let sourceDigestNow = null;
   if (runtime && runtime.source_repo && fs.existsSync(path.join(runtime.source_repo, 'bin', 'safedeps'))) {
-    sourceDigestNow = runtimeDigest(runtime.source_repo);
+    // The checkout's files now, its core among them, as the scan hashes them:
+    // a core that is gone is counted as nothing, and the runtime reads stale.
+    sourceDigestNow = runtimeDigest(runtime.source_repo, machineCore().core);
   }
   const state = readJson(path.join(watchDir, 'state.json'));
   const runsDir = path.join(watchDir, 'runs');
@@ -603,7 +685,7 @@ try {
       throw new Error('stage needs --root DIR');
     }
     const root = path.resolve(args.root);
-    installRuntime(root);
+    installRuntime(root, requireMachineCore());
     console.log(JSON.stringify({ staged: true, root }, null, 2));
   } else {
     throw new Error(`unknown command: ${args.command}`);

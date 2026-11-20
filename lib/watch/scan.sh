@@ -92,6 +92,27 @@ safedeps_watch_new_run_id() {
   printf '%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$"
 }
 
+# This machine's core as a path under a runtime or its checkout:
+# bin/native/<os>-<arch>/safedeps-core, the platform read from the machine bash
+# was built for, as the CLI reads it when it looks for its core beside itself
+# (sf_core in bin/safedeps). Prints nothing and returns 1 for a machine no core
+# is built for. The installer asks this for the core it copies and counts
+# (machineCore in scripts/install/install-safedeps-recheck-agent.mjs), so the
+# two digests count one file.
+safedeps_watch_core_file() {
+  local machine="${BASH_VERSINFO[5]:-}" os="" arch=""
+  case "${machine}" in
+    *-darwin*) os=darwin ;;
+    *-linux*) os=linux ;;
+  esac
+  case "${machine%%-*}" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  [[ -n "${os}" && -n "${arch}" ]] || return 1
+  printf 'bin/native/%s-%s/safedeps-core\n' "${os}" "${arch}"
+}
+
 # What a command returned and said, as {exit, said, lines}: EXIT, the first
 # three lines of FILE (what it wrote to stderr) and how many lines that was.
 # With ROOT, the root's path in the words is written as "." (<root>/ as ./,
@@ -122,11 +143,12 @@ safedeps_watch_said_json() {
 #   shasum  hash each file
 #   digest  hash the "<sha256>  <path>" lines
 safedeps_watch_tree_digest() {
-  local root="$1" record="${2:-}" step="" rc=0 list="" sorted="" p sums="" digest=""
+  local root="$1" record="${2:-}" step="" rc=0 list="" sorted="" p sums="" digest="" core
   local -a files=()
   [[ -n "${record}" ]] || { printf 'safedeps_watch_tree_digest: no RECORD file named\n' >&2; return 1; }
   [[ "${record}" == /* ]] || record="${PWD}/${record}"
-  list=$( { cd "${root}" && find bin/safedeps lib scripts/safedeps-recheck-alert.sh -type f; } 2> "${record}.find" ) \
+  core=$(safedeps_watch_core_file) || core=""
+  list=$( { cd "${root}" && find bin/safedeps lib scripts/safedeps-recheck-alert.sh ${core:+"${core}"} -type f; } 2> "${record}.find" ) \
     || { rc=$?; step=find; }
   if [[ -z "${step}" ]]; then
     sorted=$(LC_ALL=C sort 2> "${record}.sort" <<< "${list}") || { rc=$?; step=sort; }
