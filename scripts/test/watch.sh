@@ -576,10 +576,12 @@ row_runtime_source_unreadable() {
   new_world; register whole part
   npm_lock "${d}/p/whole" right@2.0.0
   mkdir -p "${d}/p/part/locked"
-  local co="${d}/co" rt="${d}/rt" t digest
+  local co="${d}/co" rt="${d}/rt" t digest core_file
+  core_file=$( (source lib/watch/scan.sh; safedeps_watch_core_file) )
   for t in "${co}" "${rt}"; do
-    mkdir -p "${t}/bin" "${t}/scripts"
+    mkdir -p "${t}/bin" "${t}/scripts" "${t}/${core_file%/*}"
     cp bin/safedeps "${t}/bin/safedeps"
+    cp "${core_file}" "${t}/${core_file}"
     cp -R lib "${t}/lib"
     cp scripts/safedeps-recheck-alert.sh "${t}/scripts/safedeps-recheck-alert.sh"
   done
