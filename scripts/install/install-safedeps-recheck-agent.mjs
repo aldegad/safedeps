@@ -260,8 +260,8 @@ function rootState(root, ownsRoot) {
 // bin/native/<os>-<arch>/safedeps-core, the platform read from the machine
 // bash was built for, as the runtime's CLI reads it when it looks for its core
 // beside itself (sf_core in bin/safedeps).
-function machineCore() {
-  const scan = path.join(repoRoot, 'lib', 'watch', 'scan.sh');
+function machineCore(root = repoRoot) {
+  const scan = path.join(root, 'lib', 'watch', 'scan.sh');
   const run = spawnSync('bash', ['-c', 'printf "%s\\n" "${BASH_VERSINFO[5]:-}"; source "$1" || exit 2; safedeps_watch_core_file || exit 3', 'safedeps-core-file', scan], { encoding: 'utf8' });
   const [machine = '', core = ''] = (run.stdout || '').split('\n');
   if (run.status === 0 && core !== '') {
@@ -280,10 +280,10 @@ function machineCore() {
 // checkout without it is refused here, by that name, before anything is built
 // or written. It has to be a regular file that runs: the digests count regular
 // files, and a symbolic link is none.
-function requireMachineCore() {
-  const { machine, core } = machineCore();
-  const repair = fs.existsSync(path.join(repoRoot, 'rust', 'Cargo.toml'))
-    ? `build it with ${path.join(repoRoot, 'scripts', 'build-core.sh')}`
+function requireMachineCore(root = repoRoot) {
+  const { machine, core } = machineCore(root);
+  const repair = fs.existsSync(path.join(root, 'rust', 'Cargo.toml'))
+    ? `build it with ${path.join(root, 'scripts', 'build-core.sh')}`
     : 'reinstall the package';
   if (core === null) {
     throw new Error(
@@ -291,7 +291,7 @@ function requireMachineCore() {
       'and the runtime\'s re-check reads the approvals store with it. Nothing was built.',
     );
   }
-  const file = path.join(repoRoot, core);
+  const file = path.join(root, core);
   let runs = false;
   try {
     runs = fs.lstatSync(file).isFile();
@@ -309,8 +309,8 @@ function requireMachineCore() {
 }
 
 // The files of RUNTIME_SOURCES and CORE (null for none) under `root`, regular
-// files only, paths in byte order. A source that is not there is counted as
-// nothing, as find skips it in safedeps_watch_tree_digest.
+// files only, paths in byte order. The caller requires the machine core
+// before hashing a checkout; a missing core is not a smaller tree.
 function listRuntimeSources(root, core) {
   const files = [];
   const walk = (relative, top) => {
@@ -634,9 +634,8 @@ function status() {
   const runtime = readJson(path.join(agentRoot, RUNTIME_META));
   let sourceDigestNow = null;
   if (runtime && runtime.source_repo && fs.existsSync(path.join(runtime.source_repo, 'bin', 'safedeps'))) {
-    // The checkout's files now, its core among them, as the scan hashes them:
-    // a core that is gone is counted as nothing, and the runtime reads stale.
-    sourceDigestNow = runtimeDigest(runtime.source_repo, machineCore().core);
+    // A checkout without its required core has no digest, as at install.
+    sourceDigestNow = runtimeDigest(runtime.source_repo, requireMachineCore(runtime.source_repo));
   }
   const state = readJson(path.join(watchDir, 'state.json'));
   const runsDir = path.join(watchDir, 'runs');

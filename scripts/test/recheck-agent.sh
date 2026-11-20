@@ -555,14 +555,11 @@ install_in() {
 }
 plist_of() { printf '%s/Library/LaunchAgents/com.aldegad.safedeps.recheck.plist' "$1"; }
 
-# ---- status reads a checkout that lost its core as the scan does ------------------------------
-# `status` hashes the runtime's checkout with the installer's digest, the scan
-# with its own. Once the checkout's core is gone both read the runtime stale:
-# a path that is not there is counted as nothing, as find skips it, and is no
-# reason for status to stop. status asks launchctl only to print, so the shim
-# serves on every platform.
+# ---- a missing checkout core is an unreadable source, never stale -----------------------------
+# The scan keeps find's failure; status uses the installer's named refusal.
+# launchctl only prints here, so the shim serves on every platform.
 row_status_core_gone() {
-  local d co h out info
+  local d co h out info rc
   d=$(new_dir); co="${d}/co"; make_checkout "${co}"
   h="${d}/home"; mkdir -p "${h}"; LC_LOG="${d}/lc.log"
   HOME="${h}" node "${co}/${INSTALLER}" stage --root "${h}/.safedeps/agent" > /dev/null 2> "${tmp_root}/last.err" \
@@ -576,12 +573,17 @@ row_status_core_gone() {
   info=$(runtime_info "${h}/.safedeps/agent")
   jq -e '.stale == false' <<< "${info}" > /dev/null || no "the scan of a fresh runtime: ${info}"
   rm -rf "${co}/bin/native"
-  out=$(status_json)
-  jq -e '.agent_runtime_stale == true' <<< "${out}" > /dev/null || no "status once the core is gone: $(jq -c '{runtime, agent_runtime_stale}' <<< "${out}")"
+  rc=0
+  out=$(HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" status 2> "${tmp_root}/last.err") || rc=$?
+  [[ "${rc}" == 1 && -z "${out}" ]] || no "status without its source core: exit ${rc}, stdout ${out}"
+  grep -qF 'core-missing: ' "${tmp_root}/last.err" || no "status did not name its missing core"
+  grep -qF "${co}/${CORE}" "${tmp_root}/last.err" || no "status did not name the source core path"
   info=$(runtime_info "${h}/.safedeps/agent")
-  jq -e '.stale == true' <<< "${info}" > /dev/null || no "the scan once the core is gone: ${info}"
+  jq -e --arg core "${CORE}" '.stale == null and .source_digest_now == null
+      and (.source_unreadable | .step == "find" and .exit > 0 and any(.said[]; contains($core)))' <<< "${info}" > /dev/null \
+    || no "the scan without its source core: ${info}"
 }
-row "status and the scan both read a runtime stale once its checkout's core is gone" row_status_core_gone
+row "a missing checkout core: status refuses core-missing by path, and the scan keeps find failure with stale null" row_status_core_gone
 
 row_install() {
   local d co h
