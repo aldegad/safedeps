@@ -1507,7 +1507,7 @@ pass "re-check alert wrapper"
 # provider_skipped is 0 and every other trigger array is empty — only the
 # suspected_forgery condition can fire here.
 forgery_fixture="${tmp_root}/recheck-forgery-fixture.json"
-printf '%s\n' '{"command":"re-check","checked":1,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[],"suspected_forgery":[{"ecosystem":"npm","package":"fixture-forged","version":"1.0.0","hash":"deadbeef","reason":"missing_advisory_log_approval"}],"errors":[]}' > "${forgery_fixture}"
+printf '%s\n' '{"command":"re-check","checked":1,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[],"suspected_forgery":[{"ecosystem":"npm","package":"fixture-forged","version":"1.0.0","hash":"deadbeef","reason":"unvouched"}],"errors":[]}' > "${forgery_fixture}"
 SAFEDEPS_NOTIFY=0 \
   HOME="${tmp_root}/home-recheck" \
   SAFEDEPS_HOME="${tmp_root}/safe-recheck" \
@@ -1521,7 +1521,7 @@ pass "re-check wrapper alerts on suspected ledger forgery"
 # Regression: a fully clean re-check (empty suspected_forgery included) must
 # not append an alert.
 clean_fixture="${tmp_root}/recheck-clean-fixture.json"
-printf '%s\n' '{"command":"re-check","checked":1,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[],"suspected_forgery":[],"errors":[]}' > "${clean_fixture}"
+printf '%s\n' '{"command":"re-check","checked":1,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[],"suspected_forgery":[],"errors":[],"approvals_store":{"present":true,"broken":0,"unmatched":0}}' > "${clean_fixture}"
 alerts_before=$(wc -l < "${tmp_root}/safe-recheck/recheck-alerts.jsonl")
 SAFEDEPS_NOTIFY=0 \
   HOME="${tmp_root}/home-recheck" \
@@ -1548,16 +1548,16 @@ pass "clean re-check appends no alert"
 # shellcheck source=../../lib/ledger/recheck-report.sh
 source lib/ledger/recheck-report.sh
 recheck_report_json=$(HOME="${tmp_root}/home-recheck-report" SAFEDEPS_HOME="${tmp_root}/safe-recheck-report" ./bin/safedeps --json re-check)
-recheck_declared_keys=$(jq -cn "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(0; 0; []; []; []; []; []) | keys_unsorted')
+recheck_declared_keys=$(jq -cn "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(0; 0; []; []; []; []; []; {present: false, broken: 0, unmatched: 0}) | keys_unsorted')
 [[ "$(jq -c 'keys_unsorted' <<< "${recheck_report_json}")" == "${recheck_declared_keys}" ]] || fail "re-check --json prints the declared report fields"
 [[ "$(jq -c 'keys_unsorted' "${clean_fixture}")" == "${recheck_declared_keys}" ]] || fail "the wrapper's complete re-check fixture has the declared report fields"
-jq -en "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(1; 2; [3]; [4]; [5]; [6]; [7])
-  | [recheck_is_report, recheck_checked, recheck_still_clean, recheck_newly_vulnerable, recheck_kev_hit, recheck_revoked, recheck_suspected_forgery, recheck_errors]
-  == [true, 1, 2, [3], [4], [5], [6], [7]]' >/dev/null || fail "each re-check report reader reads the field its builder writes"
-jq -en "${SAFEDEPS_RECHECK_REPORT_JQ}"'{} | [recheck_is_report, recheck_checked, recheck_still_clean, recheck_newly_vulnerable, recheck_kev_hit, recheck_revoked, recheck_suspected_forgery, recheck_errors]
-  == [false, 0, 0, [], [], [], [], []]' >/dev/null || fail "each re-check report reader reads an absent field as the wrapper always has"
+jq -en "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(1; 2; [3]; [4]; [5]; [6]; [7]; {present: true, broken: 8, unmatched: 9})
+  | [recheck_is_report, recheck_checked, recheck_still_clean, recheck_newly_vulnerable, recheck_kev_hit, recheck_revoked, recheck_suspected_forgery, recheck_errors, recheck_store_broken, recheck_store_unmatched]
+  == [true, 1, 2, [3], [4], [5], [6], [7], 8, 9]' >/dev/null || fail "each re-check report reader reads the field its builder writes"
+jq -en "${SAFEDEPS_RECHECK_REPORT_JQ}"'{} | [recheck_is_report, recheck_checked, recheck_still_clean, recheck_newly_vulnerable, recheck_kev_hit, recheck_revoked, recheck_suspected_forgery, recheck_errors, recheck_store_broken, recheck_store_unmatched]
+  == [false, 0, 0, [], [], [], [], [], 0, 0]' >/dev/null || fail "each re-check report reader reads an absent field as the wrapper always has"
 recheck_counts_fixture="${tmp_root}/recheck-counts-fixture.json"
-jq -n "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(20; 6; ["n"]; ["k1", "k2"]; ["r1", "r2", "r3"]; ["f1", "f2", "f3", "f4"]; [])' > "${recheck_counts_fixture}"
+jq -n "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report(20; 6; ["n"]; ["k1", "k2"]; ["r1", "r2", "r3"]; ["f1", "f2", "f3", "f4"]; []; {present: true, broken: 0, unmatched: 0})' > "${recheck_counts_fixture}"
 recheck_notify_bin="${tmp_root}/recheck-notify-bin"
 mkdir -p "${recheck_notify_bin}"
 printf '#!/bin/sh\nprintf "%%s\\n" "$3" >> "%s"\n' "${tmp_root}/recheck-notices" > "${recheck_notify_bin}/osascript"
@@ -1574,8 +1574,8 @@ tail -n 1 "${tmp_root}/safe-recheck-counts/recheck-alerts.jsonl" \
   || fail "the re-check alert carries the declared report it was raised for"
 # Each list field alone raises the alert, so the condition reads them as the
 # notice does.
-for recheck_alone in 'recheck_report(1; 1; ["n"]; []; []; []; [])' 'recheck_report(1; 1; []; ["k"]; []; []; [])' 'recheck_report(1; 0; []; []; ["r"]; []; [])' \
-    'recheck_report(1; 1; []; []; []; ["f"]; [])'; do
+for recheck_alone in 'recheck_report(1; 1; ["n"]; []; []; []; []; {})' 'recheck_report(1; 1; []; ["k"]; []; []; []; {})' 'recheck_report(1; 0; []; []; ["r"]; []; []; {})' \
+    'recheck_report(1; 1; []; []; []; ["f"]; []; {})'; do
   jq -n "${SAFEDEPS_RECHECK_REPORT_JQ}${recheck_alone}" > "${recheck_counts_fixture}"
   rm -rf "${tmp_root}/safe-recheck-alone"
   SAFEDEPS_NOTIFY=0 \

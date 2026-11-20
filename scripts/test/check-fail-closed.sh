@@ -2088,6 +2088,135 @@ recheck_provider_down() {
 }
 row "re-check with OSV down is an error of the run, not a skip" recheck_provider_down
 
+# ---- re-check provenance: the approvals store, and nothing else -------------
+#
+# re-check takes an entry's provenance from one read of the approvals store,
+# made by the core (rust/src/approvals.rs). A store line vouches for an entry
+# by the hash recomputed from the entry's own fields. advisory.log is rotated
+# and compacted, so an approve line there vouches for nothing, and an approval
+# the store vouches for stays one when that line is gone. A store that cannot be
+# read, and a CLI with no core to read it with, end the run with a named error:
+# neither is a store that vouches for nothing.
+
+# re-check in HOME, these assignments in its environment: leaves `json` and
+# `rc`, and its stderr in HOME/stderr.
+recheck_in() {
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "$@" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
+}
+# A re-check that could not read the store: exit 4, the named error and no
+# report, a fail-closed line, and the entry neither revoked nor removed.
+recheck_unproven() {
+  local error="$1" said="$2" entry
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -es --arg error "${error}" 'length == 1 and .[0] == {command: "re-check", error: $error}' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -q "re-check fail-closed ${said}\$" "${home}/advisory.log" || no "advisory.log has no fail-closed line: $(cat "${home}/advisory.log")"
+  entry=$(find "${home}/approved-specs" -name '*.json' -type f)
+  [[ -n "${entry}" ]] || no "the entry was removed"
+  jq -e '(.revoked_at // "") == ""' "${entry}" >/dev/null || no "the entry was revoked"
+}
+recheck_log_line_is_no_provenance() {
+  local hash
+  fresh_home
+  hash=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 | jq -r '.hash')
+  printf '[2026-11-20T00:00:00Z] check approve(clean) ecosystem=pypi package=fixture-clean version=1.0.0 hash=%s\n' "${hash}" >> "${home}/advisory.log"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.checked == 1 and .still_clean == 1
+    and .suspected_forgery == [{ecosystem: "pypi", package: "fixture-clean", version: "1.0.0", hash: $hash, reason: "unvouched"}]
+    and .approvals_store == {present: false, broken: 0, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "an approve line in advisory.log vouches for nothing: an entry the store has no line for is a suspected forgery" recheck_log_line_is_no_provenance
+recheck_store_outlives_the_log() {
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  rm -f "${home}/advisory.log"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 1 and .suspected_forgery == []
+    and .approvals_store == {present: true, broken: 0, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "an approval the store vouches for is no forgery when advisory.log no longer holds its approve line" recheck_store_outlives_the_log
+recheck_spec_is_no_provenance() {
+  local ctx hash
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  ctx="${home}/context.json"
+  jq -n '{type: "npm-overrides-probe", context_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    project_root: "/p", overrides_source: "package.json", overrides_sha256: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    overrides: {"fixture-clean": "1.0.0"}}' > "${ctx}"
+  hash=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 1.0.0 test "" "" "" "${ctx}" | jq -r '.hash')
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.checked == 2 and .still_clean == 2
+    and .suspected_forgery == [{ecosystem: "pypi", package: "fixture-clean", version: "1.0.0", hash: $hash, reason: "unvouched"}]
+    and .approvals_store == {present: true, broken: 0, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "an approval of a spec in one project context vouches for nothing in another" recheck_spec_is_no_provenance
+recheck_store_unreadable() {
+  local store
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  store=$(store_of "${home}")
+  chmod 000 "${store}"
+  recheck_in
+  chmod 600 "${store}"
+  recheck_unproven approvals_store_unreadable approvals-store-unreadable
+  grep -qF "safedeps-core approvals: ${store} could not be read: " "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
+}
+row "a re-check of an approvals store it may not read judged nothing and says so" recheck_store_unreadable
+recheck_core_missing() {
+  local tree
+  tree=$(mktemp -d "${tmp_root}/no-core.XXXXXX")
+  mkdir -p "${tree}/bin"
+  cp bin/safedeps "${tree}/bin/safedeps"
+  cp -R lib "${tree}/lib"
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "${tree}/bin/safedeps" --json re-check 2>"${home}/stderr") || rc=$?
+  recheck_unproven core_missing core-missing
+  grep -qE "^safedeps: core-missing: the safedeps-core binary is missing: ${tree}/bin/native/[a-z]+-[a-z0-9]+/safedeps-core is not an executable file\. Repair: reinstall the package\. " "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+}
+row "a re-check with no core binary judged nothing and names the path it looked at" recheck_core_missing
+recheck_broken_store_lines() {
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  printf 'not a record\n{"at":"2026-11-20T00:00:00Z"}\n' >> "$(store_of "${home}")"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 1 and .suspected_forgery == []
+    and .approvals_store == {present: true, broken: 2, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -q 're-check approvals-store broken-lines=2$' "${home}/advisory.log" || no "advisory.log: $(cat "${home}/advisory.log")"
+  rc=0
+  env SAFEDEPS_HOME="${home}" NO_COLOR=1 ./bin/safedeps re-check > "${home}/human" 2>&1 || rc=$?
+  [[ "${rc}" == 0 ]] || no "the human run exits ${rc}: $(cat "${home}/human")"
+  grep -q '2 lines of the approvals store vouch for nothing' "${home}/human" || no "the human run: $(cat "${home}/human")"
+}
+row "store lines that vouch for nothing are counted, said in advisory.log and shown to a person" recheck_broken_store_lines
+recheck_unmatched() {
+  local gone
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first check exits ${rc}: ${json}"
+  gone=$(jq -r '.spec_hash' <<< "${json}")
+  check_in pypi fixture-revoked@1.0.0
+  [[ "${rc}" == 0 ]] || no "the second check exits ${rc}: ${json}"
+  SAFEDEPS_HOME="${home}" ./bin/safedeps revoke pypi fixture-revoked@1.0.0 --reason test >/dev/null 2>&1 || no "the revoke failed"
+  rm -f "${home}/approved-specs/${gone/:/-}.json"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 0 and .suspected_forgery == []
+    and .approvals_store == {present: true, broken: 0, unmatched: 1}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "a store line no ledger entry stands for is unmatched, and a revoked entry still stands for its line" recheck_unmatched
+
 plant_entry() {
   local filter="$1" file
   fresh_home
@@ -2612,6 +2741,16 @@ ledger_listing_control() {
   jq -e '.count == 1' <<< "${json}" >/dev/null || no "the report: ${json}"
 }
 row "control: a ledger that lists is read whole" ledger_listing_control
+# The approvals store's index is read whole, or the run judged nothing: the jq
+# that holds the core's answer to the shape of an index answers by its exit
+# status, whatever it printed.
+recheck_index_unread() {
+  ledger_listed
+  recheck_in PATH="${after_path}" STUB_MATCH='approvals_index_whole' STUB_TOOL_ONLY=jq "$@"
+  recheck_unproven approvals_store_unreadable approvals-store-unreadable
+}
+row "a store index jq printed and failed on is no store" recheck_index_unread
+row "a store index jq failed on before printing is no store" recheck_index_unread STUB_BEFORE=1
 
 # What the closure is read from.
 yarn_project() {
