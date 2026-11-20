@@ -248,7 +248,7 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
 mod tests {
     use super::{cat, jv, sh};
     use std::{fs, io::Write, os::unix::{ffi::OsStringExt, fs::{OpenOptionsExt, PermissionsExt}, process::ExitStatusExt}, path::Path,
-        process::{Child, Command, ExitStatus, Stdio}, time::{Duration, Instant}};
+        process::{Child, Command, ExitStatus}, time::{Duration, Instant}};
 
     /// Set in a child of this test binary, it names the directory the parent
     /// made, and the child is the post hook: it runs `main` on one call there
@@ -277,13 +277,14 @@ mod tests {
     /// `path` (its module path under the crate), with `home` as its
     /// SAFEDEPS_HOME and `command` as its call's command, or `npm install
     /// mark-fixture` without one. Its working directory is the row's own
-    /// scratch directory, outside the worktree.
+    /// scratch directory, outside the worktree. Its argv[0] names this run,
+    /// so the start of a later run ends it if this run is killed while it
+    /// waits (`children::owned`).
     pub(super) fn child(path: &str, root: &Path, home: &Path, command: Option<&str>) -> Child {
-        let mut child = Command::new(std::env::current_exe().unwrap());
-        child.args(["--exact", path, "--nocapture", "--test-threads=1"])
-            .env_clear().env("PATH", "/usr/bin:/bin").env("SAFEDEPS_HOME", home).env(HOOK, root);
+        let mut child = super::children::owned(path, root);
+        child.env("SAFEDEPS_HOME", home).env(HOOK, root);
         if let Some(command) = command { child.env(COMMAND, command); }
-        child.current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
+        child.spawn().unwrap()
     }
 
     /// The post hook on `npm install mark-fixture`, in a child of this test
@@ -386,7 +387,8 @@ mod tests {
     }
 
     /// The post run of a row, killed and reaped on every way out of the row,
-    /// a panic included.
+    /// a panic included. A SIGKILL of the row runs no way out of it, and the
+    /// start of the next run ends what it left (`children`).
     pub(super) struct Reaped(pub(super) Option<Child>);
     impl Drop for Reaped {
         fn drop(&mut self) {
@@ -545,3 +547,5 @@ mod tests {
 
 #[cfg(test)]
 mod unfinished_tests;
+#[cfg(test)]
+mod children;

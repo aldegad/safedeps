@@ -19,9 +19,9 @@ const MODULE: &str = "post::run::unfinished_tests";
 /// A row's own root: `home`, the SAFEDEPS_HOME of its runs, with `judging/`
 /// made, and `project`, whose package-lock.json cannot be read. It is removed
 /// on every way out of the row.
-struct Root { root: PathBuf, home: PathBuf }
+pub(super) struct Root { pub(super) root: PathBuf, pub(super) home: PathBuf }
 impl Root {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = crate::os::scratch_dir("safedeps-mark-left").unwrap();
         let home = root.join("home");
         fs::create_dir_all(home.join("judging")).unwrap();
