@@ -577,7 +577,7 @@ row_status_core_gone() {
   out=$(HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" status 2> "${tmp_root}/last.err") || rc=$?
   [[ "${rc}" == 1 && -z "${out}" ]] || no "status without its source core: exit ${rc}, stdout ${out}"
   grep -qF 'core-missing: ' "${tmp_root}/last.err" || no "status did not name its missing core"
-  grep -qF "${co}/${CORE}" "${tmp_root}/last.err" || no "status did not name the source core path"
+  grep -qF "$(cd -P "${co}" && pwd)/${CORE}" "${tmp_root}/last.err" || no "status did not name the source core path"
   info=$(runtime_info "${h}/.safedeps/agent")
   jq -e --arg core "${CORE}" '.stale == null and .source_digest_now == null
       and (.source_unreadable | .step == "find" and .exit > 0 and any(.said[]; contains($core)))' <<< "${info}" > /dev/null \
