@@ -472,6 +472,74 @@ fn a_mark_no_run_can_claim_is_reported_once_and_removed_once_one_can() {
     assert!(names(&root.judging()).is_empty(), "{:?}", names(&root.judging()));
 }
 
+/// The record that a NOT JUDGED line for a file was written, as it is in the
+/// file.
+const SAID: &[u8] = b"{\"said_at\":";
+
+/// Two runs that read one mark no run can claim, at the same time, say it
+/// once. Here advisory.log is a FIFO no one reads yet, so a run that writes
+/// the line waits there, before it adds to the mark the record that it was
+/// said, and the other run comes to the mark meanwhile. That run ends by
+/// itself, which it cannot do after a write to that log: it wrote no line. Once
+/// the log is read, there is one line, and the mark holds one record that it
+/// was said.
+///
+/// Where both runs read the mark before either adds the record, both say it,
+/// and the mark holds two records. Where one run does not end while the other
+/// waits on the log, the condition of this row was not met, and the row says
+/// so.
+#[test]
+fn two_runs_that_read_a_mark_no_run_can_claim_at_once_say_it_once() {
+    hook_child();
+    const TEST: &str = "two_runs_that_read_a_mark_no_run_can_claim_at_once_say_it_once";
+    let root = Root::new();
+    let (pid, start) = me();
+    let mark = plant(&root.home, pid, start + 1);
+    let fifo = root.home.join("advisory.log");
+    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    mode(&root.judging(), 0o500);
+    let path = format!("{MODULE}::{TEST}");
+    let mut runs: Vec<Reaped> = (0..2).map(|_| Reaped(Some(child(&path, &root.root, &root.home, Some("true"))))).collect();
+    let until = Instant::now() + BOUND;
+    let mut alone = false;
+    while !alone && Instant::now() < until {
+        alone = runs.iter_mut().any(|run| run.ended());
+        if !alone { std::thread::sleep(Duration::from_millis(20)); }
+    }
+    let written = read_fifo_until(&fifo, || runs.iter_mut().all(|run| run.ended()));
+    for run in &mut runs { ran_quietly(&run.0.take().unwrap().wait_with_output().unwrap()); }
+    fs::remove_file(&fifo).unwrap();
+    fs::write(&fifo, &written).unwrap();
+    let records = fs::read(&mark).unwrap().windows(SAID.len()).filter(|w| *w == SAID).count();
+    assert_eq!(not_judged(&root.home), vec![planted(&mark, start + 1, &reused(pid, start), &unclaimed(&mark))],
+        "said once; the mark holds {records} records that it was said\n{}", log(&root.home));
+    assert_eq!(records, 1, "one record that it was said");
+    assert!(alone, "one run ended by itself within {BOUND:?} while the other waited on the log");
+    assert_eq!(names(&root.judging()), vec![name(&mark)], "the mark stays");
+}
+
+/// A mark no run can lock is said by each run that reads it, and its line
+/// says that this run could not lock it, so another run may say it too. Here
+/// the mark is one no run can open to read, in a `judging/` that takes no
+/// change, so no run can claim it either.
+#[test]
+fn a_mark_no_run_can_lock_is_said_by_each_run_and_its_line_says_so() {
+    hook_child();
+    const TEST: &str = "a_mark_no_run_can_lock_is_said_by_each_run_and_its_line_says_so";
+    let root = Root::new();
+    let (pid, start) = me();
+    let mark = plant(&root.home, pid, start + 1);
+    mode(&mark, 0o200);
+    mode(&root.judging(), 0o500);
+    next_run(TEST, &root, &root.home);
+    next_run(TEST, &root, &root.home);
+    let unread = cat(&[b"the read of ", sh::bytes(&mark), b" returned OS error 13"]);
+    let unlocked = cat(&[&unclaimed(&mark), b" It could not lock it either: ", &unread, b", so another run may say it too."]);
+    let line = unnamed(&mark, &reused(pid, start), &unlocked, &cat(&[b"could not be read: ", &unread]));
+    assert_eq!(not_judged(&root.home), vec![line.clone(), line], "{}", log(&root.home));
+    assert_eq!(names(&root.judging()), vec![name(&mark)], "the mark stays");
+}
+
 /// A claimed mark whose line advisory.log did not take stays claimed by the
 /// run that claimed it. Once that run is gone, a later run claims it again and
 /// says it, so a log that could not be written loses no mark.
