@@ -167,6 +167,8 @@ use std::{
     time::Duration,
 };
 
+mod migrate;
+
 pub const FILE_NAME: &str = "approvals.jsonl";
 /// What every record in the store starts with. advisory.log writes an
 /// approval with the same words, and a record that does not start with them
