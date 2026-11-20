@@ -95,12 +95,14 @@
 //! for at most LOCK_WAIT. One write and one sync keep the lock as short as a
 //! run can.
 //!
-//! A failed write's counts: inserted, not inserted, duplicates, unconfirmed
-//! and taken back add up to the approve lines. A finished run gives no count
-//! of lines not inserted, since there are none, and its other four add up to
-//! the approve lines. A run after a failed write inserts the lines that were
-//! not inserted and counts the inserted ones as duplicates. The exit is 1
-//! either way: a run that inserted some of its lines did not finish.
+//! The counts. Every report that gives the approve lines gives the same five
+//! counts, and they add up to the approve lines: inserted, not inserted,
+//! duplicates, unconfirmed and taken back. A finished run gives its lines not
+//! inserted too, 0, so a reader knows one sum, and a failed write brings it no
+//! field a finished run did not. A run after a failed write inserts the lines
+//! that were not inserted and counts the inserted ones as duplicates. The exit
+//! of a failed write is 1 whatever it inserted: a run that inserted some of
+//! its lines did not finish.
 //!
 //! Twice, and after a death. A run reads the lines an earlier run wrote as
 //! the store vouching for their hashes, so a second run inserts nothing and
@@ -570,8 +572,9 @@ fn named(p: &Path) -> jq::J {
 const UNKNOWN: &str = "unknown";
 
 /// A run's report as one JSON object. `failed` is None for a finished run, or
-/// the failure of its write and what the write returned. A failed write gives
-/// `not_inserted` beside `inserted`, and a count nobody made is `unknown`.
+/// the failure of its write and what the write returned. Every report gives
+/// `not_inserted` beside `inserted`, 0 for a finished run, and a count nobody
+/// made is `unknown`.
 fn report_json(store: &Path, r: &Report, failed: Option<(&Failed, &io::Error)>) -> jq::J {
     let total = |f: fn(&Counts) -> usize| count(r.inputs.iter().map(|(_, c)| f(c)).sum());
     let inputs = r.inputs.iter().map(|(p, c)| {
@@ -594,7 +597,6 @@ fn report_json(store: &Path, r: &Report, failed: Option<(&Failed, &io::Error)>) 
         ("approve_lines", count(r.approve)),
     ];
     match r.inserted() {
-        Some((n, _)) if failed.is_none() => fields.push(("inserted", count(n))),
         Some((n, left)) => fields.extend([("inserted", count(n)), ("not_inserted", count(left))]),
         None => fields.extend([("inserted", jq::s(UNKNOWN)), ("not_inserted", jq::s(UNKNOWN))]),
     }
@@ -637,9 +639,9 @@ fn failed_json(store: &Path, f: &Failed) -> jq::J {
     }
 }
 
-/// A run's report as the lines a person reads. `failed` is whether its write
-/// failed: then the counts give the lines not inserted too.
-fn report_text(store: &Path, r: &Report, failed: bool) -> Vec<u8> {
+/// A run's report as the lines a person reads. Its counts are the five the
+/// JSON gives, the lines not inserted among them, 0 for a finished run.
+fn report_text(store: &Path, r: &Report) -> Vec<u8> {
     let mut out = Vec::new();
     let mut say = |parts: &[&[u8]]| {
         for p in parts {
@@ -656,7 +658,6 @@ fn report_text(store: &Path, r: &Report, failed: bool) -> Vec<u8> {
         say(&[b"  read ", p.as_os_str().as_bytes(), counts.as_bytes()]);
     }
     let inserted = match r.inserted() {
-        Some((n, _)) if !failed => format!("{n} inserted"),
         Some((n, left)) => format!("{n} inserted, {left} not inserted"),
         None => format!("inserted {UNKNOWN}, not inserted {UNKNOWN}"),
     };
@@ -767,11 +768,11 @@ fn answer(store: &Path, json: bool, result: &Result<Report, Failed>) -> (i32, Ve
         o
     };
     match result {
-        Ok(r) => (0, if json { shown(report_json(store, r, None)) } else { report_text(store, r, false) }, Vec::new()),
+        Ok(r) => (0, if json { shown(report_json(store, r, None)) } else { report_text(store, r) }, Vec::new()),
         Err(f) => {
             let out = match (f, json) {
                 (_, true) => shown(failed_json(store, f)),
-                (Failed::Write(_, r) | Failed::Unsynced(_, r), false) => report_text(store, r, true),
+                (Failed::Write(_, r) | Failed::Unsynced(_, r), false) => report_text(store, r),
                 (_, false) => Vec::new(),
             };
             (1, out, failed_text(store, f))
