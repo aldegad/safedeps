@@ -72,7 +72,8 @@ enum Kernel { Nothing, Process { zombie: bool, start: Option<u64> }, Unread }
 /// is 3 on macOS and on Linux. Any other answer, a process of another user
 /// included, is not that fact.
 fn no_such(pid:i32)->bool{
-    unsafe{kill(pid,0)}!=0 && std::io::Error::last_os_error().raw_os_error()==Some(3)
+    let answer=unsafe{kill(pid,0)};
+    answer!=0 && std::io::Error::last_os_error().raw_os_error()==Some(3)
 }
 
 /// The start is p_starttime, in microseconds since the epoch (the field sysctl
