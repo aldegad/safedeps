@@ -1,8 +1,10 @@
 //! Where the hooks keep their state, and the advisory log.
 //!
-//! `advisory.log` is derived from `SAFEDEPS_HOME` and from nothing else:
-//! `re-check` reads it as the record of whether an approval ever happened, so
-//! the log and the ledger move together or not at all (AGENTS.md).
+//! `advisory.log` is derived from `SAFEDEPS_HOME` and from nothing else: it
+//! is where every bypass is recorded, so the log and the ledger move together
+//! or not at all (AGENTS.md). `re-check` does not read it for provenance: the
+//! record of whether an approval ever happened is the approvals store
+//! (approvals.rs).
 
 use crate::{ere::Regex, md5, os, outcome::Outcome};
 use std::io::Write;

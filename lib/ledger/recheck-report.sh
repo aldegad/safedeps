@@ -11,9 +11,10 @@
 # shellcheck disable=SC2034,SC2016  # jq text, read by the files that source this one
 SAFEDEPS_RECHECK_REPORT_JQ='
 def recheck_command: "re-check";
-def recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors):
+def recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors; $approvals_store):
   {command: recheck_command, checked: $checked, still_clean: $still_clean, newly_vulnerable: $newly_vulnerable,
-   kev_hit: $kev_hit, revoked: $revoked, suspected_forgery: $suspected_forgery, errors: $errors};
+   kev_hit: $kev_hit, revoked: $revoked, suspected_forgery: $suspected_forgery, errors: $errors,
+   approvals_store: $approvals_store};
 def recheck_is_report: .command == recheck_command;
 def recheck_checked: .checked // 0;
 def recheck_still_clean: .still_clean // 0;
@@ -24,4 +25,10 @@ def recheck_suspected_forgery: .suspected_forgery // [];
 # An entry the run could not read or revoke. A report with any is printed in
 # full, and the run then exits non-zero.
 def recheck_errors: .errors // [];
+# What the approvals store, the record of which approvals were made, said of
+# itself: `present`, whether it is there; `broken`, its lines that vouch for
+# nothing; `unmatched`, the hashes it vouches for that no ledger entry stands
+# for. A report from before the store has none, read as 0.
+def recheck_store_broken: .approvals_store.broken // 0;
+def recheck_store_unmatched: .approvals_store.unmatched // 0;
 '

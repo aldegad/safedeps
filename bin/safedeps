@@ -38,9 +38,9 @@ source "${SAFEDEPS_REPO_DIR}/lib/ledger/recheck-report.sh"
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR:-${SAFEDEPS_HOME}/approved-specs}"
 # Derived, never taken from the environment — see lib/providers/providers.sh for
-# why: this file is also the oracle `re-check` reads to tell a real approval
-# from a forged one. providers.sh is sourced above and captured the environment
-# value before overwriting it, so the notice below quotes what the user set.
+# why: this file is where every bypass is recorded. providers.sh is sourced
+# above and captured the environment value before overwriting it, so the notice
+# below quotes what the user set.
 SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_HOME}/advisory.log"
 
 # ---- output mode -------------------------------------------------------------
@@ -432,6 +432,13 @@ sf_core() {
   fi
 }
 
+# What `safedeps-core approvals index` prints, as jq: an object whose `present`
+# is a boolean, `hashes` an object keyed by hash and `broken` a number
+# (index_json in rust/src/approvals.rs). Anything else is no index, and no
+# reader takes it for a store that vouches for nothing.
+SF_APPROVALS_INDEX_JQ='def approvals_index_whole:
+  type == "object" and (.present | type) == "boolean" and (.hashes | type) == "object" and (.broken | type) == "number";'
+
 # Whether the approvals store vouches for HASH, from one read of the store:
 # 0 it does, 1 it does not, 2 it could not be read (no core, a store the core
 # could not read, or an answer that is no index).
@@ -440,8 +447,8 @@ sf_store_vouches() {
 
   sf_core || return 2
   index=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals index) || return 2
-  answer=$(jq -r --arg hash "${hash}" '
-    if (.present | type) == "boolean" and (.hashes | type) == "object" and (.broken | type) == "number"
+  answer=$(jq -r --arg hash "${hash}" "${SF_APPROVALS_INDEX_JQ}"'
+    if approvals_index_whole
     then (if .hashes[$hash] == true then "vouched" else "not vouched" end)
     else error("not an approvals index") end' <<< "${index}") || return 2
   case "${answer}" in
@@ -1425,41 +1432,48 @@ cmd_watch() {
 
 # ---- re-check ----------------------------------------------------------------
 
-# The approve lines of advisory.log, read once into an index the whole run looks
-# entries up in: {present, hashes:{"hash=<h>":true}, specs:{"<eco>\0<pkg>\0<ver>":true}}.
-# The rule is the one the per-entry scan had, and both properties it named
-# still hold: a token is compared whole (`hash=<h>` equals the token, never a
-# prefix of it), and nothing is escape-interpreted (jq -R reads the bytes as
-# written, and keys are compared as strings). A line vouches for an entry by
-# its hash token, or by an ecosystem, a package and a version token of the same
-# line. Read once, the log costs one grep a run, not one pass an entry.
+# The provenance of a re-check: one read of the approvals store, made by the
+# core (`safedeps-core approvals index`, rust/src/approvals.rs), into OUT:
+# {present, hashes:{"sha256:<hex>":true}, broken}. A store line vouches for an
+# entry by its hash alone, the hash recomputed from the entry's own fields: an
+# ecosystem, a package and a version would vouch for an entry of another
+# project context. advisory.log is not read. It is rotated and compacted, so
+# what it holds is no record of which approvals were made. A store that is not
+# there is an answer, `present: false`, and vouches for nothing.
+# Returns 0, or 1 with SF_RECHECK_FAILURE naming what could not be read:
+# core_missing (no core to read the store with; SF_CORE_MISSING says where it
+# was looked for), or approvals_store_unreadable (a store the core could not
+# read, or an answer that is no index). Neither is a store that vouches for
+# nothing, or for everything.
+SF_RECHECK_FAILURE=""
 sf_recheck_provenance_index() {
-  local out="$1" lines rc=0
+  local out="$1"
 
-  if [[ ! -f "${SAFEDEPS_ADVISORY_LOG}" ]]; then
-    printf '{"present":false,"hashes":{},"specs":{}}\n' > "${out}"
-    return 0
+  SF_RECHECK_FAILURE="core_missing"
+  sf_core || return 1
+  SF_RECHECK_FAILURE="approvals_store_unreadable"
+  SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals index > "${out}" || return 1
+  jq -se "${SF_APPROVALS_INDEX_JQ}"'length == 1 and (.[0] | approvals_index_whole)' "${out}" > /dev/null || return 1
+  SF_RECHECK_FAILURE=""
+}
+
+# A re-check that could not read the approvals store judged no entry, and says
+# which read failed: on stderr, as a fail-closed line in advisory.log, and in
+# --json as `{command, error}` with no report. Exit 4, as for a ledger that
+# could not be listed.
+sf_recheck_unproven() {
+  local failure="${SF_RECHECK_FAILURE}"
+
+  if [[ "${failure}" == core_missing ]]; then
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. re-check reads the approvals store with it, so no entry was judged."
+  else
+    failure="approvals_store_unreadable"
+    sf_eprintf "safedeps: approvals-store-unreadable: the approvals store in ${SAFEDEPS_HOME} could not be read, so no entry was judged."
   fi
-  lines=$(sf_mktemp_evidence) || return 1
-  LC_ALL=C grep -aF 'check approve' "${SAFEDEPS_ADVISORY_LOG}" > "${lines}" || rc=$?
-  if [[ "${rc}" -gt 1 ]]; then
-    rm -f "${lines}"
-    return 1
+  sf_advisory_log "re-check fail-closed ${failure//_/-}" || true
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    jq -nc --arg error "${failure}" '{command:"re-check", error:$error}'
   fi
-  rc=0
-  jq -R -s -c '
-    split("\n")
-    | map(select(contains("check approve")) | [splits("[ \t]+")] | map(select(length > 0)))
-    | {present: true,
-       hashes: ([.[][] | select(startswith("hash="))] | map({key: ., value: true}) | from_entries),
-       specs: ([.[]
-                | [.[] | select(startswith("ecosystem=")) | .[10:]] as $e
-                | [.[] | select(startswith("package=")) | .[8:]] as $p
-                | [.[] | select(startswith("version=")) | .[8:]] as $v
-                | $e[] as $ee | $p[] as $pp | $v[] as $vv | [$ee, $pp, $vv] | join("\u0000")]
-               | map({key: ., value: true}) | from_entries)}' "${lines}" > "${out}" || rc=1
-  rm -f "${lines}"
-  return "${rc}"
 }
 
 # The ledger stage of a re-check: every live ledger entry asked of the
@@ -1482,7 +1496,7 @@ sf_recheck_provenance_index() {
 # each of its entries; the counts stay per entry.
 SF_RECHECK_REPORT=""
 sf_recheck_stage() {
-  local work entries fields expected index groups f n=0 rc=0
+  local work entries fields expected index listed groups f n=0 rc=0
   local errors_arr='[]'
 
   SF_RECHECK_REPORT=""
@@ -1495,6 +1509,7 @@ sf_recheck_stage() {
   fields="${work}/fields.bin"
   expected="${work}/expected.jsonl"
   index="${work}/provenance.json"
+  listed="${work}/listed.txt"
   groups="${work}/groups.bin"
   : > "${entries}"
   : > "${expected}"
@@ -1530,26 +1545,48 @@ sf_recheck_stage() {
     printf '{"i":%s,"expected":"%s"}\n' "${i}" "${h}" >> "${expected}"
   done < "${fields}"
 
-  # 3. Provenance for all of them from one read of the log, and the entries
-  #    grouped by spec for the providers.
+  # 3. Provenance for all of them from one read of the approvals store, made
+  #    after the entries were read. A committed entry's store line is written
+  #    before the entry is put in place, so an entry read first is never one
+  #    whose line is still to come (rust/src/approvals.rs, "The readers"). A
+  #    store that could not be read ends the run (5, SF_RECHECK_FAILURE).
+  #    Then what the store says of itself: lines that vouch for nothing
+  #    (broken), and hashes it vouches for where the listing has no file at
+  #    the hash's path (unmatched: an approval whose commit did not finish, or
+  #    one committed after the listing). A revoked entry still stands at its
+  #    path. And the entries grouped by spec for the providers.
   if ! sf_recheck_provenance_index "${index}"; then
+    rm -rf "${work}"
+    return 5
+  fi
+  local base ledger_name_re='^sha256-[0-9a-f]{64}\.json$'
+  if ! : > "${listed}"; then
     rm -rf "${work}"
     return 1
   fi
-  local suspected_forgery_arr checked
+  for f in "${SF_LEDGER_FILES[@]+${SF_LEDGER_FILES[@]}}"; do
+    base="${f##*/}"
+    if [[ "${base}" =~ ${ledger_name_re} ]] && ! printf '%s\n' "${base}" >> "${listed}"; then
+      rm -rf "${work}"
+      return 1
+    fi
+  done
+  local suspected_forgery_arr checked store_json store_counts
   if ! suspected_forgery_arr=$(jq -s -c --slurpfile expected "${expected}" --slurpfile index "${index}" '
         ($expected | map({key: (.i | tostring), value: .expected}) | from_entries) as $want
-        | ($index[0]) as $log
+        | ($index[0].hashes) as $vouched
         | [.[] | select(.revoked_at == "")
-           | . as $e
            | (if .malformed then "malformed_spec"
               elif .hash != $want[(.i | tostring)] then "hash_spec_mismatch"
-              elif ($log.present | not) then "missing_advisory_log_approval"
-              elif $log.hashes["hash=" + $want[(.i | tostring)]] == true then null
-              elif $log.specs[[.ecosystem, .package, .version] | join("\u0000")] == true then null
-              else "missing_advisory_log_approval" end) as $reason
+              elif $vouched[$want[(.i | tostring)]] == true then null
+              else "unvouched" end) as $reason
            | select($reason != null)
            | {ecosystem, package, version, hash, reason: $reason}]' "${entries}") \
+    || ! store_json=$(jq -c --rawfile listed "${listed}" '
+        ($listed | split("\n") | map(select(length > 0) | {key: ., value: true}) | from_entries) as $files
+        | {present, broken,
+           unmatched: ([.hashes | keys[] | select($files["sha256-" + ltrimstr("sha256:") + ".json"] != true)] | length)}' "${index}") \
+    || ! store_counts=$(jq -r '"\(.present) \(.broken) \(.unmatched)"' <<< "${store_json}") \
     || ! checked=$(jq -s '[.[] | select(.revoked_at == "")] | length' "${entries}") \
     || ! jq -s -j '[.[] | select(.revoked_at == "")]
         | group_by([.ecosystem, .package, .version])[]
@@ -1558,7 +1595,22 @@ sf_recheck_stage() {
     rm -rf "${work}"
     return 1
   fi
-  local fg_count
+  local fg_count store_present store_broken store_unmatched
+  read -r store_present store_broken store_unmatched <<< "${store_counts}"
+  if [[ "${store_present}" != true && "${checked}" -gt 0 ]]; then
+    sf_warn "  no approvals store in ${SAFEDEPS_HOME}: it vouches for no ledger entry"
+  fi
+  if [[ "${store_broken}" -gt 0 ]]; then
+    if [[ "${store_broken}" -eq 1 ]]; then
+      sf_warn "  1 line of the approvals store vouches for nothing (broken)"
+    else
+      sf_warn "  ${store_broken} lines of the approvals store vouch for nothing (broken)"
+    fi
+    sf_advisory_log "re-check approvals-store broken-lines=${store_broken}"
+  fi
+  if [[ "${store_unmatched}" -gt 0 ]]; then
+    sf_info "  ${store_unmatched} approvals in the store have no ledger entry (unmatched)"
+  fi
   fg_count=$(jq 'length' <<< "${suspected_forgery_arr}")
   if [[ "${fg_count}" -gt 0 ]]; then
     sf_warn "  ${fg_count} ledger entries have no provenance — flagged as suspected forgery (not revoked)"
@@ -1622,7 +1674,8 @@ sf_recheck_stage() {
     --argjson errors "${errors_arr}" \
     --argjson checked "${checked}" \
     --argjson still_clean "${still_clean}" \
-    "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors)') || return 1
+    --argjson approvals_store "${store_json}" \
+    "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors; $approvals_store)') || return 1
   [[ "$(jq 'length' <<< "${errors_arr}")" -eq 0 ]] || rc=1
   return "${rc}"
 }
@@ -1650,6 +1703,10 @@ cmd_recheck() {
   sf_recheck_stage || rc=$?
   if [[ "${rc}" -eq 4 ]]; then
     sf_ledger_unlisted "re-check"
+    return 4
+  fi
+  if [[ "${rc}" -eq 5 ]]; then
+    sf_recheck_unproven
     return 4
   fi
   if [[ -z "${SF_RECHECK_REPORT}" ]]; then
@@ -1957,7 +2014,7 @@ main() {
   # Said here rather than from providers, because the provider query paths run
   # with their stderr redirected and the notice would be swallowed there.
   if [[ -n "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED:-}" ]]; then
-    printf 'safedeps: SAFEDEPS_ADVISORY_LOG=%s is ignored. The advisory log is where every bypass is recorded AND the oracle re-check uses to tell a real approval from a forged one, so it cannot be moved on its own — a caller that moves it moves the evidence out from under the check. Move SAFEDEPS_HOME to relocate the state root.\n' \
+    printf 'safedeps: SAFEDEPS_ADVISORY_LOG=%s is ignored. The advisory log is where every bypass is recorded, so it cannot be moved on its own — a caller that moves it moves that record out from under whoever reads it. Move SAFEDEPS_HOME to relocate the state root.\n' \
       "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" >&2
   fi
 
