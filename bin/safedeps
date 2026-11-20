@@ -369,23 +369,28 @@ sf_check_unavailable() {
 # The same for an approval that could not be written (sf_check_commit names
 # why): every approval a report states is one this check committed, the hook
 # will find, and the approvals store vouches for. A report never states one
-# another check made. The caller removes its files and returns 4.
+# another check made. An approval in doubt is neither stated nor said to be
+# absent. The caller removes its files and returns 4.
 sf_check_not_written() {
   local ecosystem="$1" package="$2" range="$3" version="$4"
-  local failure="${SF_CHECK_COMMIT_ERROR:-ledger_write_failed}" kind why
+  local failure="${SF_CHECK_COMMIT_ERROR:-ledger_write_failed}" kind why tail=" — not approved"
 
   case "${failure}" in
     core_missing) kind=core-missing why="an approval is written with the safedeps-core binary, which is missing" ;;
     approvals_store_failed) kind=approvals-store why="the approvals store did not take the approval" ;;
-    approvals_store_in_doubt) kind=approvals-store-in-doubt why="whether the approvals store took the approval is not known" ;;
+    approvals_store_in_doubt)
+      kind=approvals-store-in-doubt
+      why="the approvals store may hold its line, and nothing confirms that its ledger entry stands"
+      tail=" — in doubt"
+      ;;
     *) kind=ledger-write why="the ledger entry or its advisory.log line could not be written" ;;
   esac
-  sf_err "${package}@${version} cleared, but ${why} — not approved"
+  sf_err "${package}@${version} cleared, but ${why}${tail}"
   sf_advisory_log "check fail-closed ${kind} ecosystem=${ecosystem} package=${package} version=${version}"
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
     sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${package}" "${range}" '{}' '{resolved_version:$version}' \
-      '{approved:false, error:$error} + (if $left == "1" then {ledger_entry_left:true} else {} end)' \
-      -n --arg version "${version}" --arg error "${failure}" --arg left "${SF_CHECK_COMMIT_LEFT}"
+      '{approved:false, error:$error}' \
+      -n --arg version "${version}" --arg error "${failure}"
   fi
 }
 
@@ -451,40 +456,39 @@ sf_store_vouches() {
 # reads, and the line in the approvals store is the record re-check and the
 # cache lookup read. This CLI makes the entry and validates it in a staged file
 # beside the entry's path (safedeps_ledger_stage). The core commits it
-# (`safedeps-core approvals commit`, rust/src/approvals.rs): under the store
-# lock it renames the staged file into place, writes the approve line, then
-# the store line, which is the commit point, and takes the entry back when one
-# of them fails. The lock is held for all of it, take-back included, so no
-# commit, settle or revoke of an entry overlaps another. A take-back puts the
-# path back as the commit found it: the commit's entry goes, and the entry that
-# stood there comes back unless the store says it is no approval. So a failed
-# check never removes or rewrites what another check approved, and leaves no
-# entry of its own. The binary is found before anything is staged, so a
-# missing one leaves nothing (core-missing). The caller makes the report
-# first, calls this, and only prints after it.
+# (`safedeps-core approvals commit`, rust/src/approvals.rs), all under the
+# store lock and in this order: it removes an entry at the path that the store
+# does not vouch for, writes the store line and syncs it, writes the approve
+# line, then renames the staged file into place. The rename is the commit
+# point, and the first step that fails stops the commit. So a failed check
+# leaves no entry of its own, and at most a store line with no entry. The core
+# never removes the staged file: this function does. The binary is found
+# before anything is staged, so a missing one leaves nothing (core-missing).
+# The caller makes the report first, calls this, and only prints after it.
 #
 # The commit answers `approved`, or `not-approved <failure> <entry>`: the
-# failure for the report, and what is at the entry's path. A commit that
-# answered neither ended before it answered. Where its staged file is still
-# here it renamed nothing, so nothing was written. Otherwise it is settled
-# (`safedeps-core approvals settle`): under the lock, the commit's take-back
-# where it left its second name beside the entry, and advisory.log is told
-# how the commit ended. What the commit cannot rule out has a name, on stderr
-# and in advisory.log: unsynced, in-doubt, undo-failed (rust/src/approvals.rs).
-# Rotation of advisory.log is not work for the store lock, so it runs before
-# the commit.
-# SF_CHECK_COMMIT_ERROR names a failure for the report. SF_CHECK_COMMIT_LEFT is
-# 1 when an entry that was to go stayed (undo-failed). A report names no other
+# failure for the report, and whether the commit removed an entry the store
+# did not vouch for. What the core cannot rule out it names on stderr and in
+# advisory.log: unsynced (rust/src/approvals.rs). A commit that answered
+# neither ended before it answered. MINE, a second name for the staged file
+# made before the commit starts, says where the commit left this check's file:
+#   - at the staged path: the commit put no entry in place, and the store may
+#     hold its line, so the check is in doubt;
+#   - at the entry's path: the commit renamed it into place, its commit point,
+#     so the approval stands;
+#   - at neither: nothing says more, so the check is in doubt and says only
+#     that.
+# MINE is removed on every path. Rotation of advisory.log is not work for the
+# store lock, so it runs before the commit.
+# SF_CHECK_COMMIT_ERROR names a failure for the report. A report names no
 # entry: whatever stands at the path after a failed check is not its own.
 #   sf_check_commit HASH ENTRY RECORD
 SF_CHECK_COMMIT_ERROR=""
-SF_CHECK_COMMIT_LEFT=0
 sf_check_commit() {
   local hash="$1" entry="$2" record="$3"
-  local ledger_file staged answer rc=0 ended
+  local ledger_file staged mine="" answer rc=0 ended
 
   SF_CHECK_COMMIT_ERROR="ledger_write_failed"
-  SF_CHECK_COMMIT_LEFT=0
   if ! sf_core; then
     SF_CHECK_COMMIT_ERROR="core_missing"
     sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. An approval is written with it, so nothing is approved."
@@ -492,39 +496,52 @@ sf_check_commit() {
   fi
   ledger_file=$(safedeps_ledger_path_for_hash "${hash}") || return 1
   staged=$(safedeps_ledger_stage "${ledger_file}" <<< "${entry}") || return 1
-  safedeps_advisory_log_rotate_once
-  answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals commit "${hash}" "${staged}" "${ledger_file}" <<< "${record}") || rc=$?
-  [[ "${rc}" -ne 0 || "${answer}" != approved ]] || return 0
-  [[ "${rc}" -eq 1 ]] && sf_check_commit_answer "${answer}" && { rm -f -- "${staged}" || true; return 1; }
-  if [[ "${rc}" -gt 128 ]]; then ended="signal-$((rc - 128))"; else ended="exit-${rc}"; fi
-  # The rename is the commit's first change and it is atomic, so a staged file
-  # still here is a commit that put nothing in place and wrote nothing.
-  if [[ -e "${staged}" || -L "${staged}" ]]; then
-    rm -f -- "${staged}" || true
-    SF_CHECK_COMMIT_ERROR="approvals_store_failed"
-    sf_eprintf "safedeps: not committed: the commit of ${hash} ended with ${ended} before it put its entry in place, so nothing was written."
+  if ! mine=$(mktemp "${ledger_file%/*}/.${ledger_file##*/}.mine.XXXXXX") || ! ln -f -- "${staged}" "${mine}" 2>/dev/null; then
+    rm -f -- "${staged}" ${mine:+"${mine}"} || true
+    sf_eprintf "safedeps: not committed: the staged entry of ${hash} could not be given a second name, so the commit was not started."
     return 1
   fi
-  rc=0
-  answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals settle "${hash}" "${ledger_file}" "${ended}") || rc=$?
+  safedeps_advisory_log_rotate_once
+  answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals commit "${hash}" "${staged}" "${ledger_file}" <<< "${record}") || rc=$?
+  if [[ "${rc}" -eq 0 && "${answer}" == approved ]]; then
+    rm -f -- "${mine}" || true
+    return 0
+  fi
   if [[ "${rc}" -eq 1 ]] && sf_check_commit_answer "${answer}"; then
-    # A settle that could not take the lock took nothing back: what the dead
-    # commit put in place may still be there.
-    [[ "${answer}" == *" unsettled" ]] || return 1
-  else
+    sf_check_commit_drop "${staged}" "${mine}"
+    return 1
+  fi
+  if [[ "${rc}" -gt 128 ]]; then ended="signal-$((rc - 128))"; else ended="exit-${rc}"; fi
+  if [[ "${staged}" -ef "${mine}" ]]; then
+    sf_check_commit_drop "${staged}" "${mine}"
     SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
-    sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended with ${ended}, and it could not be settled."
+    sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended with ${ended} before it answered. Its staged entry is still there, so it put no entry in place. The approvals store may hold its line, and advisory.log its approve line."
+    return 1
   fi
-  if [[ -e "${ledger_file}" || -L "${ledger_file}" ]]; then
-    SF_CHECK_COMMIT_LEFT=1
-    sf_eprintf "safedeps: undo-failed: the ledger entry ${ledger_file} could not be taken back. It stays where the hook reads it, and whether an approval stands behind it is not known."
-    sf_advisory_log "check approve-undo-failed hash=${hash} entry=${ledger_file}" || true
+  if [[ "${ledger_file}" -ef "${mine}" ]]; then
+    rm -f -- "${mine}" || true
+    sf_eprintf "safedeps: the commit of ${hash} ended with ${ended} before it answered. Its entry is at the ledger entry's path, so the approval stands."
+    return 0
   fi
+  rm -f -- "${mine}" || true
+  SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
+  sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended with ${ended} before it answered. This check's file is neither at the staged path nor at the entry's path."
   return 1
 }
 
-# A commit's or a settle's `not-approved <failure> <entry>`, read into
-# SF_CHECK_COMMIT_*. Anything else is no answer, and nothing is read.
+# A commit's files once it answered: the staged file, where it is still this
+# check's (MINE), then MINE.
+sf_check_commit_drop() {
+  local staged="$1" mine="$2"
+
+  if [[ "${staged}" -ef "${mine}" ]]; then
+    rm -f -- "${staged}" || true
+  fi
+  rm -f -- "${mine}" || true
+}
+
+# A commit's `not-approved <failure> <entry>`, read into SF_CHECK_COMMIT_ERROR.
+# Anything else is no answer, and nothing is read.
 sf_check_commit_answer() {
   local failure entry
 
@@ -537,8 +554,7 @@ sf_check_commit_answer() {
     *) return 1 ;;
   esac
   case "${entry}" in
-    untouched|removed|restored|unsettled) ;;
-    left) SF_CHECK_COMMIT_LEFT=1 ;;
+    untouched|removed) ;;
     *) return 1 ;;
   esac
   SF_CHECK_COMMIT_ERROR="${failure}"
@@ -962,41 +978,51 @@ cmd_check() {
     fi
   fi
   # A cache hit is an approval the approvals store vouches for: a ledger entry
-  # whose hash matches its fields is not enough on its own. An entry the store
-  # does not vouch for, or a store that cannot be read, is checked again from
-  # the start, and a check that clears it writes a new approval.
-  if [[ "${ledger_context_status}" -ne 2 ]] && ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}" 2>/dev/null); then
-    if jq -e '.approved == true' <<< "${ledger_check}" >/dev/null 2>&1 && { [[ "${ecosystem}" != "npm" ]] || sf_ledger_hit_has_npm_closure "${ledger_check}"; }; then
-      local hash approved_at expires_at project_context resolved_closure vouched=0 unvouched
-      hash=$(jq -r '.hash' <<< "${ledger_check}")
-      sf_store_vouches "${hash}" || vouched=$?
+  # whose hash matches its fields is not enough on its own. The store is read
+  # first and the entry after. A commit writes its store line only after it
+  # removed an entry the store did not vouch for, so an entry read after the
+  # store vouched for its hash is one the store vouched for then, or the
+  # commit's own. In the other order the lookup could take for a hit an entry
+  # a commit then removes, matched with the line of a commit that fails. Where
+  # no file stands at the entry's path there is nothing to look up, and the
+  # store is not read. An entry the store does not vouch for, or a store that
+  # cannot be read, is checked again from the start, and a check that clears
+  # it writes a new approval.
+  local hash="" vouched=0 unvouched approved_at expires_at project_context resolved_closure
+  if [[ "${ledger_context_status}" -ne 2 ]] \
+    && hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}") \
+    && [[ -f "$(safedeps_ledger_path_for_hash "${hash}")" ]]; then
+    sf_store_vouches "${hash}" || vouched=$?
+    if ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}" 2>/dev/null) \
+      && [[ "$(jq -r '.hash' <<< "${ledger_check}" 2>/dev/null)" == "${hash}" ]] \
+      && jq -e '.approved == true' <<< "${ledger_check}" >/dev/null 2>&1 \
+      && { [[ "${ecosystem}" != "npm" ]] || sf_ledger_hit_has_npm_closure "${ledger_check}"; }; then
       if [[ "${vouched}" -ne 0 ]]; then
         unvouched="not-vouched"
         [[ "${vouched}" -eq 1 ]] || unvouched="unreadable"
         sf_warn "${pkg}@${version} is in the ledger, but the approvals store does not vouch for it (${unvouched}) — checking it again"
         sf_advisory_log "check ledger-unvouched ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash} store=${unvouched}"
+      else
+        approved_at=$(jq -r '.spec.approved_at // "n/a"' <<< "${ledger_check}")
+        expires_at=$(jq -r '.spec.expires_at // "n/a"' <<< "${ledger_check}")
+        project_context=$(jq -c '.spec.project_context // null' <<< "${ledger_check}")
+        resolved_closure=$(jq -c '.spec.evidence.closure // []' <<< "${ledger_check}")
+        sf_ok "${pkg}@${version} already approved (until ${expires_at})"
+        sf_info "ledger: ${hash}"
+        sf_advisory_log "check approve(cache) ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash}"
+        if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+          sf_check_json "${SAFEDEPS_CHECK_ALREADY_APPROVED}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
+            '{approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at, closure_source:$project_context, resolved_closure:$resolved_closure, install_hint:install_hint($version)}' \
+            -n --arg version "${version}" \
+            --arg hash "${hash}" \
+            --arg approved_at "${approved_at}" \
+            --arg expires_at "${expires_at}" \
+            --argjson project_context "${project_context}" \
+            --argjson resolved_closure "${resolved_closure}"
+        fi
+        rm -f "${ledger_context_file}" || true
+        return 0
       fi
-    fi
-    if [[ "${vouched:-1}" -eq 0 ]]; then
-      approved_at=$(jq -r '.spec.approved_at // "n/a"' <<< "${ledger_check}")
-      expires_at=$(jq -r '.spec.expires_at // "n/a"' <<< "${ledger_check}")
-      project_context=$(jq -c '.spec.project_context // null' <<< "${ledger_check}")
-      resolved_closure=$(jq -c '.spec.evidence.closure // []' <<< "${ledger_check}")
-      sf_ok "${pkg}@${version} already approved (until ${expires_at})"
-      sf_info "ledger: ${hash}"
-      sf_advisory_log "check approve(cache) ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash}"
-      if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-        sf_check_json "${SAFEDEPS_CHECK_ALREADY_APPROVED}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
-          '{approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at, closure_source:$project_context, resolved_closure:$resolved_closure, install_hint:install_hint($version)}' \
-          -n --arg version "${version}" \
-          --arg hash "${hash}" \
-          --arg approved_at "${approved_at}" \
-          --arg expires_at "${expires_at}" \
-          --argjson project_context "${project_context}" \
-          --argjson resolved_closure "${resolved_closure}"
-      fi
-      rm -f "${ledger_context_file}" || true
-      return 0
     fi
   fi
   rm -f "${ledger_context_file}"
@@ -1230,16 +1256,16 @@ cmd_ledger() {
 # ---- revoke ------------------------------------------------------------------
 
 # A revoke rewrites a ledger entry, so it runs under the approvals store lock,
-# as every other write of an entry does: a commit and a settle. The ledger's
-# format keeps one writer, this CLI, so the CLI makes the revoked entry and the
-# core puts it in place, as with a commit. The CLI takes a second name for the
-# entry at the path and reads that file once: what it validates is what it
-# revokes. It stages the revoked entry beside the path. The core
-# (`safedeps-core approvals revoke`, rust/src/approvals.rs) takes the lock and
-# renames the staged entry into place only where the entry at the path is
-# still the file the CLI read. Otherwise a commit or a settle of
-# the same entry ran between the read and the lock: the core answers
-# `changed`, and the revoke reads the entry again. An entry that changes three
+# as a commit does. The ledger's format keeps one writer, this CLI, so the CLI
+# makes the revoked entry and the core puts it in place, as with a commit. The
+# CLI takes a second name for the entry at the path and reads that file once:
+# what it validates is what it revokes. It stages the revoked entry beside the
+# path. The core (`safedeps-core approvals revoke`, rust/src/approvals.rs)
+# takes the lock and renames the staged entry into place only where the entry
+# at the path is still the file the CLI read. Otherwise a commit replaced or
+# removed the entry between the read and the lock: the core answers
+# `changed`, and the revoke reads the entry again. Where no entry stands then,
+# nothing is revoked, and the revoke says so. An entry that changes three
 # times running is an error, and nothing is revoked. Prints the revoked entry.
 #   sf_ledger_revoke ECOSYSTEM PACKAGE VERSION REASON CONTEXT_HASH
 SF_REVOKE_READS=3
@@ -1254,7 +1280,10 @@ sf_ledger_revoke() {
   ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package}" "${version}" "${context_hash}") || return 1
   hash=$(safedeps_ledger_hash "${ecosystem}" "${package}" "${version}" "${context_hash}") || return 1
   for (( attempt = 1; attempt <= SF_REVOKE_READS; attempt++ )); do
-    [[ -f "${ledger_file}" ]] || return 1
+    if [[ ! -f "${ledger_file}" ]]; then
+      sf_eprintf "safedeps: no ledger entry stands at ${ledger_file} now, so nothing was revoked."
+      return 1
+    fi
     seen=$(mktemp "${ledger_file%/*}/.${ledger_file##*/}.seen.XXXXXX") || return 1
     if ! ln -f "${ledger_file}" "${seen}" 2>/dev/null \
       || ! valid=$(safedeps_ledger_valid_entry "${seen}") \
@@ -1887,7 +1916,8 @@ EXIT CODES
 
 ENV
   SAFEDEPS_HOME           default ~/.safedeps
-  SAFEDEPS_LEDGER_DIR     default \$SAFEDEPS_HOME/approved-specs
+  SAFEDEPS_LEDGER_DIR     default \$SAFEDEPS_HOME/approved-specs. One ledger
+                          directory belongs to one SAFEDEPS_HOME.
   GITHUB_TOKEN            optional, used for GHSA enrichment
 EOF
       ;;

@@ -2500,10 +2500,10 @@ record_refused() {
   jq -e '.approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
   [[ -z "$(find "${home}/approved-specs" -name '*.json' -type f 2>/dev/null)" ]] || no "a ledger entry stands with no record"
 }
-row "npm: an approval the record could not take is taken back" record_refused npm fixture-clean@1.0.0
-row "non-npm: an approval the record could not take is taken back" record_refused pypi fixture-clean@1.0.0
-row "npm patched: an approval the record could not take is taken back" record_refused npm fixture-vuln@1.0.0
-row "non-npm patched: an approval the record could not take is taken back" record_refused pypi fixture-vuln@1.0.0
+row "npm: an approval the record could not take puts no entry in place" record_refused npm fixture-clean@1.0.0
+row "non-npm: an approval the record could not take puts no entry in place" record_refused pypi fixture-clean@1.0.0
+row "npm patched: an approval the record could not take puts no entry in place" record_refused npm fixture-vuln@1.0.0
+row "non-npm patched: an approval the record could not take puts no entry in place" record_refused pypi fixture-vuln@1.0.0
 
 # What the report is read from.
 row "npm: a vulnerable count jq printed and failed on is no count" fails_as unavailable npm fixture-clean@1.0.0 'select(.status == status_vulnerable)] | length'

@@ -65,13 +65,12 @@
 //!
 //! The CLI's one entry, which is on no hook's path either:
 //!
-//!   safedeps-core approvals commit <hash> <staged> <entry> | settle <hash> <entry> <exit-N|signal-N> | revoke <hash> <staged> <entry> <seen> | index
+//!   safedeps-core approvals commit <hash> <staged> <entry> | revoke <hash> <staged> <entry> <seen> | index
 //!       The approvals store `re-check` reads for provenance
 //!       (approvals.rs): `commit` writes one approval's three records under
 //!       the store lock, its record on stdin, and is the one command that
-//!       writes a store line; `settle` takes back a commit that ended before
-//!       it answered; `revoke` puts a revoked entry in place under the same
-//!       lock; `index` prints the hashes the store vouches for.
+//!       writes a store line; `revoke` puts a revoked entry in place under the
+//!       same lock; `index` prints the hashes the store vouches for.
 //!
 //! `pre-probe`, `post-probe`, `ask-probe`, `ledger`, `state-rotate` and
 //! `json-stream` are measurement entries: each takes data on stdin and calls
@@ -540,7 +539,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals commit <hash> <staged> <entry> | approvals settle <hash> <entry> <exit-N|signal-N> | approvals revoke <hash> <staged> <entry> <seen> | approvals index | kat [<path>] | stamp [--check] | version");
+            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals commit <hash> <staged> <entry> | approvals revoke <hash> <staged> <entry> <seen> | approvals index | kat [<path>] | stamp [--check] | version");
             2
         }
     };
