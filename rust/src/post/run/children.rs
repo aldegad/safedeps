@@ -88,6 +88,9 @@ fn sweep() -> Swept {
         }
         swept.ended.extend(found);
     }
+    for (pid, start, fact) in &swept.ended {
+        eprintln!("# note - this run's start ended pid {pid} (start {start}), a marked process whose run is gone: {}", String::from_utf8_lossy(fact))
+    }
     for why in &swept.left { eprintln!("# note - {}", String::from_utf8_lossy(why)) }
     swept
 }
