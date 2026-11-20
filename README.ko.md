@@ -519,6 +519,8 @@ agent의 wrapper는 `safedeps --json watch scan`을 실행합니다. 한 번의 
 2. 등록된 프로젝트 root 목록을 갱신하고, 읽을 수 있는 각 root 아래의 lockfile을 판정합니다.
 3. macOS 시스템 경로와 SDKMAN 아래에 있는 host JDK의 업데이트 상태를 보고합니다. 이것은 상태이지 advisory 판정이 아닙니다.
 
+ledger re-check는 실행할 때마다 모든 ledger 항목을 OSV에 live로 다시 묻습니다. 답은 실행 사이에 남기지 않습니다. 그래서 전체 scan의 시간은 ledger 항목 수에 비례하고, ledger가 크면 몇 시간이 걸릴 수 있습니다. GHSA는 보강이지 판정이 아닙니다. `GITHUB_TOKEN`이 없으면 GitHub의 비인증 요청 한도에 걸려 실행 도중부터 GHSA 교차 확인을 건너뜁니다. 건너뛴 요청마다 `advisory.log`에 WARN 줄이 남고, 판정은 여전히 OSV가 합니다. `GITHUB_TOKEN`을 설정하면 그 한도가 올라갑니다. scan은 실행 내내 watch lock을 쥐므로, 그동안 수동 `safedeps re-check`는 `75`(busy)로 끝납니다.
+
 scan은 root 아래의 어떤 것도 열기 전에 모든 root를 mount table과 exclude prefix에 대조해 분류합니다. 네트워크 mount와 exclude된 prefix는 절대 읽지 않습니다. scan은 이들을 세고 미측정으로 보고합니다. `Cargo.lock`이나 `go.sum`처럼 아직 resolver가 없는 lockfile 종류도 미측정 행이 됩니다. 이것은 clean이 아닙니다.
 
 `clean` 상태는 없습니다. finding은 증거가 있을 때만 닫힙니다. 다시 측정한 lockfile이 영향 범위 밖의 버전을 담고 있거나, OSV가 advisory를 철회했거나, `safedeps watch retire`로 root가 완전히 없어졌다고 기록한 경우입니다. 그 밖의 어떤 것도 finding을 닫지 않습니다. 도달할 수 없는 root나 실패한 provider는 finding을 그대로 두고 `stale_measurement`로 표시합니다. walk가 끝나지 않은 root도 마찬가지입니다. walk가 lockfile을 나열하지 않은 finding은 `stale_measurement`로 표시된 채 열린 상태로 남고, `unmeasured_reason`은 `root_walk_incomplete`입니다. walk가 모든 곳을 확인하지 않았으므로 이는 `lockfile_missing`이 아닙니다.

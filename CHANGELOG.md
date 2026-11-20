@@ -2,6 +2,10 @@
 
 [한국어](CHANGELOG.ko.md)
 
+## Unreleased
+
+- Documented what the daily watch costs. Its ledger re-check asks OSV live for every entry on every run, so a full scan grows with the ledger. Without `GITHUB_TOKEN`, the GHSA cross-check is skipped once GitHub's unauthenticated limit is reached, with a WARN line for each skip. A manual `safedeps re-check` during a scan exits `75`.
+
 ## 2.24.0
 
 - Ensured a post-install judgment leaves a mark while it runs. A post run that takes a call it will judge now writes one file, `~/.safedeps/judging/<pid>-<start>.json`. It is named by the run's pid and the start the kernel stored for it, and it holds the call's command, project and tool use and the time the judgment started. The run removes it when the judgment returns, whatever it returned. A run the runtime kills, or one that panics, leaves it. A run that cannot write its mark says so in `advisory.log` and in the last paragraph of its answer, and judges as before. A run that can write neither the mark nor that line does not judge. It answers at once that the install was not judged, with what each write returned, and it runs no closure check and rolls nothing back. A mark that cannot be removed after its judgment returned is a line in `advisory.log`, and the run adds a `returned_at` record to it. Before this change, a judgment the runtime killed left nothing that said it did not finish.
