@@ -12,7 +12,7 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Write(&'a Path), Copy, Removal }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Write(&'a Path), Read(&'a Path), Rename(&'a Path), Copy, Removal }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -32,6 +32,8 @@ impl Outcome {
             Action::Walk(path)=>{named=[b"the walk of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Write(path)=>{named=[b"the write of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Read(path)=>{named=[b"the read of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Rename(path)=>{named=[b"the rename of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
         };
         let cat=|parts: &[&[u8]]| parts.concat();
         let error=|error: &io::Error| match error.raw_os_error() {

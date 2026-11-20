@@ -9,9 +9,12 @@
 //! (`process::start`). Two runs alive at once have two names, and a pid the
 //! kernel hands out again comes with another start, so no run writes or
 //! removes another run's mark. A run removes only the path it wrote.
-use super::{jv, process, report::cat, sh};
+//!
+//! The next post run reports, once, each mark whose run is gone
+//! (`report_gone`): one NOT JUDGED line in advisory.log.
+use super::{jv, process::{self, Holder}, report::cat, sh};
 use crate::{json::Value, os, outcome::{Action, Form, Outcome}, state};
-use std::path::{Path, PathBuf};
+use std::{io::{ErrorKind, Write}, os::unix::ffi::OsStrExt, path::{Path, PathBuf}};
 
 /// The marks' directory. It is derived from `SAFEDEPS_HOME` and from nothing
 /// else: a mark is the record of a judgment owed in that home, so it lives
@@ -120,23 +123,337 @@ impl Mark {
 
     /// Removes this run's mark once its judgment returned, whatever it
     /// returned. A mark that cannot be removed is said in advisory.log, beside
-    /// the judgment's own lines, because a later report of it would otherwise
-    /// stand alone.
+    /// the judgment's own lines, and it gets the record that its judgment
+    /// returned (`add_record`), so the run that claims it later removes it
+    /// and does not report a judgment that returned as one that did not. A
+    /// record that cannot be added either is said in the same line.
     pub fn close(&mut self, home: &Path, command: &[u8]) {
         let State::Written(path) = &self.0 else { return };
         let path = path.clone();
         self.0 = State::Spent;
         if let Err(error) = std::fs::remove_file(&path) {
+            let added = add_record(&path, Added::Returned);
+            let unadded = if added.success() { Vec::new() }
+                else { cat(&[b". The record that it returned was not added to it either: ", &added.describe(Action::Write(&path), Form::Action)]) };
             state::log_advisory(home, &cat(&[b"post-verify: the judgment of this call returned, and its judgment mark ", sh::bytes(&path),
-                b" was not removed: ", &Outcome::Io(Err(error)).describe(Action::Removal, Form::Action), b". Command: ", command]));
+                b" was not removed: ", &Outcome::Io(Err(error)).describe(Action::Removal, Form::Action), &unadded, b". Command: ", command]));
         }
     }
+}
+
+/// A record added to a file in `judging/` that stays: that the judgment of
+/// its call returned (`Mark::close`), or that a NOT JUDGED line for it was
+/// written (`report_gone`). Either way no run says it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Added { Returned, Said }
+
+impl Added {
+    fn key(self) -> &'static str { match self { Added::Returned => "returned_at", Added::Said => "said_at" } }
+}
+
+/// Adds `record` to the file at `path`: one JSON object whose one field is
+/// the record's key, with the UTC time, on a line of its own after the bytes
+/// that are there, whatever they are. The file is opened to append and never
+/// created. Appending needs no change to `judging/`, which is what the
+/// removal or the claim that failed did not get.
+fn add_record(path: &Path, record: Added) -> Outcome {
+    let role = match record { Added::Returned => os::WallRole::JudgmentMarkReturned, Added::Said => os::WallRole::JudgmentMarkSaid };
+    let value = jv::obj(vec![(record.key(), jv::s(os::utc_stamp(os::wall(role).seconds()).as_bytes()))]);
+    Outcome::Io(std::fs::OpenOptions::new().append(true).open(path).and_then(|mut file| file.write_all(&cat(&[b"\n", &jv::dump(&value), b"\n"]))))
+}
+
+/// The record `add_record` wrote as `line`, if it is one.
+fn record(line: &[u8]) -> Option<Added> {
+    let read = jv::read(line);
+    let [Value::Obj(fields)] = read.values.as_slice() else { return None };
+    let [(key, Value::Str(_))] = fields.as_slice() else { return None };
+    if read.failed { return None }
+    [Added::Returned, Added::Said].into_iter().find(|added| key.as_slice() == added.key().as_bytes())
+}
+
+/// A file's own bytes, and the records added after them: each line at its
+/// end that is one record (`record`), read from the last line back. A record
+/// starts a line, so the bytes before it are left as they were, broken or not.
+fn split_records(bytes: &[u8]) -> (&[u8], Vec<Added>) {
+    let (mut own, mut added) = (bytes, Vec::new());
+    loop {
+        let lines = own.strip_suffix(b"\n").unwrap_or(own);
+        let Some(at) = lines.iter().rposition(|b| *b == b'\n') else { return (own, added) };
+        let Some(found) = record(&lines[at + 1..]) else { return (own, added) };
+        added.push(found);
+        own = &lines[..at];
+    }
+}
+
+/// `<pid>-<start>` as `Mark::open` spells it: two runs of digits with no
+/// leading zero, a pid from 1 to i32::MAX, which is what the kernel hands out,
+/// and a start above 0.
+fn pid_start(text: &[u8]) -> Option<(u32, u64)> {
+    let dash = text.iter().position(|b| *b == b'-')?;
+    let pid = std::str::from_utf8(&text[..dash]).ok()?.parse::<u32>().ok().filter(|p| *p > 0 && i32::try_from(*p).is_ok())?;
+    let start = std::str::from_utf8(&text[dash + 1..]).ok()?.parse::<u64>().ok().filter(|s| *s > 0)?;
+    (format!("{}-{}", pid, start).as_bytes() == text).then_some((pid, start))
+}
+
+/// A mark's file name, `<pid>-<start>.json`. No other name in `judging/` is a
+/// mark: a temporary file (its name starts with a dot), a claim, or a file
+/// this code did not write.
+fn mark_name(name: &[u8]) -> Option<(u32, u64)> { pid_start(name.strip_suffix(b".json")?) }
+
+/// A claim's file name, `<pid>-<start>.json.<pid>-<start>.claim`: the name of
+/// the mark it took, then the pid and start of the run that took it.
+fn claim_name(name: &[u8]) -> Option<((u32, u64), (u32, u64))> {
+    let name = name.strip_suffix(b".claim")?;
+    let at = name.windows(6).position(|w| w == b".json.")?;
+    Some((pid_start(&name[..at])?, pid_start(&name[at + 6..])?))
+}
+
+/// Reports in advisory.log, once, each mark in this home whose run is gone
+/// (`process::holder`): a run the kernel holds under the mark's pid with the
+/// mark's start is alive, and one whose start the kernel does not give is not
+/// known, and both marks are left as they are. A post run calls this at its
+/// start, before it takes a call of its own.
+///
+/// A mark is said by the run that claims it. The claim is a rename of the
+/// mark to `<mark>.<pid>-<start>.claim`, with this run's pid and start, and
+/// the kernel lets one run make it: a run that finds the mark gone says
+/// nothing of it. The claiming run writes the line, then removes the claim. A
+/// claim whose run is gone, one whose line advisory.log did not take or one
+/// killed before its line, is claimed again and said.
+///
+/// Once is kept by what stays on disk after the line, not by the run that
+/// wrote it, which is gone by the time another run reads the file. A file
+/// that stays after its line was written gets the record that it was said
+/// (`add_record`), and no run says a file with that record: a claim whose
+/// removal failed, and a mark no run can claim (a `judging/` that takes no
+/// change), which the first run that reads it says, with what the rename
+/// returned. Appending needs no change to `judging/`, which is what the
+/// removal or the claim did not get. The first run that can claim such a file
+/// removes it and says nothing. Where the record cannot be added either,
+/// advisory.log says so, and a later run says the mark again: a second line,
+/// never none. So does a run killed between its line and the removal or the
+/// record, and two runs that cannot claim one mark and read it before either
+/// adds the record both say it.
+pub fn report_gone(home: &Path) {
+    let dir = dir(home);
+    let me = std::process::id();
+    // A run whose own start the kernel does not give cannot name a claim. It
+    // writes no mark of its own either, and says so (`Mark::open`).
+    let Some(my_start) = process::start(me) else { return };
+    let listing = match std::fs::read_dir(&dir) {
+        Ok(listing) => listing,
+        // No directory, or a file in its place (ENOTDIR, 20 on macOS and on
+        // Linux): no mark is in it.
+        Err(error) if error.kind() == ErrorKind::NotFound || error.raw_os_error() == Some(20) => return,
+        Err(error) => return unlisted(home, &dir, error),
+    };
+    let mut names = Vec::new();
+    for entry in listing {
+        match entry {
+            Ok(entry) if entry.file_type().is_ok_and(|kind| kind.is_file()) => names.push(entry.file_name()),
+            Ok(_) => {}
+            Err(error) => return unlisted(home, &dir, error),
+        }
+    }
+    names.sort();
+    for name in names {
+        let path = dir.join(&name);
+        if let Some((pid, start)) = mark_name(name.as_bytes()) {
+            if let Holder::Gone(fact) = process::holder(pid, start) { claim(home, &path, (pid, start), &fact, (me, my_start)) }
+        } else if let Some(((pid, start), (by, by_start))) = claim_name(name.as_bytes()) {
+            // Whether a run that is gone said the mark it claimed is not
+            // known, so this run says it.
+            if !matches!(process::holder(by, by_start), Holder::Gone(_)) { continue }
+            if let Holder::Gone(fact) = process::holder(pid, start) { claim(home, &path, (pid, start), &fact, (me, my_start)) }
+        }
+    }
+}
+
+/// A listing of `judging/` that did not finish: the marks in it are not known,
+/// and none is reported.
+fn unlisted(home: &Path, dir: &Path, error: std::io::Error) {
+    state::log_advisory(home, &cat(&[b"post-verify: the judgment marks in ", sh::bytes(dir), b" were not read: ",
+        &Outcome::Io(Err(error)).describe(Action::Walk(dir), Form::Action)]));
+}
+
+/// Claims, at `from` (the mark, or a claim whose run is gone), the mark of the
+/// run `owner`, which is gone as `fact` says, and says it (`report_gone`).
+fn claim(home: &Path, from: &Path, owner: (u32, u64), fact: &[u8], (me, my_start): (u32, u64)) {
+    let mark = dir(home).join(format!("{}-{}.json", owner.0, owner.1));
+    let held = dir(home).join(format!("{}-{}.json.{}-{}.claim", owner.0, owner.1, me, my_start));
+    match std::fs::rename(from, &held) {
+        Ok(()) => {}
+        // Another run claimed it first, and that run says it.
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => {
+            let unclaimed = cat(&[b" This run could not claim the mark: ", &Outcome::Io(Err(error)).describe(Action::Rename(from), Form::Action), b"."]);
+            let Some(line) = said(from, &mark, owner, fact, &unclaimed) else { return };
+            // The file stays where it is, so the record that it was said goes
+            // into it, and the runs after this one do not say it again.
+            if state::log_advisory(home, &line).success() { add_said(home, from) }
+            return
+        }
+    }
+    let Some(line) = said(&held, &mark, owner, fact, b"") else { return retire(home, &held, false) };
+    // A line advisory.log did not take leaves the claim, and a run after this
+    // one is gone claims it again.
+    if !state::log_advisory(home, &line).success() { return }
+    retire(home, &held, true)
+}
+
+/// Adds to a file whose NOT JUDGED line was written, and which stays, the
+/// record that it was said. A record that cannot be added is said in
+/// advisory.log, because a later run says the mark again.
+fn add_said(home: &Path, path: &Path) {
+    let added = add_record(path, Added::Said);
+    if added.success() { return }
+    state::log_advisory(home, &cat(&[b"post-verify: the judgment mark ", sh::bytes(path), b" was said, and the record that it was said was not added to it: ",
+        &added.describe(Action::Write(path), Form::Action), b". A later run says it again."]));
+}
+
+/// Removes this run's claim, once its line is written (`said`) or once it
+/// found that no line is owed. A claim that stays is said in advisory.log.
+/// One whose line was written also gets the record that it was said, so the
+/// run that claims it again after this one is gone removes it and says
+/// nothing; a record that cannot be added is said in the same line, and that
+/// run says the mark again.
+fn retire(home: &Path, held: &Path, said: bool) {
+    let Err(error) = std::fs::remove_file(held) else { return };
+    let added = if said { add_record(held, Added::Said) } else { Outcome::Io(Ok(())) };
+    let unadded = if added.success() { Vec::new() }
+        else { cat(&[b". The record that it was said was not added to it either: ", &added.describe(Action::Write(held), Form::Action)]) };
+    state::log_advisory(home, &cat(&[b"post-verify: the claimed judgment mark ", sh::bytes(held), b" was not removed: ",
+        &Outcome::Io(Err(error)).describe(Action::Removal, Form::Action), &unadded]));
+}
+
+/// The NOT JUDGED line for the mark of the run `owner`, from one read of
+/// `file`: the call the mark names, or, where it does not name its call, what
+/// is wrong with it. None for a file with the record that its line was
+/// written, whatever its own bytes are, and for a mark with the record that
+/// its judgment returned (`Mark::close`), whose run said itself why the mark
+/// stayed. `unclaimed` is empty, or the sentence that this run could not
+/// claim it.
+fn said(file: &Path, mark: &Path, owner: (u32, u64), fact: &[u8], unclaimed: &[u8]) -> Option<Vec<u8>> {
+    let head = cat(&[b"its judgment mark ", sh::bytes(mark), b" is still there, and ", fact, b".", unclaimed]);
+    let unnamed = |reason: &[u8]| Some(cat(&[b"post-verify NOT JUDGED: a post run did not finish judging a call: ", &head,
+        b" The mark ", reason, b", so the call is not known."]));
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(error) => return unnamed(&cat(&[b"could not be read: ", &Outcome::Io(Err(error)).describe(Action::Read(file), Form::Action)])),
+    };
+    let (own, added) = split_records(&bytes);
+    if added.contains(&Added::Said) { return None }
+    let read = jv::read(own);
+    let ([value @ Value::Obj(_)], false) = (read.values.as_slice(), read.failed) else { return unnamed(b"is not one JSON object") };
+    let text = |key: &str| jv::field(value, key).ok().and_then(jv::text);
+    if text("pid") != Some(owner.0.to_string().as_bytes()) || text("start") != Some(owner.1.to_string().as_bytes()) {
+        return unnamed(b"does not name the pid and start in its file name")
+    }
+    let mut named = Vec::new();
+    for key in ["opened_at", "project", "command"] {
+        let Some(field) = text(key) else { return unnamed(&cat(&[b"has no string field ", key.as_bytes()])) };
+        named.push(field);
+    }
+    let tool = match jv::field(value, "tool_use_id") {
+        Ok(Value::Null) => b"none".as_slice(),
+        Ok(Value::Str(id)) => id.as_slice(),
+        _ => return unnamed(b"has no string field tool_use_id"),
+    };
+    if added.contains(&Added::Returned) { return None }
+    Some(cat(&[b"post-verify NOT JUDGED: the post run that took this call at ", named[0], b" did not finish judging it: ", &head,
+        b" Tool use: ", tool, b". Project: ", named[1], b". Command: ", named[2]]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_names_of_marks_and_claims_are_the_ones_open_and_claim_write() {
+        assert_eq!(mark_name(b"123-456.json"), Some((123, 456)));
+        for name in [&b"0-5.json"[..], b"0123-5.json", b"123-0.json", b"123-05.json", b"+5-6.json", b"2147483648-5.json", b"123-456",
+            b"123-456.json.tmp", b".123-456.json.0a1b2c", b"123-456.json.7-8.claim", b"-5.json", b"5-.json", b"5-6-7.json", b"5--6.json"] {
+            assert_eq!(mark_name(name), None, "{}", String::from_utf8_lossy(name));
+        }
+        assert_eq!(claim_name(b"123-456.json.7-8.claim"), Some(((123, 456), (7, 8))));
+        for name in [&b"123-456.json.claim"[..], b"123-456.json.7-08.claim", b"123-456.7-8.claim", b"123-456.json.7-8", b"0-456.json.7-8.claim",
+            b"123-456.json.0-8.claim"] {
+            assert_eq!(claim_name(name), None, "{}", String::from_utf8_lossy(name));
+        }
+    }
+
+    /// The line `said` gives for one read of a mark: the call it names, with
+    /// `none` for a null tool use; nothing for a mark with the record that its
+    /// judgment returned, nor for a file with the record that it was said,
+    /// whatever its own bytes; and what is wrong with a mark it cannot read or
+    /// that holds a second object that is not one of those records.
+    #[test]
+    fn a_mark_is_said_from_one_read_of_it() {
+        let home = crate::os::scratch_dir("safedeps-mark").unwrap();
+        std::fs::create_dir(dir(&home)).unwrap();
+        let mark = dir(&home).join("7-8.json");
+        let m = mark.display();
+        let object = b"{\"pid\":\"7\",\"start\":\"8\",\"opened_at\":\"2026-11-20T01:02:03Z\",\"tool_use_id\":null,\"project\":\"/p\",\"command\":\"npm ci\"}\n";
+        std::fs::write(&mark, object).unwrap();
+        let line = said(&mark, &mark, (7, 8), b"pid 7 is not running", b"").expect("a line");
+        assert_eq!(String::from_utf8_lossy(&line), format!("post-verify NOT JUDGED: the post run that took this call at 2026-11-20T01:02:03Z \
+            did not finish judging it: its judgment mark {m} is still there, and pid 7 is not running. Tool use: none. Project: /p. Command: npm ci"));
+        std::fs::write(&mark, cat(&[object, b"{\"returned_at\":\"2026-11-20T01:02:04Z\"}\n"])).unwrap();
+        assert_eq!(said(&mark, &mark, (7, 8), b"pid 7 is not running", b""), None, "a judgment that returned is not reported");
+        std::fs::write(&mark, cat(&[object, b"{\"returned_at\":4}\n"])).unwrap();
+        let line = said(&mark, &mark, (7, 8), b"pid 7 is not running", b"").expect("a line");
+        assert_eq!(String::from_utf8_lossy(&line), format!("post-verify NOT JUDGED: a post run did not finish judging a call: its judgment mark {m} \
+            is still there, and pid 7 is not running. The mark is not one JSON object, so the call is not known."));
+        let said_at = b"\n{\"said_at\":\"2026-11-20T01:02:05Z\"}\n";
+        for own in [&object[..], b"{\"pid\":\"", b"", &cat(&[object, b"\n{\"returned_at\":\"2026-11-20T01:02:04Z\"}\n"])] {
+            std::fs::write(&mark, cat(&[own, said_at])).unwrap();
+            assert_eq!(said(&mark, &mark, (7, 8), b"pid 7 is not running", b""), None, "said once: {:?}", String::from_utf8_lossy(own));
+        }
+        std::fs::write(&mark, b"{\"said_at\":\"2026-11-20T01:02:05Z\"}").unwrap();
+        let line = said(&mark, &mark, (7, 8), b"pid 7 is not running", b"").expect("a record starts a line, so this is the mark's own bytes");
+        assert_eq!(String::from_utf8_lossy(&line), format!("post-verify NOT JUDGED: a post run did not finish judging a call: its judgment mark {m} \
+            is still there, and pid 7 is not running. The mark does not name the pid and start in its file name, so the call is not known."));
+        std::fs::set_permissions(&mark, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let line = said(&mark, &mark, (7, 8), b"pid 7 is not running", b"").expect("a line");
+        assert_eq!(String::from_utf8_lossy(&line), format!("post-verify NOT JUDGED: a post run did not finish judging a call: its judgment mark {m} \
+            is still there, and pid 7 is not running. The mark could not be read: the read of {m} returned OS error 13, so the call is not known."));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A claim whose line was written and which cannot be removed gets the
+    /// record that it was said, and advisory.log says it stayed. The run that
+    /// takes it up after its claimer is gone says nothing of it, whether it
+    /// can claim it again or not, and the first run that can claim it removes
+    /// it.
+    #[test]
+    fn a_claim_that_stays_after_its_line_is_not_said_again() {
+        let home = crate::os::scratch_dir("safedeps-mark").unwrap();
+        std::fs::create_dir(dir(&home)).unwrap();
+        let me = std::process::id();
+        let start = process::start(me).expect("the kernel's start of this process");
+        // The mark's run and the run that claimed it: this pid, with starts
+        // the kernel did not store for it, so both are gone.
+        let held = dir(&home).join(format!("{me}-{}.json.{me}-{}.claim", start + 1, start + 2));
+        let object = jv::dump(&jv::obj(vec![("pid", jv::s(me.to_string().as_bytes())), ("start", jv::s((start + 1).to_string().as_bytes())),
+            ("opened_at", jv::s(b"2026-11-20T01:02:03Z")), ("tool_use_id", Value::Null), ("project", jv::s(b"/p")), ("command", jv::s(b"npm ci"))]));
+        std::fs::write(&held, &object).unwrap();
+        std::fs::set_permissions(dir(&home), std::fs::Permissions::from_mode(0o500)).unwrap();
+        retire(&home, &held, true);
+        let log = std::fs::read(home.join("advisory.log")).unwrap();
+        let stayed = cat(&[b"\tpost-verify: the claimed judgment mark ", sh::bytes(&held), b" was not removed: removal returned OS error 13\n"]);
+        assert!(log.ends_with(&stayed) && log.iter().filter(|b| **b == b'\n').count() == 1, "{}", String::from_utf8_lossy(&log));
+        let bytes = std::fs::read(&held).unwrap();
+        assert_eq!(split_records(&bytes), (object.as_slice(), vec![Added::Said]), "{}", String::from_utf8_lossy(&bytes));
+        report_gone(&home);
+        assert_eq!(std::fs::read(home.join("advisory.log")).unwrap(), log, "a run that cannot claim it again says nothing");
+        assert_eq!(std::fs::read(&held).unwrap(), bytes, "and leaves it as it is");
+        std::fs::set_permissions(dir(&home), std::fs::Permissions::from_mode(0o700)).unwrap();
+        report_gone(&home);
+        assert_eq!(std::fs::read(home.join("advisory.log")).unwrap(), log, "a run that claims it again says nothing");
+        assert_eq!(std::fs::read_dir(dir(&home)).unwrap().count(), 0, "and removes it");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn a_mark_names_its_process_and_goes_when_its_judgment_returns() {

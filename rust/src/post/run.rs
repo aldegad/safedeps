@@ -1,6 +1,6 @@
 //! The effect hook's call ordering. File selection and facts belong to the
 //! domain modules; this is where their ordering becomes a single judgment.
-use super::{call::{Call, Record}, effect, heuristics, journal::Journal, jv,
+use super::{call::{Call, Record}, effect, heuristics, journal::Journal, jv, mark,
     npm::{self, Npm}, report::{self, Report, cat}, rollback::{Before, Rollback}, sh, snapshot,
     trace::{self, Install}};
 use crate::{callid::record as rec, os, state};
@@ -207,6 +207,10 @@ pub fn main(input: &[u8], post_started: Instant) -> i32 {
     if state::ensure_dirs(&home).is_err() { return 1 }
     let journal = Journal::new(&home);
     let unfinished = journal.unfinished();
+    // A mark an earlier run left, whose run is gone, is the record of a
+    // judgment that run did not finish. Each is said in advisory.log once,
+    // before this run takes a call and writes a mark of its own.
+    mark::report_gone(&home);
     // Every way out of judge comes back here, so this is where the mark goes.
     // A run that never comes back (the runtime's kill, a panic, which aborts)
     // leaves it.

@@ -235,6 +235,8 @@ pub enum WallRole {
     BackstopTouch,
     BackstopFallback,
     JudgmentMarkOpened,
+    JudgmentMarkReturned,
+    JudgmentMarkSaid,
 }
 
 /// One raw reading. Every accessor is pure; retaining this value retains the

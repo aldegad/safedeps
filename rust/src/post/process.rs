@@ -63,29 +63,72 @@ fn info(pid:i32)->Option<(Vec<u8>,i64)>{
 #[cfg(not(any(target_os="macos",target_os="linux")))]
 fn info(_pid:i32)->Option<(Vec<u8>,i64)>{None}
 
-/// The start the kernel stored for pid, as the one number it keeps: on macOS
-/// p_starttime in microseconds since the epoch (the field sysctl
-/// KERN_PROC_PID also gives), on Linux and WSL1 field 22 of /proc/<pid>/stat,
-/// in clock ticks since boot. Exec, a time zone, a locale and PATH do not move
-/// it, and no wall clock is read to make it. None when the kernel gave no
-/// usable record, which is not known and never a start of 0.
-#[cfg(target_os="macos")]
-pub fn start(pid:u32)->Option<u64>{
-    let b=bsd(i32::try_from(pid).ok()?)?;
-    if b.start_sec==0 || b.start_usec>=1_000_000{return None}
-    b.start_sec.checked_mul(1_000_000)?.checked_add(b.start_usec)
+/// What the kernel holds under a pid, read once: no process; a process, a
+/// zombie or not, with the start the kernel stored for it (None where it gave
+/// no usable start, which is not known and never a start of 0); or no answer.
+enum Kernel { Nothing, Process { zombie: bool, start: Option<u64> }, Unread }
+
+/// The kernel holds no process under pid: kill(pid, 0) returned ESRCH, which
+/// is 3 on macOS and on Linux. Any other answer, a process of another user
+/// included, is not that fact.
+fn no_such(pid:i32)->bool{
+    unsafe{kill(pid,0)}!=0 && std::io::Error::last_os_error().raw_os_error()==Some(3)
 }
+
+/// The start is p_starttime, in microseconds since the epoch (the field sysctl
+/// KERN_PROC_PID also gives). A zombie is process status 5 (SZOMB).
+#[cfg(target_os="macos")]
+fn kernel(pid:i32)->Kernel{
+    let Some(b)=bsd(pid) else {return if no_such(pid){Kernel::Nothing}else{Kernel::Unread}};
+    let start=if b.start_sec==0 || b.start_usec>=1_000_000{None}else{b.start_sec.checked_mul(1_000_000).and_then(|s|s.checked_add(b.start_usec))};
+    Kernel::Process{zombie:b.status==5,start}
+}
+/// The start is field 22 of /proc/<pid>/stat, in clock ticks since boot, and
+/// the state is field 3, read from the same read of the file.
 #[cfg(target_os="linux")]
-pub fn start(pid:u32)->Option<u64>{
-    let stat=std::fs::read(format!("/proc/{}/stat",i32::try_from(pid).ok()?)).ok()?;
+fn kernel(pid:i32)->Kernel{
+    let Ok(stat)=std::fs::read(format!("/proc/{}/stat",pid)) else {return if no_such(pid){Kernel::Nothing}else{Kernel::Unread}};
     // comm can hold anything, so the fields follow its last ')'.
-    let close=stat.iter().rposition(|b|*b==b')')?;
-    let field=stat[close+1..].split(|b|b.is_ascii_whitespace()).filter(|f|!f.is_empty()).nth(19)?;
-    if !field.iter().all(u8::is_ascii_digit){return None}
-    std::str::from_utf8(field).ok()?.parse::<u64>().ok().filter(|n|*n>0)
+    let Some(close)=stat.iter().rposition(|b|*b==b')') else {return Kernel::Unread};
+    let fields:Vec<&[u8]>=stat[close+1..].split(|b|b.is_ascii_whitespace()).filter(|f|!f.is_empty()).collect();
+    let Some(&state)=fields.first().and_then(|f|f.first()) else {return Kernel::Unread};
+    let start=fields.get(19).filter(|f|f.iter().all(u8::is_ascii_digit)).and_then(|f|std::str::from_utf8(f).ok()?.parse::<u64>().ok()).filter(|n|*n>0);
+    Kernel::Process{zombie:matches!(state,b'Z'|b'X'|b'x'),start}
 }
 #[cfg(not(any(target_os="macos",target_os="linux")))]
-pub fn start(_pid:u32)->Option<u64>{None}
+fn kernel(_pid:i32)->Kernel{Kernel::Unread}
+
+/// The start the kernel stored for pid, as the one number it keeps: on macOS
+/// p_starttime in microseconds since the epoch, on Linux and WSL1 field 22 of
+/// /proc/<pid>/stat, in clock ticks since boot (`kernel`). Exec, a time zone,
+/// a locale and PATH do not move it, and no wall clock is read to make it.
+/// None when the kernel gave no usable record, which is not known and never a
+/// start of 0.
+pub fn start(pid:u32)->Option<u64>{
+    match kernel(i32::try_from(pid).ok()?){Kernel::Process{start,..}=>start,_=>None}
+}
+
+/// Whether the process a record names by its pid and the start the kernel
+/// stored for it still runs. Gone is one of three facts, each said as it was
+/// read: the kernel holds no process under the pid, it holds a zombie, or it
+/// holds a process with another start, which is a pid it handed out again. A
+/// read that gives no answer or no start is not known, and never gone.
+pub enum Holder { Running, Gone(Vec<u8>), Unknown }
+
+pub fn holder(pid:u32,start:u64)->Holder{
+    match i32::try_from(pid){Ok(n) if n>0=>holder_of(pid,start,kernel(n)),_=>Holder::Unknown}
+}
+
+fn holder_of(pid:u32,start:u64,kernel:Kernel)->Holder{
+    let pid=pid.to_string();
+    match kernel{
+        Kernel::Nothing=>Holder::Gone(cat(&[b"pid ",pid.as_bytes(),b" is not running"])),
+        Kernel::Process{zombie:true,..}=>Holder::Gone(cat(&[b"pid ",pid.as_bytes(),b" is a zombie"])),
+        Kernel::Process{start:Some(now),..} if now==start=>Holder::Running,
+        Kernel::Process{start:Some(now),..}=>Holder::Gone(cat(&[b"pid ",pid.as_bytes(),b" is another process now: the kernel stored the start ",now.to_string().as_bytes(),b" for it"])),
+        Kernel::Process{start:None,..}|Kernel::Unread=>Holder::Unknown,
+    }
+}
 
 /// 0 running, 1 gone/unresolved, 2 stopped. Start-time comparison precedes
 /// the stopped answer so a reused stopped pid cannot own an older journal.
@@ -99,4 +142,34 @@ pub fn owner(pid:&[u8],opened:&[u8])->(i32,Vec<u8>){
     if start>at{return(1,cat(&[b"pid ",pid,b" started after the journal was opened"]))}
     if matches!(st.first(),Some(&b'T')|Some(&b't')){return(2,cat(&[b"pid ",pid,b" is stopped (process state ",&st,b")"]))}
     (0,cat(&[b"pid ",pid,b" is running"]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn said(holder: Holder) -> String {
+        match holder { Holder::Running => "running".into(), Holder::Gone(fact) => String::from_utf8(fact).unwrap(), Holder::Unknown => "not known".into() }
+    }
+
+    /// A run is gone on one of three facts the kernel gave, alive where the
+    /// kernel holds its pid with its start, and not known where the kernel
+    /// gave no answer or no start: what is not known is never gone.
+    #[test]
+    fn a_holder_is_gone_on_a_fact_and_not_known_without_one() {
+        let process = |zombie, start| Kernel::Process { zombie, start };
+        assert_eq!(said(holder_of(7, 100, Kernel::Nothing)), "pid 7 is not running");
+        assert_eq!(said(holder_of(7, 100, process(true, Some(100)))), "pid 7 is a zombie");
+        assert_eq!(said(holder_of(7, 100, process(true, None))), "pid 7 is a zombie");
+        assert_eq!(said(holder_of(7, 100, process(false, Some(100)))), "running");
+        assert_eq!(said(holder_of(7, 100, process(false, Some(101)))), "pid 7 is another process now: the kernel stored the start 101 for it");
+        assert_eq!(said(holder_of(7, 100, process(false, None))), "not known");
+        assert_eq!(said(holder_of(7, 100, Kernel::Unread)), "not known");
+        let me = std::process::id();
+        let start = start(me).expect("the kernel's start of this process");
+        assert_eq!(said(holder(me, start)), "running");
+        assert_eq!(said(holder(me, start + 1)), format!("pid {me} is another process now: the kernel stored the start {start} for it"));
+        assert_eq!(said(holder(0, start)), "not known", "pid 0 names no process");
+        assert_eq!(said(holder(u32::MAX, start)), "not known", "a pid the kernel never hands out");
+    }
 }
