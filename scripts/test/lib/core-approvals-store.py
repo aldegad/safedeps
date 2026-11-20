@@ -384,6 +384,65 @@ def migrated(home, when):
     return report
 
 
+def take_back_cases():
+    for keyword in ("approve-undone", "approve-in-doubt"):
+        for name, tail in (
+            ("plain-path", " outcome=the rename to /fixture/entry with spaces returned OS error 18"),
+            ("decoy-path", " outcome=the rename to /fixture/entry hash=decoy with spaces returned OS error 18"),
+            ("other-hash-path", " outcome=the rename to /fixture/entry hash={other} outcome=x returned OS error 18"),
+            ("legacy-outcome", " outcome=os-error-28"),
+            ("newline-path", " outcome=the rename to /fixture/entry\nhash=decoy with spaces returned OS error 18"),
+            ("hash-only", ""),
+        ):
+            yield keyword, name, tail
+
+
+def row_take_back_header(base, keyword, name, tail):
+    home = base / (keyword + "-" + name)
+    hashes = approvals_before_the_store(home, 2 if name == "other-hash-path" else 1)
+    tail = tail.format(other=hashes[-1])
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(FIRST + 2))
+    with (home / "advisory.log").open("a") as log:
+        log.write(f"[{at}] check {keyword} hash={hashes[0]}{tail}\n")
+    report = migrated(home, name)
+    keys = (*COUNTS, "broken", "torn")
+    want = [len(hashes), len(hashes) - 1, 0, 0, 0, 1, 0, 0]
+    got = [report.get(k) for k in keys]
+    if got != want:
+        raise Failed(f"{name}: {dict(zip(keys, got))}, want {dict(zip(keys, want))}")
+    counts = report["inputs"][0]
+    if counts["lines"] != len(hashes) + 1 + tail.count("\n") or counts["undone"] != (keyword == "approve-undone") or counts["in_doubt"] != (keyword == "approve-in-doubt"):
+        raise Failed(f"{name}: input line counts {counts}")
+    expect_index(home, hashes[1:], 0, name)
+
+
+def row_other_log_keywords(base):
+    home = base / "other-log-keywords"
+    hashes = approvals_before_the_store(home, 1)
+    with (home / "advisory.log").open("a") as log:
+        for kind in ("unvouched-entry-removal", "approve-unsynced"):
+            for keyword in ("check approve(", "check approve-undone", "check approve-in-doubt"):
+                log.write(f"[2026-11-01T00:00:02Z] check {kind} hash={hashes[0]} outcome=the sync of /fixture/{keyword} returned OS error 28\n")
+    report = migrated(home, "other log kinds")
+    expect_counts(report, 1, 1, 0, "other log kinds")
+    if (report["broken"], report["inputs"][0]["lines"]) != (6, 7):
+        raise Failed(f"other log kinds: {report}")
+    expect_index(home, hashes, 0, "other log kinds")
+
+
+def row_misplaced_take_back_hash(base):
+    home = base / "misplaced-take-back-hash"
+    hashes = approvals_before_the_store(home, 1)
+    with (home / "advisory.log").open("a") as log:
+        for keyword in ("approve-undone", "approve-in-doubt"):
+            log.write(f"[2026-11-01T00:00:02Z] check {keyword} outcome=x hash={hashes[0]}\n")
+    report = migrated(home, "misplaced hash")
+    expect_counts(report, 1, 1, 0, "misplaced hash")
+    if report["broken"] != 2:
+        raise Failed(f"misplaced hash: {report}")
+    expect_index(home, hashes, 0, "misplaced hash")
+
+
 def expect_counts(report, approve, inserted, duplicates, when):
     """A finished run's counts: no line left out, nothing unconfirmed or
     taken back, and the five after the approve lines adding up to them. A
@@ -636,6 +695,22 @@ def main():
                 print(f"ok - {name}")
             except Exception as error:  # every other end of a row is its failure
                 print(f"not ok - {name}: {error!r}")
+                failed = True
+        for keyword, name, tail in take_back_cases():
+            label = f"migration {keyword} reads only its first hash word: {name}"
+            try:
+                row_take_back_header(base, keyword, name, tail)
+                print(f"ok - {label}")
+            except Exception as error:
+                print(f"not ok - {label}: {error!r}")
+                failed = True
+        for label, row in (("migration counts keywords in other log kinds as broken", row_other_log_keywords),
+                           ("migration refuses a take-back hash after another word", row_misplaced_take_back_hash)):
+            try:
+                row(base)
+                print(f"ok - {label}")
+            except Exception as error:
+                print(f"not ok - {label}: {error!r}")
                 failed = True
     if failed:
         sys.exit(1)

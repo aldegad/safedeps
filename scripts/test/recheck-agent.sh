@@ -101,24 +101,37 @@ make_checkout() { # DIR
 
 row_machine_core_process_results() {
   local d co node_bin kind expected rc
+  kind="$1"
   node_bin=$(command -v node)
-  for kind in start signal exit; do
     d=$(new_dir); co="${d}/checkout"
     make_checkout "${co}"
     mkdir "${d}/commands"
     case "${kind}" in
-      start) printf '#!/bin/sh\nexit 0\n' > "${d}/commands/bash"; chmod 644 "${d}/commands/bash"; expected='could not start bash: OS error -13' ;;
-      signal) printf '#!/bin/sh\nkill -KILL $$\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='bash terminated by signal SIGKILL' ;;
-      exit) printf '#!/bin/sh\nexit 7\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='ran bash: exit 7' ;;
+      start) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\n' > "${d}/commands/bash"; chmod 644 "${d}/commands/bash"; expected='could not start bash: spawnSync error EACCES' ;;
+      overflow) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\nexec /usr/bin/head -c 2097152 /dev/zero\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='started bash: spawnSync error ENOBUFS; signal SIGTERM' ;;
+      signal) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\nkill -KILL $$\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='bash terminated by signal SIGKILL' ;;
+      exit) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\nexit 2\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='ran bash: exit 2' ;;
     esac
     rc=0
-    HOME="${d}/home" PATH="${d}/commands" "${node_bin}" "${co}/${INSTALLER}" stage --root "${d}/runtime" > "${d}/out" 2> "${d}/err" || rc=$?
-    [[ "${rc}" != 0 && ! -e "${d}/runtime" ]] || no "${kind}: the failed machine reading built a runtime"
-    grep -qF "(${expected})" "${d}/err" || no "${kind}: $(cat "${d}/err")"
-    ! grep -qE 'spawnSync|EACCES|exit null' "${d}/err" || no "${kind}: raw or collapsed process error"
-  done
+    PROCESS_MARKER="${d}/started" HOME="${d}/home" PATH="${d}/commands" "${node_bin}" "${co}/${INSTALLER}" stage --root "${d}/runtime" > "${d}/out" 2> "${d}/err" || rc=$?
+    [[ "${rc}" == 1 && ! -e "${d}/runtime" && ! -s "${d}/out" ]] || no "${kind}: the failed machine reading built a runtime or returned another answer"
+    if [[ "${kind}" == start ]]; then
+      [[ ! -e "${d}/started" ]] || no "${kind}: the child started"
+    else
+      [[ "$(cat "${d}/started")" == started ]] || no "${kind}: no start marker"
+      ! grep -qF 'could not start' "${d}/err" || no "${kind}: a started child reported as not started: $(cat "${d}/err")"
+    fi
+    printf 'safedeps re-check agent: could not read which core this machine runs from %s (%s)\n' "${co}/lib/watch/scan.sh" "${expected}" > "${d}/expected"
+    cmp -s "${d}/expected" "${d}/err" || no "${kind}: $(cat "${d}/err")"
 }
-row "the machine-core reading distinguishes a failed start, a signal and an exit" row_machine_core_process_results
+row_machine_core_start() { row_machine_core_process_results start; }
+row_machine_core_overflow() { row_machine_core_process_results overflow; }
+row_machine_core_signal() { row_machine_core_process_results signal; }
+row_machine_core_exit() { row_machine_core_process_results exit; }
+row "the machine-core reading names EACCES when bash did not start" row_machine_core_start
+row "the machine-core reading names ENOBUFS and SIGTERM after bash started" row_machine_core_overflow
+row "the machine-core reading names the signal that ended bash" row_machine_core_signal
+row "the machine-core reading names bash exit 2" row_machine_core_exit
 
 home="${tmp_root}/home"
 mkdir -p "${home}"
