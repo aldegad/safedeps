@@ -105,8 +105,8 @@ const LOCK_NB: i32 = 4;
 /// granted or `wait` has passed. The lock goes when the file is closed, by a
 /// drop or by the end of the process, so a holder that dies leaves no lock
 /// behind, as a lock directory does. A holder that outlasts `wait` is a
-/// `TimedOut` error and never a lock taken anyway.
-pub fn flock_within(file: &std::fs::File, lock: FileLock, wait: std::time::Duration) -> std::io::Result<()> {
+/// deadline outcome and never a lock taken anyway.
+pub fn flock_within(file: &std::fs::File, lock: FileLock, wait: std::time::Duration) -> Result<(), crate::outcome::Outcome> {
     use std::os::unix::io::AsRawFd;
     let until = std::time::Instant::now() + wait;
     loop {
@@ -120,9 +120,9 @@ pub fn flock_within(file: &std::fs::File, lock: FileLock, wait: std::time::Durat
                 std::thread::sleep(std::time::Duration::from_millis(10))
             }
             std::io::ErrorKind::WouldBlock => {
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "another process held the lock past the wait"))
+                return Err(crate::outcome::Outcome::Deadline)
             }
-            _ => return Err(e),
+            _ => return Err(crate::outcome::Outcome::Io(Err(e))),
         }
     }
 }

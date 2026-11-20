@@ -11,8 +11,12 @@ pub enum Outcome {
     Io(io::Result<()>),
 }
 
+// Two phrasings stand for a write and a rename, each pinned by its own rows:
+// Write and Rename say "the write to" and "the rename to" a path (an
+// approval's commit and the migration); WriteOf and RenameOf say "the write
+// of" and "the rename of" a path (a post run's judgment mark).
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Write(&'a Path), Read(&'a Path), Rename(&'a Path), Lock(&'a Path), Copy, Removal, Gzip }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal, Gzip, Read(&'a Path), Create(&'a Path), Open(&'a Path), Write(&'a Path), Sync(&'a Path), Rename(&'a Path), Lock(&'a Path), WriteOf(&'a Path), RenameOf(&'a Path) }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -31,10 +35,15 @@ impl Outcome {
             Action::Copy=>b"copy", Action::Removal=>b"removal", Action::Gzip=>b"gzip",
             Action::Walk(path)=>{named=[b"the walk of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Read(path)=>{named=[b"the read of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
-            Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
-            Action::Write(path)=>{named=[b"the write of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
-            Action::Rename(path)=>{named=[b"the rename of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Create(path)=>{named=[b"the creation of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Open(path)=>{named=[b"the open of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Write(path)=>{named=[b"the write to ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Sync(path)=>{named=[b"the sync of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Rename(path)=>{named=[b"the rename to ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Lock(path)=>{named=[b"the lock of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::WriteOf(path)=>{named=[b"the write of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::RenameOf(path)=>{named=[b"the rename of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
         };
         let cat=|parts: &[&[u8]]| parts.concat();
         let error=|error: &io::Error| match error.raw_os_error() {
@@ -69,6 +78,26 @@ impl Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn file_operations_keep_the_path_and_the_os_error() {
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/fixture/path with spaces-\xff"));
+        for (action, name) in [
+            (Action::Create(path), b"the creation of ".as_slice()),
+            (Action::Open(path), b"the open of "),
+            (Action::Read(path), b"the read of "),
+            (Action::Write(path), b"the write to "),
+            (Action::Sync(path), b"the sync of "),
+            (Action::Rename(path), b"the rename to "),
+            (Action::Lock(path), b"the lock of "),
+            (Action::WriteOf(path), b"the write of "),
+            (Action::RenameOf(path), b"the rename of "),
+        ] {
+            assert_eq!(Outcome::Io(Err(io::Error::from_raw_os_error(5))).describe(action, Form::Action),
+                [name, path.as_os_str().as_bytes(), b" returned OS error 5"].concat());
+            assert_eq!(Outcome::Io(Err(io::Error::other("private text"))).describe(action, Form::Action),
+                [name, path.as_os_str().as_bytes(), b" returned an error without an OS code"].concat());
+        }
+    }
     #[test]
     fn claims_keep_observed_outcomes_distinct() {
         let rows=[

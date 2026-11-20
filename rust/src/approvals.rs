@@ -167,6 +167,7 @@ use crate::{
     jq,
     json::{self, Value},
     ledger, os, state,
+    outcome::{Action, Form, Outcome},
 };
 use std::{
     collections::HashSet,
@@ -229,8 +230,8 @@ pub fn is_hash(s: &str) -> bool {
         && s.bytes().skip(HASH_PREFIX.len()).all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn invalid(why: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, why.to_string())
+fn io_text<T>(result: io::Result<T>, action: Action<'_>) -> Result<T, Vec<u8>> {
+    result.map_err(|e| Outcome::Io(Err(e)).describe(action, Form::Action))
 }
 
 /// One line of the store, with its newline.
@@ -265,19 +266,21 @@ fn approved_hash(line: &[u8]) -> Option<String> {
     is_hash(hash).then(|| hash.to_string())
 }
 
-fn regular(file: fs::File) -> io::Result<fs::File> {
-    if file.metadata()?.is_file() {
+fn regular(file: fs::File, store: &Path) -> Result<fs::File, Vec<u8>> {
+    if io_text(file.metadata(), Action::Read(store))?.is_file() {
         Ok(file)
     } else {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "the approvals store is not a regular file"))
+        Err(b"the approvals store is not a regular file".to_vec())
     }
 }
 
-/// The store, opened to be appended to. The directory and the file are made
-/// where they are not there yet.
-fn open_for_append(dir: &Path) -> io::Result<fs::File> {
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-    regular(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir))?)
+/// The store, opened to be appended to. Each failure keeps the operation
+/// and path that returned it, already described for its caller.
+fn open_for_append(dir: &Path) -> Result<fs::File, Vec<u8>> {
+    io_text(fs::DirBuilder::new().recursive(true).mode(0o700).create(dir), Action::Create(dir))?;
+    let store = path(dir);
+    let file = io_text(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(&store), Action::Open(&store))?;
+    regular(file, &store)
 }
 
 /// Why a store write did not answer written. `NotWritten`: the line is not in
@@ -286,38 +289,38 @@ fn open_for_append(dir: &Path) -> io::Result<fs::File> {
 /// it, but the sync failed.
 #[derive(Debug)]
 pub enum Appended {
-    NotWritten(io::Error),
-    Unsynced(io::Error),
+    NotWritten(Vec<u8>),
+    Unsynced(Vec<u8>),
 }
 
-impl From<io::Error> for Appended {
-    fn from(e: io::Error) -> Self {
+impl From<Vec<u8>> for Appended {
+    fn from(e: Vec<u8>) -> Self {
         Self::NotWritten(e)
     }
 }
 
 /// Under LOCK_EX: seals a torn last line, then appends `lines` in the same
 /// write and syncs them.
-fn write_locked(file: &fs::File, lines: &[u8]) -> Result<(), Appended> {
-    write_then_sync(file, lines, fs::File::sync_data)
+fn write_locked(file: &fs::File, store: &Path, lines: &[u8]) -> Result<(), Appended> {
+    write_then_sync(file, store, lines, fs::File::sync_data)
 }
 
 /// The write, then `sync`. Only a write that put every byte in the store
 /// reaches the sync, so a failed sync is a line a reader sees.
-fn write_then_sync(file: &fs::File, lines: &[u8], sync: impl FnOnce(&fs::File) -> io::Result<()>) -> Result<(), Appended> {
-    let len = file.metadata()?.len();
+fn write_then_sync(file: &fs::File, store: &Path, lines: &[u8], sync: impl FnOnce(&fs::File) -> io::Result<()>) -> Result<(), Appended> {
+    let len = io_text(file.metadata(), Action::Read(store))?.len();
     let mut out = Vec::with_capacity(lines.len() + 2);
     if len > 0 {
         let mut last = [0u8; 1];
-        file.read_exact_at(&mut last, len - 1)?;
+        io_text(file.read_exact_at(&mut last, len - 1), Action::Read(store))?;
         if last[0] != b'\n' {
             out.extend_from_slice(&[SEAL, b'\n']);
         }
     }
     out.extend_from_slice(lines);
     let mut f: &fs::File = file;
-    f.write_all(&out)?;
-    sync(file).map_err(Appended::Unsynced)
+    io_text(f.write_all(&out), Action::Write(store))?;
+    io_text(sync(file), Action::Sync(store)).map_err(Appended::Unsynced)
 }
 
 /// What the store vouches for: each hash once, in the order of its first
@@ -329,22 +332,23 @@ pub struct Index {
     pub broken: usize,
 }
 
-pub fn index(dir: &Path) -> io::Result<Index> {
+pub fn index(dir: &Path) -> Result<Index, Vec<u8>> {
     index_within(dir, LOCK_WAIT)
 }
 
-fn index_within(dir: &Path, wait: Duration) -> io::Result<Index> {
-    let file = match fs::File::open(path(dir)) {
-        Ok(f) => regular(f)?,
+fn index_within(dir: &Path, wait: Duration) -> Result<Index, Vec<u8>> {
+    let store = path(dir);
+    let file = match fs::File::open(&store) {
+        Ok(f) => regular(f, &store)?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Index { present: false, hashes: Vec::new(), broken: 0 });
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(Outcome::Io(Err(e)).describe(Action::Open(&store), Form::Action)),
     };
-    os::flock_within(&file, os::FileLock::Shared, wait)?;
+    os::flock_within(&file, os::FileLock::Shared, wait).map_err(|o| o.describe(Action::Lock(&store), Form::Action))?;
     let mut bytes = Vec::new();
     let mut f: &fs::File = &file;
-    f.read_to_end(&mut bytes)?;
+    io_text(f.read_to_end(&mut bytes), Action::Read(&store))?;
     Ok(read(&bytes))
 }
 
@@ -382,10 +386,11 @@ fn index_json(ix: &Index) -> String {
 
 /// The store, read through `file`, a descriptor that already holds the store
 /// lock. A second open of the store would wait on that lock.
-fn read_locked(file: &fs::File) -> io::Result<Index> {
-    let len = usize::try_from(file.metadata()?.len()).map_err(|_| invalid("the approvals store is too large to read"))?;
+fn read_locked(file: &fs::File, store: &Path) -> Result<Index, Vec<u8>> {
+    let len = usize::try_from(io_text(file.metadata(), Action::Read(store))?.len())
+        .map_err(|_| b"the approvals store is too large to read".to_vec())?;
     let mut bytes = vec![0u8; len];
-    file.read_exact_at(&mut bytes, 0)?;
+    io_text(file.read_exact_at(&mut bytes, 0), Action::Read(store))?;
     Ok(read(&bytes))
 }
 
@@ -462,12 +467,12 @@ pub struct Approval<'a> {
 /// The entry's path ends in the file name the ledger gives `hash`, so step 0
 /// never removes another hash's entry, and a rename never puts one hash's
 /// entry at another's path.
-fn entry_for(hash: &str, entry: &Path) -> io::Result<()> {
+fn entry_for(hash: &str, entry: &Path) -> Result<(), &'static str> {
     if !is_hash(hash) {
-        return Err(invalid("the hash is not sha256: and 64 lowercase hex digits"));
+        return Err("the hash is not sha256: and 64 lowercase hex digits");
     }
     if entry.file_name().map(OsStrExt::as_bytes) != Some(ledger::filename(hash).as_bytes()) {
-        return Err(invalid("the entry's path does not end in its hash's file name"));
+        return Err("the entry's path does not end in its hash's file name");
     }
     Ok(())
 }
@@ -479,52 +484,40 @@ fn beside(file: &Path, entry: &Path) -> bool {
 }
 
 /// An approval a commit acts on.
-fn checked(a: &Approval) -> io::Result<()> {
+fn checked(a: &Approval) -> Result<(), &'static str> {
     entry_for(a.hash, a.entry)?;
     if !a.record.starts_with(RECORD_PREFIX) {
-        return Err(invalid("the record is not an approval (it does not start with `check approve(`)"));
+        return Err("the record is not an approval (it does not start with `check approve(`)");
     }
     if !beside(a.staged, a.entry) {
-        return Err(invalid("the staged entry is not a file beside the entry's path"));
+        return Err("the staged entry is not a file beside the entry's path");
     }
     Ok(())
 }
 
-fn note(err: &mut Vec<u8>, line: String) {
-    err.extend_from_slice(line.as_bytes());
+fn note(err: &mut Vec<u8>, parts: &[&[u8]]) {
+    err.extend(parts.concat());
     err.push(b'\n');
-}
-
-/// How an I/O operation ended, in an advisory line's `outcome=`: `ok`, or the
-/// error the kernel returned.
-fn outcome(r: Result<(), &io::Error>) -> String {
-    match r {
-        Ok(()) => "ok".to_string(),
-        Err(e) => match e.raw_os_error() {
-            Some(code) => format!("os-error-{code}"),
-            None => "no-os-code".to_string(),
-        },
-    }
 }
 
 /// One advisory.log line as the CLI writes one (`sf_advisory_log`):
 /// `[<UTC time>] <text>`.
-fn log_line(log: &Path, at: &str, text: &[u8]) -> io::Result<()> {
+fn log_line(log: &Path, at: &str, text: &[u8]) -> Result<(), Vec<u8>> {
     let mut l = Vec::with_capacity(at.len() + text.len() + 4);
     l.push(b'[');
     l.extend_from_slice(at.as_bytes());
     l.extend_from_slice(b"] ");
     l.extend_from_slice(text);
     l.push(b'\n');
-    let mut f = fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log)?;
-    f.write_all(&l)
+    let mut f = io_text(fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log), Action::Open(log))?;
+    io_text(f.write_all(&l), Action::Write(log))
 }
 
 /// The store, opened and locked for a commit or a revoke. The lock goes with
 /// the file.
-fn locked(dir: &Path, wait: Duration) -> io::Result<fs::File> {
+fn locked(dir: &Path, wait: Duration) -> Result<fs::File, Vec<u8>> {
     let file = open_for_append(dir)?;
-    os::flock_within(&file, os::FileLock::Exclusive, wait)?;
+    os::flock_within(&file, os::FileLock::Exclusive, wait).map_err(|o| o.describe(Action::Lock(&path(dir)), Form::Action))?;
     Ok(file)
 }
 
@@ -536,23 +529,24 @@ trait Steps {
         fs::symlink_metadata(p)
     }
     /// The store, read under the lock `file` holds.
-    fn read(&self, file: &fs::File) -> io::Result<Index> {
-        read_locked(file)
+    fn read(&self, file: &fs::File, store: &Path) -> Result<Index, Vec<u8>> {
+        read_locked(file, store)
     }
     fn unlink(&self, p: &Path) -> io::Result<()> {
         fs::remove_file(p)
     }
     /// One advisory.log line.
-    fn log(&self, log: &Path, at: &str, text: &[u8]) -> io::Result<()> {
+    fn log(&self, log: &Path, at: &str, text: &[u8]) -> Result<(), Vec<u8>> {
         log_line(log, at, text)
     }
     /// A directory's entries, synced.
-    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        fs::File::open(dir)?.sync_all()
+    fn sync_dir(&self, dir: &Path) -> Result<(), Vec<u8>> {
+        let file = io_text(fs::File::open(dir), Action::Open(dir))?;
+        io_text(file.sync_all(), Action::Sync(dir))
     }
     /// The store line, under the lock `file` holds.
-    fn append(&self, file: &fs::File, line: &[u8]) -> Result<(), Appended> {
-        write_locked(file, line)
+    fn append(&self, file: &fs::File, store: &Path, line: &[u8]) -> Result<(), Appended> {
+        write_locked(file, store, line)
     }
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         fs::rename(from, to)
@@ -583,15 +577,15 @@ fn commit_with(dir: &Path, a: &Approval, wait: Duration, steps: &dyn Steps, err:
     let file = match locked(dir, wait) {
         Ok(f) => f,
         Err(e) => {
-            note(err, format!("safedeps-core approvals: not committed: {} could not be opened and locked: {e}", path(dir).display()));
+            note(err, &[format!("safedeps-core approvals: not committed: {} could not be opened and locked: ", path(dir).display()).as_bytes(), &e]);
             return Answer::NotApproved(Failure::Store, Entry::Untouched);
         }
     };
     // From here to the answer the store lock is held. It goes with `file`.
     let log = dir.join(ADVISORY_LOG);
-    let say = |text: String| {
+    let say = |text: &[u8]| {
         let at = os::utc_stamp(os::wall(os::WallRole::AdvisoryHeader).seconds());
-        steps.log(&log, &at, text.as_bytes())
+        steps.log(&log, &at, text)
     };
     // Step 0: what stands at the path, and whether the store vouches for the
     // hash, each read once.
@@ -599,14 +593,14 @@ fn commit_with(dir: &Path, a: &Approval, wait: Duration, steps: &dyn Steps, err:
         Ok(_) => true,
         Err(e) if e.kind() == io::ErrorKind::NotFound => false,
         Err(e) => {
-            note(err, format!("safedeps-core approvals: not committed: what stands at the ledger entry's path {} could not be read: {e}", a.entry.display()));
+            note(err, &[b"safedeps-core approvals: not committed: ", &Outcome::Io(Err(e)).describe(Action::Read(a.entry), Form::Action)]);
             return Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched);
         }
     };
-    let vouched = match steps.read(&file) {
+    let vouched = match steps.read(&file, &path(dir)) {
         Ok(ix) => ix.hashes.iter().any(|h| h == a.hash),
         Err(e) => {
-            note(err, format!("safedeps-core approvals: not committed: {} could not be read: {e}", path(dir).display()));
+            note(err, &[format!("safedeps-core approvals: not committed: {} could not be read: ", path(dir).display()).as_bytes(), &e]);
             return Answer::NotApproved(Failure::Store, Entry::Untouched);
         }
     };
@@ -614,21 +608,23 @@ fn commit_with(dir: &Path, a: &Approval, wait: Duration, steps: &dyn Steps, err:
     if stands && !vouched {
         // Whether an entry was removed is the unlink's own answer.
         let removed = steps.unlink(a.entry);
-        match &removed {
+        match removed {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
-                note(err, format!("safedeps-core approvals: not committed: the ledger entry {} is not one the approvals store vouches for, and it could not be removed: {e}", a.entry.display()));
+                note(err, &[format!("safedeps-core approvals: not committed: the ledger entry {} is not one the approvals store vouches for, and it could not be removed: ", a.entry.display()).as_bytes(), &Outcome::Io(Err(e)).describe(Action::Removal, Form::Action)]);
                 return Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched);
             }
             Ok(()) => {
                 touched = Entry::Removed;
-                let said = say(format!("{} hash={} entry={} outcome={}", REMOVAL, a.hash, a.entry.display(), outcome(removed.as_ref().map(|_| ()))));
+                // outcome= is last: its value is the exact describe bytes and may contain spaces and paths.
+                let how = Outcome::Io(Ok(())).describe(Action::Removal, Form::Action);
+                let said = say(&[format!("{} hash={} entry={} outcome=", REMOVAL, a.hash, a.entry.display()).as_bytes(), &how].concat());
                 if let Err(e) = said {
-                    note(err, format!("safedeps-core approvals: not committed: the ledger entry {} was removed, as the approvals store does not vouch for it, and the line that says so could not be written to {}: {e}", a.entry.display(), log.display()));
+                    note(err, &[format!("safedeps-core approvals: not committed: the ledger entry {} was removed, as the approvals store does not vouch for it, and the line that says so could not be written to {}: ", a.entry.display(), log.display()).as_bytes(), &e]);
                     return Answer::NotApproved(Failure::LedgerWrite, touched);
                 }
                 if let Err(e) = steps.sync_dir(dir_of(a.entry)) {
-                    note(err, format!("safedeps-core approvals: not committed: the ledger entry {} was removed, as the approvals store does not vouch for it, and its directory could not be synced: {e}", a.entry.display()));
+                    note(err, &[format!("safedeps-core approvals: not committed: the ledger entry {} was removed, as the approvals store does not vouch for it, and its directory could not be synced: ", a.entry.display()).as_bytes(), &e]);
                     return Answer::NotApproved(Failure::LedgerWrite, touched);
                 }
             }
@@ -636,28 +632,31 @@ fn commit_with(dir: &Path, a: &Approval, wait: Duration, steps: &dyn Steps, err:
     }
     // Step 1: the store line, synced.
     let at = os::utc_stamp(os::wall(os::WallRole::ApprovalRecord).seconds());
-    match steps.append(&file, &line(&at, a.hash, Via::Check, a.record)) {
+    match steps.append(&file, &path(dir), &line(&at, a.hash, Via::Check, a.record)) {
         Ok(()) => {}
         Err(Appended::NotWritten(e)) => {
-            note(err, format!("safedeps-core approvals: not written to {}: {e}", path(dir).display()));
+            note(err, &[format!("safedeps-core approvals: not written to {}: ", path(dir).display()).as_bytes(), &e]);
             return Answer::NotApproved(Failure::Store, touched);
         }
         Err(Appended::Unsynced(e)) => {
-            let how = outcome(Err(&e));
-            note(err, format!("safedeps: unsynced: the approvals store line of {} was written and not synced ({how}). The commit stopped before its approve line and its entry, so no entry of this check stands, and the store may vouch for it.", a.hash));
-            let _ = say(format!("check approve-unsynced hash={} outcome={how}", a.hash));
+            let how = e;
+            note(err, &[format!("safedeps: unsynced: the approvals store line of {} was written and not synced (", a.hash).as_bytes(), &how, b"). The commit stopped before its approve line and its entry, so no entry of this check stands, and the store may vouch for it."]);
+            // outcome= is last; preserve the describe bytes without trimming or rewriting them.
+            let _ = say(&[format!("check approve-unsynced hash={} outcome=", a.hash).as_bytes(), &how].concat());
             return Answer::NotApproved(Failure::InDoubt, touched);
         }
     }
     // Step 2: the approve line, stamped with the store line's time.
     if let Err(e) = steps.log(&log, &at, a.record) {
-        note(err, format!("safedeps-core approvals: not committed: the approve line could not be written to {}: {e}", log.display()));
+        note(err, &[format!("safedeps-core approvals: not committed: the approve line could not be written to {}: ", log.display()).as_bytes(), &e]);
         return Answer::NotApproved(Failure::LedgerWrite, touched);
     }
     // Step 3: the rename, the commit point.
     if let Err(e) = steps.rename(a.staged, a.entry) {
-        note(err, format!("safedeps-core approvals: not committed: the ledger entry {} could not be put in place: {e}", a.entry.display()));
-        let _ = say(format!("check approve-undone hash={} outcome={}", a.hash, outcome(Err(&e))));
+        let how = Outcome::Io(Err(e)).describe(Action::Rename(a.entry), Form::Action);
+        note(err, &[format!("safedeps-core approvals: not committed: the ledger entry {} could not be put in place: ", a.entry.display()).as_bytes(), &how]);
+        // outcome= is last; preserve the describe bytes without trimming or rewriting them.
+        let _ = say(&[format!("check approve-undone hash={} outcome=", a.hash).as_bytes(), &how].concat());
         return Answer::NotApproved(Failure::LedgerWrite, touched);
     }
     Answer::Approved
@@ -695,10 +694,10 @@ impl Revoked {
     }
 }
 
-fn checked_revoke(r: &Revoke) -> io::Result<()> {
+fn checked_revoke(r: &Revoke) -> Result<(), &'static str> {
     entry_for(r.hash, r.entry)?;
     if !beside(r.staged, r.entry) || !beside(r.seen, r.entry) || r.staged == r.seen {
-        return Err(invalid("the staged entry and the entry read are not two files beside the entry's path"));
+        return Err("the staged entry and the entry read are not two files beside the entry's path");
     }
     Ok(())
 }
@@ -722,7 +721,7 @@ fn revoke_with(dir: &Path, r: &Revoke, wait: Duration, rename: impl FnOnce(&Path
     let _file = match locked(dir, wait) {
         Ok(f) => f,
         Err(e) => {
-            note(err, format!("safedeps-core approvals: not revoked: {} could not be opened and locked: {e}", path(dir).display()));
+            note(err, &[format!("safedeps-core approvals: not revoked: {} could not be opened and locked: ", path(dir).display()).as_bytes(), &e]);
             return Revoked::NotRevoked;
         }
     };
@@ -731,7 +730,7 @@ fn revoke_with(dir: &Path, r: &Revoke, wait: Duration, rename: impl FnOnce(&Path
         return Revoked::Changed;
     }
     if let Err(e) = rename(r.staged, r.entry) {
-        note(err, format!("safedeps-core approvals: not revoked: the revoked entry {} could not be put in place: {e}", r.entry.display()));
+        note(err, &[format!("safedeps-core approvals: not revoked: the revoked entry {} could not be put in place: ", r.entry.display()).as_bytes(), &Outcome::Io(Err(e)).describe(Action::Rename(r.entry), Form::Action)]);
         return Revoked::NotRevoked;
     }
     Revoked::Revoked
@@ -769,10 +768,13 @@ const USAGE: &str = "usage: safedeps-core approvals commit <hash> <staged> <entr
 pub fn cli(args: &[String]) -> i32 {
     os::set_umask(0o077);
     let mut stdin = Vec::new();
-    if args.first().map(String::as_str) == Some("commit") && io::stdin().read_to_end(&mut stdin).is_err() {
-        eprintln!("safedeps-core approvals: not committed: the record could not be read from stdin");
-        println!("not-approved {} {}", Failure::LedgerWrite.as_str(), Entry::Untouched.as_str());
-        return 1;
+    if args.first().map(String::as_str) == Some("commit") {
+        if let Err(e) = io::stdin().read_to_end(&mut stdin) {
+            let how = Outcome::Io(Err(e)).describe(Action::Read(Path::new("stdin")), Form::Action);
+            let _ = io::stderr().write_all(&[b"safedeps-core approvals: not committed: ".as_slice(), &how, b"\n"].concat());
+            println!("not-approved {} {}", Failure::LedgerWrite.as_str(), Entry::Untouched.as_str());
+            return 1;
+        }
     }
     let (code, out, err) = run(&state::guard_dir(), args, &stdin);
     let _ = io::stderr().write_all(&err);
@@ -815,7 +817,7 @@ fn run(dir: &Path, args: &[String], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
         ["migrate", rest @ ..] => migrate::command(dir, &ledger::directory_in(dir), rest),
         ["index"] => match index(dir) {
             Ok(ix) => (0, format!("{}\n", index_json(&ix)).into_bytes(), Vec::new()),
-            Err(e) => (1, Vec::new(), format!("safedeps-core approvals: {} could not be read: {}\n", store.display(), e).into_bytes()),
+            Err(e) => (1, Vec::new(), [format!("safedeps-core approvals: {} could not be read: ", store.display()).as_bytes(), &e, b"\n"].concat()),
         },
         _ => (2, Vec::new(), USAGE.as_bytes().to_vec()),
     }
@@ -855,9 +857,9 @@ mod tests {
     fn append_within(dir: &Path, hash: &str, record: &[u8], wait: Duration) -> Result<(), Appended> {
         let at = os::utc_stamp(os::wall(os::WallRole::ApprovalRecord).seconds());
         let file = locked(dir, wait)?;
-        write_locked(&file, &line(&at, hash, Via::Check, record))
+        write_locked(&file, &path(dir), &line(&at, hash, Via::Check, record))
     }
-    fn not_written(r: Result<(), Appended>) -> io::Error {
+    fn not_written(r: Result<(), Appended>) -> Vec<u8> {
         match r {
             Err(Appended::NotWritten(e)) => e,
             other => panic!("not a not-written answer: {other:?}"),
@@ -1083,8 +1085,8 @@ mod tests {
         let d = scratch();
         let held = holder(&d.0, os::FileLock::Exclusive);
         let e = not_written(append_within(&d.0, &h(1), &rec(1), Duration::from_millis(100)));
-        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
-        assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(e, format!("the lock of {} did not finish before the deadline", path(&d.0).display()).as_bytes());
+        assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap_err(), e);
         drop(held);
         assert_eq!(fs::metadata(path(&d.0)).unwrap().len(), 0);
     }
@@ -1104,8 +1106,8 @@ mod tests {
         let d = scratch();
         let file = open_for_append(&d.0).unwrap();
         let whole = line("2026-11-19T08:00:00Z", &h(1), Via::Check, &rec(1));
-        match write_then_sync(&file, &whole, |_| Err(io::Error::from_raw_os_error(5))) {
-            Err(Appended::Unsynced(e)) => assert_eq!(e.raw_os_error(), Some(5)),
+        match write_then_sync(&file, &path(&d.0), &whole, |_| Err(io::Error::from_raw_os_error(5))) {
+            Err(Appended::Unsynced(e)) => assert_eq!(e, format!("the sync of {} returned OS error 5", path(&d.0).display()).as_bytes()),
             other => panic!("a failed sync answered {other:?}"),
         }
         drop(file);
@@ -1119,9 +1121,23 @@ mod tests {
         drop(open_for_append(&d.0).unwrap());
         let read_only = fs::File::open(path(&d.0)).unwrap();
         let whole = line("2026-11-19T08:00:00Z", &h(1), Via::Check, &rec(1));
-        let r = write_then_sync(&read_only, &whole, |_| panic!("a failed write reached the sync"));
+        let r = write_then_sync(&read_only, &path(&d.0), &whole, |_| panic!("a failed write reached the sync"));
         assert!(matches!(r, Err(Appended::NotWritten(_))), "{r:?}");
         assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
+    }
+
+    #[test]
+    fn store_creation_open_and_authored_rejection_stay_distinct() {
+        let d = scratch();
+        let blocker = d.0.join("file");
+        fs::write(&blocker, b"not a directory").unwrap();
+        let create = open_for_append(&blocker).unwrap_err();
+        assert!(create.starts_with(format!("the creation of {} returned OS error ", blocker.display()).as_bytes()));
+        let store = path(&d.0);
+        fs::create_dir(&store).unwrap();
+        let open = open_for_append(&d.0).unwrap_err();
+        assert!(open.starts_with(format!("the open of {} returned OS error ", store.display()).as_bytes()));
+        assert_eq!(regular(fs::File::open(&store).unwrap(), &store).unwrap_err(), b"the approvals store is not a regular file");
     }
 
     // ---- the commit ----------------------------------------------------------
@@ -1173,8 +1189,8 @@ mod tests {
         let other = fs::File::open(path(home)).unwrap();
         match os::flock_within(&other, os::FileLock::Exclusive, Duration::ZERO) {
             Ok(()) => false,
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => true,
-            Err(e) => panic!("the lock check failed: {e}"),
+            Err(Outcome::Deadline) => true,
+            Err(e) => panic!("the lock check failed: {e:?}"),
         }
     }
 
@@ -1236,33 +1252,33 @@ mod tests {
             }
             fs::symlink_metadata(p)
         }
-        fn read(&self, file: &fs::File) -> io::Result<Index> {
-            self.step("read")?;
-            read_locked(file)
+        fn read(&self, file: &fs::File, store: &Path) -> Result<Index, Vec<u8>> {
+            io_text(self.step("read"), Action::Read(store))?;
+            read_locked(file, store)
         }
         fn unlink(&self, p: &Path) -> io::Result<()> {
             self.step("unlink")?;
             fs::remove_file(p)
         }
-        fn log(&self, log: &Path, at: &str, text: &[u8]) -> io::Result<()> {
-            self.step(line_kind(text))?;
+        fn log(&self, log: &Path, at: &str, text: &[u8]) -> Result<(), Vec<u8>> {
+            io_text(self.step(line_kind(text)), Action::Write(log))?;
             log_line(log, at, text)
         }
-        fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-            self.step("sync-dir")?;
+        fn sync_dir(&self, dir: &Path) -> Result<(), Vec<u8>> {
+            io_text(self.step("sync-dir"), Action::Sync(dir))?;
             Real.sync_dir(dir)
         }
-        fn append(&self, file: &fs::File, line: &[u8]) -> Result<(), Appended> {
-            self.step("append")?;
+        fn append(&self, file: &fs::File, store: &Path, line: &[u8]) -> Result<(), Appended> {
+            io_text(self.step("append"), Action::Write(store))?;
             let code = self.code;
             match self.fail {
-                "unsynced" => write_then_sync(file, line, |_| Err(io::Error::from_raw_os_error(code))),
+                "unsynced" => write_then_sync(file, store, line, |_| Err(io::Error::from_raw_os_error(code))),
                 "torn" => {
                     let mut w: &fs::File = file;
-                    w.write_all(&line[..line.len() / 2])?;
-                    Err(Appended::NotWritten(io::Error::from_raw_os_error(code)))
+                    io_text(w.write_all(&line[..line.len() / 2]), Action::Write(store))?;
+                    Err(Appended::NotWritten(Outcome::Io(Err(io::Error::from_raw_os_error(code))).describe(Action::Write(store), Form::Action)))
                 }
-                _ => write_locked(file, line),
+                _ => write_locked(file, store, line),
             }
         }
         fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -1311,6 +1327,22 @@ mod tests {
                 assert!(logged(&d.0).last().unwrap().ends_with(&format!(" outcome={expected}")));
             }
         }
+    }
+
+    #[test]
+    fn the_rename_outcome_reaches_the_last_field_as_its_original_bytes() {
+        let d = scratch();
+        let home = d.0.join(std::ffi::OsStr::from_bytes(b"with spaces-\xff"));
+        fs::create_dir(&home).unwrap();
+        let (staged, entry) = stage(&home, 1, "new entry");
+        let (hash, record) = (h(1), rec(1));
+        let mut err = Vec::new();
+        let answer = commit_with(&home, &approval(1, &staged, &entry, &record, &hash), LOCK_WAIT, &driven("rename", 18), &mut err);
+        assert_eq!(answer, Answer::NotApproved(Failure::LedgerWrite, Entry::Untouched));
+        let expected = [b"the rename to ".as_slice(), entry.as_os_str().as_bytes(), b" returned OS error 18"].concat();
+        assert!(err.ends_with(&[expected.as_slice(), b"\n"].concat()));
+        assert!(fs::read(home.join(ADVISORY_LOG)).unwrap().ends_with(
+            &[format!("check approve-undone hash={hash} outcome=").as_bytes(), &expected, b"\n"].concat()));
     }
     /// The path of the entry of 1 in `home`; and where `stood`, the entry A
     /// approved standing there, a store line that vouches for it, and its
