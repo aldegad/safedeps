@@ -253,6 +253,17 @@ function rootState(root, ownsRoot) {
   );
 }
 
+function bashOutcome(run) {
+  if (run.error) {
+    const error = `spawnSync error ${run.error.code ?? 'without a code'}`;
+    if (!(run.pid > 0)) {
+      return `could not start bash: ${error}`;
+    }
+    return `started bash: ${error}${run.signal ? `; signal ${run.signal}` : ''}`;
+  }
+  return run.signal ? `bash terminated by signal ${run.signal}` : `ran bash: exit ${run.status}`;
+}
+
 // This machine's core as a path under a checkout or a runtime, and the machine
 // it was read from: {machine, core}, core null where no core is built for the
 // machine. The answer is the scan's (safedeps_watch_core_file in
@@ -270,10 +281,7 @@ function machineCore(root = repoRoot) {
   if (run.status === 3) {
     return { machine, core: null };
   }
-  const outcome = run.error
-    ? `could not start bash: ${Number.isInteger(run.error.errno) ? `OS error ${run.error.errno}` : 'error without an OS code'}`
-    : run.signal ? `bash terminated by signal ${run.signal}` : `ran bash: exit ${run.status}`;
-  throw new Error(`could not read which core this machine runs from ${scan} (${outcome})`);
+  throw new Error(`could not read which core this machine runs from ${scan} (${bashOutcome(run)})`);
 }
 
 // The core the runtime is built with: this machine's, from this checkout, as a

@@ -24,8 +24,10 @@
 //!   cache      `check approve(cache)`. A check wrote it for an entry it met
 //!              and did not check, so it is no approval: an entry no check
 //!              approved gets one as easily as any. Counted, never moved.
-//!   take-back  `check approve-undone` or `check approve-in-doubt`, then
-//!              words, one of which, and only one, is `hash=<hash>`.
+//!   take-back  `check approve-undone` or `check approve-in-doubt`.
+//!              Take-back lines read only the `hash=<valid hash>` word
+//!              immediately following the keyword. Any remaining bytes on
+//!              the line are left unread.
 //!   broken     a line that holds `check approve(`, `check approve-undone`
 //!              or `check approve-in-doubt` and is none of the three above.
 //!              Counted, never moved.
@@ -162,14 +164,16 @@ fn holds(text: &[u8], word: &[u8]) -> bool {
 
 /// A finished line, its newline taken off.
 fn seen(l: &[u8]) -> Seen<'_> {
-    if [RECORD_PREFIX, UNDONE, IN_DOUBT].iter().any(|w| holds(l, w)) {
-        read_line(l).unwrap_or(Seen::Broken)
+    if let Some(seen) = read_line(l) {
+        seen
+    } else if [RECORD_PREFIX, UNDONE, IN_DOUBT].iter().any(|w| holds(l, w)) {
+        Seen::Broken
     } else {
         Seen::Other
     }
 }
 
-/// A line that names an approval or a take-back, read whole, or None.
+/// An approval's words or a take-back's header, or None.
 fn read_line(l: &[u8]) -> Option<Seen<'_>> {
     if l.len() < TEXT_AT || l[0] != b'[' || &l[TEXT_AT - 2..TEXT_AT] != b"] " {
         return None;
@@ -196,7 +200,7 @@ fn read_line(l: &[u8]) -> Option<Seen<'_>> {
             if !word_ends(words) {
                 return None;
             }
-            return Some(Seen::Back { epoch, hash: one_hash(words)?, by });
+            return Some(Seen::Back { epoch, hash: first_hash(words)?, by });
         }
     }
     None
@@ -205,6 +209,13 @@ fn read_line(l: &[u8]) -> Option<Seen<'_>> {
 /// What follows a line's first word ends that word.
 fn word_ends(rest: &[u8]) -> bool {
     rest.first().is_none_or(|&b| b == b' ')
+}
+
+/// The first word must be `hash=<hash>`; nothing after it is interpreted.
+fn first_hash(words: &[u8]) -> Option<&str> {
+    let word = words.split(|&b| b == b' ').find(|w| !w.is_empty())?;
+    let hash = std::str::from_utf8(word.strip_prefix(b"hash=")?).ok()?;
+    is_hash(hash).then_some(hash)
 }
 
 /// The one `hash=` word among `words`, where it is a hash.
