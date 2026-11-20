@@ -14,6 +14,14 @@
 #   R   "removed first, so the copy holds nothing older" had no row: the line
 #       could be deleted and the suite stayed green
 #
+# The runtime's re-check reads the approvals store with the core it finds
+# beside its own bin (sf_core in bin/safedeps), and a runtime the installer
+# built without one failed every daily re-check with core_missing. So the
+# runtime carries this machine's core, both digests count it, and a checkout
+# without it is refused by name. A fixture's core is a stand-in script: these
+# rows copy, hash and refuse it, and none of them reads a store with it
+# (scripts/test/watch.sh runs a runtime with the real core).
+#
 # Each fixture is a small checkout of its own (the installer finds its source
 # from where it lives), so a row that goes wrong damages a copy and never this
 # tree. Every row runs and reports whatever another one answered: a row's
@@ -59,14 +67,36 @@ row() {
 
 new_dir() { mktemp -d "${tmp_root}/row.XXXXXX"; }
 
-# A checkout the installer can run from: it finds bin/, lib/ and the wrapper
-# beside its own scripts/install/ directory.
+# This machine's core under a checkout or a runtime, where the CLI looks for
+# its own (sf_core in bin/safedeps): bin/native/<os>-<arch>/safedeps-core, the
+# platform read from the machine bash was built for. Written here again, so the
+# rows hold the installer to the CLI's place and not to its own answer.
+core_file() {
+  local machine="${BASH_VERSINFO[5]:-}" os="" arch=""
+  case "${machine}" in
+    *-darwin*) os=darwin ;;
+    *-linux*) os=linux ;;
+  esac
+  case "${machine%%-*}" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  [[ -n "${os}" && -n "${arch}" ]] || return 1
+  printf 'bin/native/%s-%s/safedeps-core' "${os}" "${arch}"
+}
+CORE=$(core_file) || { printf 'not ok - no core is built for %s, so this battery has no core to place\n' "${BASH_VERSINFO[5]:-an unnamed machine}"; exit 1; }
+
+# A checkout the installer can run from: it finds bin/, lib/, the wrapper and
+# this machine's core beside its own scripts/install/ directory. The core is a
+# stand-in that says what it is.
 make_checkout() { # DIR
-  mkdir -p "$1/scripts/install" "$1/bin"
+  mkdir -p "$1/scripts/install" "$1/bin" "$1/$(dirname "${CORE}")"
   cp "${INSTALLER}" "$1/${INSTALLER}"
   cp bin/safedeps "$1/bin/safedeps"
   cp -R lib "$1/lib"
   cp scripts/safedeps-recheck-alert.sh "$1/scripts/safedeps-recheck-alert.sh"
+  printf '#!/bin/sh\necho "safedeps-core fixture"\n' > "$1/${CORE}"
+  chmod 755 "$1/${CORE}"
 }
 
 home="${tmp_root}/home"
@@ -277,6 +307,52 @@ row_current() {
 }
 row "a second build holds what the checkout holds and nothing older, and a third changes nothing" row_current
 
+# ---- the core: this machine's, beside the runtime's own bin ---------------------------------
+# The runtime's CLI looks for its core beside itself and nowhere else, so the
+# runtime carries this machine's core from its checkout, as the checkout has
+# it, and no other platform's.
+row_core() {
+  local d co root
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  mkdir -p "${co}/bin/native/plan9-mips"
+  printf '#!/bin/sh\necho other\n' > "${co}/bin/native/plan9-mips/safedeps-core"
+  chmod 755 "${co}/bin/native/plan9-mips/safedeps-core"
+  root="${d}/out/agent"
+  stage_ok "${co}" "${root}" || return 1
+  [[ -f "${root}/${CORE}" && ! -L "${root}/${CORE}" && -x "${root}/${CORE}" ]] || no "the runtime has no executable ${CORE}"
+  cmp -s "${co}/${CORE}" "${root}/${CORE}" || no "the runtime's ${CORE} is not the checkout's"
+  [[ "$("${root}/${CORE}")" == "safedeps-core fixture" ]] || no "the runtime's core does not run"
+  [[ "$(find "${root}/bin/native" -type f | wc -l | tr -d ' ')" == 1 ]] || no "bin/native holds: $(find "${root}/bin/native" | tr '\n' ' ')"
+  parent_holds_only "${root}" || return 1
+}
+row "a runtime carries this machine's core from its checkout, beside its bin, and no other platform's" row_core
+
+# ---- a checkout with no core is refused by name ---------------------------------------------
+# No core, a core that cannot run, and a link to one: none is a core the
+# runtime can carry (the digests count regular files, and a link is none).
+# Each is refused by name before anything is built, and a runtime already in
+# place stays as it was.
+row_no_core() {
+  local d co
+  d=$(new_dir)
+  co="${d}/none"; make_checkout "${co}"; rm -rf "${co}/bin/native"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  grep -qF "${CORE}" "${tmp_root}/last.err" || no "the refusal does not name ${CORE}: $(head -c 300 "${tmp_root}/last.err")"
+  co="${d}/noexec"; make_checkout "${co}"; chmod 644 "${co}/${CORE}"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  co="${d}/link"; make_checkout "${co}"
+  mv "${co}/${CORE}" "${co}/${CORE}.real"; ln -s safedeps-core.real "${co}/${CORE}"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  co="${d}/gone"; make_checkout "${co}"
+  stage_ok "${co}" "${d}/out/agent" || return 1
+  mv "${co}/${CORE}" "${d}/kept-core"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  runtime_loads "${d}/out/agent" || return 1
+  cmp -s "${d}/kept-core" "${d}/out/agent/${CORE}" || no "the runtime in place lost its core"
+  no_scraps "${d}/out/agent" || return 1
+}
+row "stage refuses a checkout with no core for this machine by name, and touches nothing" row_no_core
+
 # ---- what the runtime says it is ---------------------------------------------------------------
 # The installer writes .safedeps-runtime.json; the scan (safedeps_watch_runtime_info
 # in lib/watch/scan.sh) reads it, hashes the source checkout by the same rule
@@ -305,6 +381,32 @@ row_runtime_meta() {
   jq -e '.stale == true' <<< "${info}" > /dev/null || no "a runtime whose checkout moved on: ${info}"
 }
 row "the runtime records its version and the digest of its checkout, and reads stale once the checkout moves on" row_runtime_meta
+
+# ---- the two digests count the core alike ----------------------------------------------------
+# The installer records the digest of what it built from (runtimeDigest) and
+# the scan hashes the checkout again (safedeps_watch_tree_digest): two
+# implementations of one rule. They are held side by side on one checkout
+# before and after its core changes, and nothing else: each pair agrees, the
+# pairs differ, and the runtime built first then reads stale.
+scan_digest() { ( source "$1/lib/watch/scan.sh"; safedeps_watch_tree_digest "$1" "$(mktemp "${tmp_root}/step.XXXXXX")" ); }
+row_core_digest() {
+  local d co first second d1 d2 info
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  first="${d}/out/first"; second="${d}/out/second"
+  stage_ok "${co}" "${first}" || return 1
+  d1=$(jq -r '.digest' "${first}/.safedeps-runtime.json")
+  [[ "${d1}" == "$(scan_digest "${co}")" ]] || no "one core: the installer recorded ${d1}, the scan hashes $(scan_digest "${co}")"
+  printf '# built again\n' >> "${co}/${CORE}"
+  stage_ok "${co}" "${second}" || return 1
+  d2=$(jq -r '.digest' "${second}/.safedeps-runtime.json")
+  [[ "${d2}" == "$(scan_digest "${co}")" ]] || no "another core: the installer recorded ${d2}, the scan hashes $(scan_digest "${co}")"
+  [[ "${d2}" != "${d1}" ]] || no "the installer recorded one digest for two cores"
+  info=$(runtime_info "${first}")
+  jq -e '.stale == true' <<< "${info}" > /dev/null || no "the runtime built before the core changed: ${info}"
+  info=$(runtime_info "${second}")
+  jq -e '.stale == false' <<< "${info}" > /dev/null || no "the runtime built after the core changed: ${info}"
+}
+row "the installer and the scan count the core alike: two cores, two digests, each the scan's, and the older runtime reads stale" row_core_digest
 
 # A checkout the digest cannot read has no digest: a file shasum cannot read
 # and a directory find cannot read each leave stale null, with the first line
@@ -453,6 +555,34 @@ install_in() {
 }
 plist_of() { printf '%s/Library/LaunchAgents/com.aldegad.safedeps.recheck.plist' "$1"; }
 
+# ---- status reads a checkout that lost its core as the scan does ------------------------------
+# `status` hashes the runtime's checkout with the installer's digest, the scan
+# with its own. Once the checkout's core is gone both read the runtime stale:
+# a path that is not there is counted as nothing, as find skips it, and is no
+# reason for status to stop. status asks launchctl only to print, so the shim
+# serves on every platform.
+row_status_core_gone() {
+  local d co h out info
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; mkdir -p "${h}"; LC_LOG="${d}/lc.log"
+  HOME="${h}" node "${co}/${INSTALLER}" stage --root "${h}/.safedeps/agent" > /dev/null 2> "${tmp_root}/last.err" \
+    || no "stage exited $?: $(head -c 300 "${tmp_root}/last.err")"
+  status_json() {
+    HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" status 2> "${tmp_root}/last.err" \
+      || no "status exited $?: $(head -c 300 "${tmp_root}/last.err")"
+  }
+  out=$(status_json)
+  jq -e '.agent_runtime_stale == false' <<< "${out}" > /dev/null || no "status of a fresh runtime: $(jq -c '{runtime, agent_runtime_stale}' <<< "${out}")"
+  info=$(runtime_info "${h}/.safedeps/agent")
+  jq -e '.stale == false' <<< "${info}" > /dev/null || no "the scan of a fresh runtime: ${info}"
+  rm -rf "${co}/bin/native"
+  out=$(status_json)
+  jq -e '.agent_runtime_stale == true' <<< "${out}" > /dev/null || no "status once the core is gone: $(jq -c '{runtime, agent_runtime_stale}' <<< "${out}")"
+  info=$(runtime_info "${h}/.safedeps/agent")
+  jq -e '.stale == true' <<< "${info}" > /dev/null || no "the scan once the core is gone: ${info}"
+}
+row "status and the scan both read a runtime stale once its checkout's core is gone" row_status_core_gone
+
 row_install() {
   local d co h
   d=$(new_dir); co="${d}/co"; make_checkout "${co}"
@@ -504,14 +634,29 @@ row_install_fails() {
   runtime_loads "${agent}" || return 1
   no_scraps "${agent}" || return 1
 }
+# A checkout with no core is refused before install writes anything: no
+# directory, no plist, no watch config, no launchctl call.
+row_install_no_core() {
+  local d co h before
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  rm -rf "${co}/bin/native"
+  h="${d}/home"; mkdir -p "${h}"; LC_LOG="${d}/lc.log"
+  before=$(digest "${d}")
+  install_in "${co}" "${h}"
+  (( LAST_RC != 0 )) || no "install exited 0 with no core"
+  grep -qF "core-missing: " "${tmp_root}/last.err" || no "install did not refuse by name: $(head -c 300 "${tmp_root}/last.err")"
+  [[ "$(digest "${d}")" == "${before}" ]] || no "a refused install changed what is under ${d}"
+}
 if [[ "$(uname -s)" == Darwin ]]; then
   row "install registers an agent whose runtime was built whole" row_install
   row "install replaces an agent an earlier version built, which has no marker" row_install_legacy
   row "a failed install leaves the registered agent, its plist and launchd as they were" row_install_fails
+  row "install refuses a checkout with no core for this machine by name before it writes anything" row_install_no_core
 else
   skip "install registers an agent whose runtime was built whole" "${installed_skip}"
   skip "install replaces an agent an earlier version built, which has no marker" "${installed_skip}"
   skip "a failed install leaves the registered agent, its plist and launchd as they were" "${installed_skip}"
+  skip "install refuses a checkout with no core for this machine by name before it writes anything" "${installed_skip}"
 fi
 
 if (( failures > 0 )); then

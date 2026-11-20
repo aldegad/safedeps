@@ -717,6 +717,60 @@ row_ledger_mixed() {
 }
 row "a ledger of entries with and without a project context: every entry judged, each spec asked once, both contexts revoked" row_ledger_mixed
 
+# ---- the agent's runtime and its core -----------------------------------------------------
+# The daily wrapper runs a runtime the installer built from this tree (`stage`),
+# from its own place as launchd does: its own bin, which reads the approvals
+# store with the core beside it. A runtime with no core fails every re-check,
+# and the wrapper says so by the failure's name.
+agent_stage() { # ROOT
+  HOME="${home}" node "${ROOT_DIR}/scripts/install/install-safedeps-recheck-agent.mjs" stage --root "$1" > /dev/null 2> "${d}/stage.err" \
+    || no "stage exited $?: $(head -c 400 "${d}/stage.err")"
+}
+agent_wrapper() { # ROOT: the runtime's own wrapper, which runs the runtime's own bin
+  rc=0
+  (cd "${d}" && envd env -u SAFEDEPS_BIN "$1/scripts/safedeps-recheck-alert.sh" > /dev/null 2> "${d}/wrapper.err") || rc=$?
+}
+alerts_of() { # KIND: that kind's alerts, a line each, without their time
+  [[ ! -f "${home}/recheck-alerts.jsonl" ]] || jq -c --arg k "$1" 'select(.kind == $k) | del(.at)' "${home}/recheck-alerts.jsonl"
+}
+all_alerts() { cat "${home}/recheck-alerts.jsonl" 2>/dev/null || true; }
+
+# A runtime with no core: one an installer built before it carried the core,
+# or one whose core is gone.
+row_agent_no_core() {
+  new_world; register a
+  npm_lock "${d}/p/a" right@2.0.0
+  agent_stage "${d}/agent"
+  rm -rf "${d}/agent/bin/native"
+  sd check PyPI fixture-agent-no-core@1.0.0
+  [[ "${rc}" == 0 ]] || no "setup check exited ${rc}: ${out}"
+  agent_wrapper "${d}/agent"
+  [[ "${rc}" == 1 ]] || no "the wrapper exited ${rc}: $(cat "${d}/wrapper.err") $(all_alerts)"
+  st '.ledger == null and [.errors[] | select(.kind == "ledger_stage_failed")] == [{kind: "ledger_stage_failed", exit: 4, error: "core_missing"}]' \
+    "the scan's ledger stage" '.errors'
+  grep -q 're-check fail-closed core-missing' "${home}/advisory.log" || no "advisory.log has no re-check fail-closed core-missing line"
+  [[ "$(alerts_of recheck_failed)" == '{"kind":"recheck_failed","exit_status":4,"error":"core_missing"}' ]] \
+    || no "the re-check failure was not raised by its name: $(all_alerts)"
+  [[ -z "$(alerts_of recheck_invalid_output)" ]] || no "the failure was read as invalid output: $(all_alerts)"
+  [[ "$(alerts_of watch_attention | jq -s 'length == 1 and .[0].errors >= 1')" == true ]] || no "the run's own news was not said: $(all_alerts)"
+}
+row "a runtime with no core: its re-check ends core_missing (exit 4), the scan records ledger_stage_failed, and the wrapper raises the failure by that name" row_agent_no_core
+
+row_agent_core() {
+  new_world; register a
+  npm_lock "${d}/p/a" right@2.0.0
+  agent_stage "${d}/agent"
+  sd check PyPI fixture-agent-core@1.0.0
+  [[ "${rc}" == 0 ]] || no "setup check exited ${rc}: ${out}"
+  agent_wrapper "${d}/agent"
+  [[ "${rc}" == 0 ]] || no "the wrapper exited ${rc}: $(cat "${d}/wrapper.err") $(all_alerts)"
+  st '[.errors[] | select(.kind == "ledger_stage_failed")] == [] and .ledger.checked == 1 and .ledger.still_clean == 1
+      and .ledger.suspected_forgery == [] and .ledger.approvals_store.present == true' "the runtime's re-check" '{errors, ledger}'
+  ! grep -q 're-check fail-closed' "${home}/advisory.log" || no "advisory.log: $(grep 're-check fail-closed' "${home}/advisory.log")"
+  [[ -z "$(alerts_of recheck_failed)$(alerts_of recheck_invalid_output)$(alerts_of recheck_attention)" ]] || no "a re-check alert was raised: $(all_alerts)"
+}
+row "a runtime the installer built carries the core: its re-check reads the approvals store, and the wrapper raises no re-check alert" row_agent_core
+
 # ---- the lock, the publish, the hand-off ------------------------------------------------
 wait_for() { # FILE
   local i
