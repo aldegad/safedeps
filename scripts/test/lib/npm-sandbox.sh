@@ -115,13 +115,17 @@ make_package sd-swapped 1.0.0
 make_package sd-swapped 1.0.1
 
 # --- local registry and advisory provider ----------------------------------------
+# Each server writes what it saw of every connection, with times, to a trace
+# (lib/fixture-trace.mjs), so a failed row's artifacts say whether a request
+# that went unanswered reached the server.
 ( cd "${tmp_root}" && exec -a "${CHILD_MARKER}" \
     node "${ROOT_DIR}/scripts/test/fixture-registry.mjs" \
-    "${tmp_root}/registry.port" "${tmp_root}/tarballs" "${tmp_root}/registry.log" ) &
+    "${tmp_root}/registry.port" "${tmp_root}/tarballs" "${tmp_root}/registry.log" "${tmp_root}/registry.trace" ) &
 owned_children+=("$!")
 printf '{"vulnerable":[]}\n' > "${tmp_root}/osv-state.json"
 ( cd "${tmp_root}" && exec -a "${CHILD_MARKER}" \
-    node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${tmp_root}/osv.port" "${tmp_root}/osv-state.json" ) &
+    node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${tmp_root}/osv.port" "${tmp_root}/osv-state.json" \
+    "${tmp_root}/osv.trace" ) &
 owned_children+=("$!")
 for _ in {1..50}; do
   [[ -s "${tmp_root}/registry.port" && -s "${tmp_root}/osv.port" ]] && break

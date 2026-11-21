@@ -15,11 +15,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { traceServer } from './lib/fixture-trace.mjs';
 
-const [portFile, tarDir, logFile] = process.argv.slice(2);
+// The optional fourth argument is a file the server appends each connection's
+// events to (lib/fixture-trace.mjs).
+const [portFile, tarDir, logFile, traceFile] = process.argv.slice(2);
 
 if (!portFile || !tarDir || !logFile) {
-  console.error('usage: fixture-registry.mjs <port-file> <tarball-dir> <request-log>');
+  console.error('usage: fixture-registry.mjs <port-file> <tarball-dir> <request-log> [<trace-file>]');
   process.exit(2);
 }
 
@@ -68,6 +71,7 @@ const server = http.createServer((req, res) => {
   res.end('{}');
 });
 
+traceServer(server, traceFile);
 server.listen(0, '127.0.0.1', () => {
   fs.writeFileSync(portFile, String(server.address().port));
 });

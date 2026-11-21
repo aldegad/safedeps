@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import http from 'node:http';
 import fs from 'node:fs';
+import { traceServer } from './lib/fixture-trace.mjs';
 
 const portFile = process.argv[2];
 const stateFile = process.argv[3];
+// Optional: a file the server appends each connection's events to
+// (lib/fixture-trace.mjs).
+const traceFile = process.argv[4];
 
 if (!portFile || !stateFile) {
-  console.error('usage: fixture-provider.mjs <port-file> <state-file>');
+  console.error('usage: fixture-provider.mjs <port-file> <state-file> [<trace-file>]');
   process.exit(2);
 }
 
@@ -279,6 +283,7 @@ const server = http.createServer(async (req, res) => {
   res.end('not found');
 });
 
+traceServer(server, traceFile);
 server.listen(0, '127.0.0.1', () => {
   fs.writeFileSync(portFile, String(server.address().port));
 });
