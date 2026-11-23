@@ -76,9 +76,10 @@ fresh() { # slots: a home with the runner installed and the queue empty
   printf '%s\n' "$1" > "${home}/safedeps-runs/.slots"
   mkdir -p "${home}/safedeps-runs/.queue"
 }
-ticket() { # pid, then the lines it holds
+ticket() { # pid, then the lines it holds; $record is its path
   local pid="$1"; shift
-  printf '%s\n' "$@" > "${home}/safedeps-runs/.queue/$(( $(date +%s) - 100 ))-$(printf %07d "${pid}")"
+  record="${home}/safedeps-runs/.queue/$(( $(date +%s) - 100 ))-$(printf %07d "${pid}")"
+  printf '%s\n' "$@" > "${record}"
 }
 slot() { # pid, then the identity it holds or nothing
   mkdir -p "${home}/safedeps-runs/.slot"
@@ -86,12 +87,46 @@ slot() { # pid, then the identity it holds or nothing
   printf '%s\n' "$1" > "${home}/safedeps-runs/.slot/pid"
   printf 'other since 00:00:00\n' > "${home}/safedeps-runs/.slot/owner"
 }
+# A read cut short. The runner of the next row finds these tools first on its
+# PATH. Given the path in PROBE_FILE, one prints what an I/O error part way
+# through the read leaves, the bytes in PROBE_CUT (sed reads that file in the
+# path's place), notes the read in PROBE_SEEN and exits 1. Every other call is
+# the real tool's.
+probe="${tmp_root}/probe"
+mkdir -p "${probe}"
+{
+  printf '#!/bin/bash\n'
+  printf 'real_cat=%q real_sed=%q\n' "$(command -v cat)" "$(command -v sed)"
+  cat <<'EOF'
+tool=${0##*/}; real=real_${tool}; real=${!real}
+hit=""
+for a in "$@"; do [[ -n "${PROBE_FILE:-}" && "${a}" == "${PROBE_FILE}" ]] && hit=1; done
+[[ -n "${hit}" ]] || exec "${real}" "$@"
+case "${tool}" in
+  sed) args=(); for a in "$@"; do [[ "${a}" == "${PROBE_FILE}" ]] && a=${PROBE_CUT}; args+=("${a}"); done
+       "${real}" "${args[@]}" ;;
+  *) "${real_cat}" "${PROBE_CUT}" ;;
+esac
+: > "${PROBE_SEEN}"
+exit 1
+EOF
+} > "${probe}/cut-short"
+chmod +x "${probe}/cut-short"
+for tool in cat sed; do ln -s cut-short "${probe}/${tool}"; done
+probe_file=""
+cut_short() { # path, bytes: the next row's runner reads path to all but its last bytes, and the read fails
+  probe_file="$1"
+  head -c "$(( $(wc -c < "$1") - $2 ))" "$1" > "${tmp_root}/cut"
+}
+
 # start: a suite behind the records, in the background; $suite is its pid.
 start() {
-  rm -f "${tmp_root}/ran" "${tmp_root}/err"
+  rm -f "${tmp_root}/ran" "${tmp_root}/err" "${tmp_root}/seen"
+  local env=(HOME="${home}")
+  [[ -z "${probe_file}" ]] || env+=(PATH="${probe}:${PATH}" PROBE_FILE="${probe_file}" PROBE_CUT="${tmp_root}/cut" PROBE_SEEN="${tmp_root}/seen")
   # Started as a host starts it, by its own #! line.
   # The marker is an argument the suite ignores, so the sweep finds the runner.
-  ( cd "${tmp_root}" && HOME="${home}" exec "${home}/safedeps-runs/slot.sh" row \
+  ( cd "${tmp_root}" && exec env "${env[@]}" "${home}/safedeps-runs/slot.sh" row \
       bash -c ': > "$1"' _ "${tmp_root}/ran" "${MARK}" ) 2> "${tmp_root}/err" &
   suite=$!
   children+=("${suite}")
@@ -111,6 +146,9 @@ expect() { # ran|waited, label
   local got
   got=$(decided)
   stop "${suite}"
+  # A row with a read cut short holds only if the runner read that record.
+  [[ -z "${probe_file}" || -e "${tmp_root}/seen" ]] || got="${got}, and it never read ${probe_file##*/}"
+  probe_file=""
   if [[ "${got}" == "$1" ]]; then pass "$2"; else fail "$2 (the suite: ${got})"; fi
 }
 
@@ -127,6 +165,19 @@ fresh 1; ticket "${witness}" other
 expect waited "a ticket ahead written before records held a start is kept while its pid runs"
 fresh 1; slot "${witness}"
 expect waited "a slot written before records held a start is kept while its pid runs"
+
+# --- a read that fails part way gives nothing --------------------------------------------
+# What a cut-short read printed is no part of the record, however well formed.
+# The ticket's part names another start; the slot's part is the pid's first
+# digits, another pid.
+fresh 1; ticket "${witness}" other "${other_id}"; cut_short "${record}" 2
+expect waited "a ticket ahead whose read fails part way is judged on its pid alone, and kept while the pid runs"
+if (( witness >= 20 )); then
+  fresh 1; slot "${witness}" "${witness_id}"; cut_short "${home}/safedeps-runs/.slot/pid" 2
+  expect waited "a slot whose pid read fails after its first digits is not taken"
+else
+  fail "a slot whose pid read fails after its first digits (the witness pid ${witness} has no first digits that are a pid)"
+fi
 
 # --- as before --------------------------------------------------------------------------
 fresh 1; ticket "${witness}" other "${witness_id}"
