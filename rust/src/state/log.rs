@@ -9,13 +9,21 @@
 //! the lock it renames the whole live file to an archive name that nothing
 //! holds yet. The next line any writer appends makes a new live file.
 //!
+//! Archive names sort in the order the archives were made, whatever the
+//! clock reads. A rotation takes the first name of its second, or the name
+//! after the newest one where that is of the same second or a later one.
+//! Retention removes the oldest names first, so it removes the oldest
+//! archives, and the newest name is the archive just made.
+//!
 //! A writer that opened the live file before the rename and writes after it
 //! writes into the archive. So a new archive stays plain. Only a later
 //! rotation compresses it, and only once nothing has written to it for the
-//! quiet window (QUIET_SECONDS, counted from its mtime). A line is in the
-//! live file or in one archive. It leaves them by retention, or when its
-//! writer held the old file open for longer than the quiet window and wrote
-//! after the compression read it.
+//! quiet window (QUIET_SECONDS), counted from its mtime. A rename keeps a
+//! file's mtime, so just before the rename the rotation sets the live
+//! file's mtime to now: the window counts from the rename, or from a later
+//! write. A line is in the live file or in one archive. It leaves them by
+//! retention, or when its writer held the old file open for longer than the
+//! quiet window and wrote after the compression read it.
 //!
 //! The lock is flock(2) on `advisory.log.rotate.lock`, a regular file that
 //! is never removed. The kernel lets the lock go when its holder exits, by
@@ -97,15 +105,16 @@ fn name(path: &Path) -> &[u8] {
 fn stamp(seconds: i64) -> String {
     os::utc_stamp(seconds).replace(['-', ':'], "")
 }
+/// An archive's place in the order archives were made: its stamp, then its
+/// number in that second.
+type Key = (Vec<u8>, u32);
+
 /// `<live>.<UTC stamp>`, with `.<n>` after it for the n-th archive of one
 /// second.
-fn archive_path(file: &Path, stamp: &str, n: u32) -> PathBuf {
-    let n = if n == 0 { String::new() } else { format!(".{n}") };
-    suffixed(file, format!(".{stamp}{n}").as_bytes())
+fn archive_path(file: &Path, (stamp, n): &Key) -> PathBuf {
+    let n = if *n == 0 { String::new() } else { format!(".{n}") };
+    suffixed(file, &[b".".as_slice(), stamp.as_slice(), n.as_bytes()].concat())
 }
-
-/// An archive's place in time: its stamp, then its number in that second.
-type Key = (Vec<u8>, u32);
 
 /// The key of the archive name `name` of the live file `live`, and whether
 /// it is the gzip one. Only `<live>.<stamp>`, `<live>.<stamp>.<n>` and each
@@ -141,15 +150,28 @@ impl Archive {
     }
 }
 
-/// The archives beside `file`, oldest first. A name that is gone by the
-/// time it is read is not one of them.
-fn archives(file: &Path) -> io::Result<BTreeMap<Key, Archive>> {
-    let dir = file.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+/// What stands beside the live file under archive names.
+struct Listing {
+    /// The archives, oldest first: the regular files. A name that is gone by
+    /// the time it is read is not one of them.
+    found: BTreeMap<Key, Archive>,
+    /// The newest archive name anything holds, a regular file or not.
+    newest: Option<Key>,
+}
+
+/// The directory `file` is in.
+fn directory(file: &Path) -> &Path {
+    file.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."))
+}
+
+/// What stands beside `file` under archive names.
+fn archives(file: &Path) -> io::Result<Listing> {
     let live = name(file);
-    let mut found: BTreeMap<Key, Archive> = BTreeMap::new();
-    for entry in fs::read_dir(dir)? {
+    let mut listing = Listing { found: BTreeMap::new(), newest: None };
+    for entry in fs::read_dir(directory(file))? {
         let entry = entry?;
         let Some((key, gzip)) = parse(live, entry.file_name().as_bytes()) else { continue };
+        listing.newest = listing.newest.take().max(Some(key.clone()));
         // DirEntry::metadata does not follow a link.
         let meta = match entry.metadata() {
             Ok(meta) => meta,
@@ -157,10 +179,10 @@ fn archives(file: &Path) -> io::Result<BTreeMap<Key, Archive>> {
             Err(e) => return Err(e),
         };
         if !meta.file_type().is_file() { continue }
-        let slot = found.entry(key).or_default();
+        let slot = listing.found.entry(key).or_default();
         if gzip { slot.gzip = Some((entry.path(), meta.len())) } else { slot.plain = Some((entry.path(), meta)) }
     }
-    Ok(found)
+    Ok(listing)
 }
 
 /// One line, `[<UTC time>] <level> <message>`, in one write.
@@ -217,20 +239,25 @@ fn rotate(file: &Path, knobs: &Knobs) -> Rotation {
         Ok(_) => return Rotation::Under,
         Err(e) => return failed(file, io_said(e, Action::Read(file))),
     };
-    let (archive, made) = match free(file, os::wall(os::WallRole::AdvisoryRotationName).seconds()) {
-        Ok(free) => free,
+    // Under the lock no other rotation names an archive, so the name is
+    // still free at the rename.
+    let made = match archives(file).map_err(|e| io_said(e, Action::Walk(directory(file))))
+        .and_then(|listing| next(listing.newest.as_ref(), stamp(os::wall(os::WallRole::AdvisoryRotationName).seconds()))) {
+        Ok(made) => made,
         Err(why) => return failed(file, why),
     };
+    let archive = archive_path(file, &made);
+    if let Err(why) = touch(file) { return failed(file, why) }
     if let Err(e) = fs::rename(file, &archive) { return failed(file, io_said(e, Action::Rename(&archive))) }
     let mut said = [format!("advisory log rotated: {bytes} bytes moved to ").as_bytes(), name(&archive)].concat();
     match archives(file) {
-        Ok(found) => compress_one(file, &found, &made, knobs.quiet, &mut said),
-        Err(e) => said.extend_from_slice(&[b"; no archive compressed: ".as_slice(), io_said(e, Action::Walk(file.parent().unwrap_or(file))).as_slice()].concat()),
+        Ok(listing) => compress_one(file, &listing.found, &made, knobs.quiet, &mut said),
+        Err(e) => said.extend_from_slice(&[b"; no archive compressed: ".as_slice(), io_said(e, Action::Walk(directory(file))).as_slice()].concat()),
     }
     // The listing again: a compression changed what the archives hold.
     match archives(file) {
-        Ok(found) => prune(&found, &made, knobs, &mut said),
-        Err(e) => said.extend_from_slice(&[b"; no archive removed: ".as_slice(), io_said(e, Action::Walk(file.parent().unwrap_or(file))).as_slice()].concat()),
+        Ok(listing) => prune(&listing.found, knobs, &mut said),
+        Err(e) => said.extend_from_slice(&[b"; no archive removed: ".as_slice(), io_said(e, Action::Walk(directory(file))).as_slice()].concat()),
     }
     append(file, "WARN", &said);
     Rotation::Rotated
@@ -265,25 +292,33 @@ fn take(lock: &Path) -> Result<Option<fs::File>, Vec<u8>> {
     }
 }
 
-/// The first archive name of second `seconds` that no file holds, plain or
-/// gzip. Under the lock no other rotation names one, so the name is still
-/// free at the rename.
-fn free(file: &Path, seconds: i64) -> Result<(PathBuf, Key), Vec<u8>> {
-    let stamp = stamp(seconds);
-    for n in 0..1000 {
-        let plain = archive_path(file, &stamp, n);
-        let gzip = suffixed(&plain, GZIP_SUFFIX);
-        match (lstat(&plain), lstat(&gzip)) {
-            (Ok(None), Ok(None)) => return Ok((plain, (stamp.into_bytes(), n))),
-            (Err(e), _) => return Err(io_said(e, Action::Read(&plain))),
-            (_, Err(e)) => return Err(io_said(e, Action::Read(&gzip))),
-            _ => {}
-        }
+/// The key of the archive a rotation makes in the second `stamp`: the
+/// second's first, or the one after `newest`, the newest name anything
+/// holds, where that is of the same second or a later one. So the names
+/// sort in the order the archives were made whatever the clock reads, and
+/// the plain and gzip names of the key are both free.
+fn next(newest: Option<&Key>, stamp: String) -> Result<Key, Vec<u8>> {
+    match newest {
+        Some((second, n)) if second.as_slice() >= stamp.as_bytes() => match n.checked_add(1) {
+            Some(after) => Ok((second.clone(), after)),
+            None => Err([b"no archive number follows ".as_slice(), n.to_string().as_bytes(), b" in ", second.as_slice()].concat()),
+        },
+        _ => Ok((stamp.into_bytes(), 0)),
     }
-    Err([b"every archive name of ".as_slice(), stamp.as_bytes(), b" is taken"].concat())
 }
 
-/// Nothing has written to `meta`'s file for longer than `window`.
+/// Set `file`'s mtime to now. A rename keeps a file's mtime, and the quiet
+/// window counts from the rename: a writer that opened the live file before
+/// it may write to the archive after it.
+fn touch(file: &Path) -> Result<(), Vec<u8>> {
+    let now = os::wall(os::WallRole::AdvisoryArchiveMade).system_time();
+    fs::File::open(file).map_err(|e| io_said(e, Action::Open(file)))?
+        .set_modified(now).map_err(|e| io_said(e, Action::Touch(file)))
+}
+
+/// Nothing has written to `meta`'s file for longer than `window`, and it
+/// was not renamed to its archive name inside it: the rotation touched it
+/// just before the rename.
 fn quiet(meta: &fs::Metadata, now: SystemTime, window: Duration) -> bool {
     meta.modified().ok().and_then(|written| now.duration_since(written).ok()).is_some_and(|age| age > window)
 }
@@ -343,16 +378,16 @@ fn compress(file: &Path, plain: &Path, gzip: &Path) -> Result<bool, Vec<u8>> {
 }
 
 /// Remove the archives beyond the bounds, newest kept first: past `keep`
-/// archives, or once all of them together pass `total` bytes. The newest
-/// one is kept whatever its size, and so is the one this rotation made.
-fn prune(found: &BTreeMap<Key, Archive>, made: &Key, knobs: &Knobs, said: &mut Vec<u8>) {
+/// archives, or once all of them together pass `total` bytes. The newest is
+/// the archive this rotation made (`next`), and it is kept whatever the
+/// bounds.
+fn prune(found: &BTreeMap<Key, Archive>, knobs: &Knobs, said: &mut Vec<u8>) {
     let mut bytes: u64 = 0;
     let mut removed: Vec<&[u8]> = Vec::new();
     let mut kept: Vec<Vec<u8>> = Vec::new();
-    for (index, (key, archive)) in found.iter().rev().enumerate() {
+    for (index, archive) in found.values().rev().enumerate() {
         bytes = bytes.saturating_add(archive.bytes());
-        if key == made { continue }
-        if index as u64 >= knobs.keep || index > 0 && bytes > knobs.total {
+        if index > 0 && (index as u64 >= knobs.keep || bytes > knobs.total) {
             for path in archive.paths() {
                 match fs::remove_file(path) {
                     Ok(()) => removed.push(name(path)),
@@ -394,8 +429,9 @@ mod tests {
         fs::File::open(path).unwrap().set_modified(SystemTime::now() - Duration::from_secs(seconds)).unwrap();
     }
     fn plain_archives(dir: &Path) -> Vec<PathBuf> {
-        archives(&dir.join("advisory.log")).unwrap().into_values().filter_map(|a| a.plain.map(|(p, _)| p)).collect()
+        archives(&dir.join("advisory.log")).unwrap().found.into_values().filter_map(|a| a.plain.map(|(p, _)| p)).collect()
     }
+    fn at(seconds: i64, n: u32) -> Key { (stamp(seconds).into_bytes(), n) }
     fn gunzip(path: &Path) -> Vec<u8> {
         let out = Command::new("gzip").arg("-dc").arg(path).output().unwrap();
         assert!(out.status.success(), "{} is whole gzip", path.display());
@@ -405,8 +441,8 @@ mod tests {
     #[test]
     fn archive_names_are_the_stamp_and_a_number_in_its_second() {
         let live = Path::new("fixture/advisory.log");
-        assert_eq!(archive_path(live, &stamp(0), 0).as_os_str(), "fixture/advisory.log.19700101T000000Z");
-        assert_eq!(archive_path(live, &stamp(0), 2).as_os_str(), "fixture/advisory.log.19700101T000000Z.2");
+        assert_eq!(archive_path(live, &at(0, 0)).as_os_str(), "fixture/advisory.log.19700101T000000Z");
+        assert_eq!(archive_path(live, &at(0, 2)).as_os_str(), "fixture/advisory.log.19700101T000000Z.2");
         assert_eq!(suffixed(live, LOCK_SUFFIX).as_os_str(), "fixture/advisory.log.rotate.lock");
         let key = |n| (b"20261123T221357Z".to_vec(), n);
         for (name, read) in [
@@ -466,14 +502,18 @@ mod tests {
     }
 
     #[test]
-    fn a_name_of_this_second_that_a_file_holds_is_not_taken() {
-        let (_d, log) = dir();
-        let first = archive_path(&log, &stamp(1_800_000_000), 0);
-        fs::write(&first, b"a").unwrap();
-        fs::write(suffixed(&archive_path(&log, &stamp(1_800_000_000), 1), GZIP_SUFFIX), b"b").unwrap();
-        let (free, key) = free(&log, 1_800_000_000).unwrap();
-        assert_eq!(free, archive_path(&log, &stamp(1_800_000_000), 2));
-        assert_eq!(key, (stamp(1_800_000_000).into_bytes(), 2));
+    fn the_next_name_follows_the_newest_of_its_second_or_a_later_one() {
+        let now = stamp(1_800_000_000);
+        // No archive, or only those of earlier seconds: the second's first.
+        assert_eq!(next(None, now.clone()), Ok(at(1_800_000_000, 0)));
+        assert_eq!(next(Some(&at(1_799_999_999, 7)), now.clone()), Ok(at(1_800_000_000, 0)));
+        // The second's newest is its second name: the third, though the
+        // first is free, as retention leaves it.
+        assert_eq!(next(Some(&at(1_800_000_000, 1)), now.clone()), Ok(at(1_800_000_000, 2)));
+        // A later second's name, as a clock that went back finds it.
+        assert_eq!(next(Some(&at(1_800_000_060, 0)), now.clone()), Ok(at(1_800_000_060, 1)));
+        assert_eq!(next(Some(&at(1_800_000_000, u32::MAX)), now),
+            Err(format!("no archive number follows {} in {}", u32::MAX, stamp(1_800_000_000)).into_bytes()));
     }
 
     #[test]
@@ -521,8 +561,8 @@ mod tests {
     fn a_new_archive_stays_plain_and_a_later_rotation_compresses_one_quiet_one() {
         let (d, log) = dir();
         let quiet = Knobs { quiet: Duration::from_secs(60), ..knobs(100) };
-        let old = archive_path(&log, &stamp(1_700_000_000), 0);
-        let older = archive_path(&log, &stamp(1_600_000_000), 0);
+        let old = archive_path(&log, &at(1_700_000_000, 0));
+        let older = archive_path(&log, &at(1_600_000_000, 0));
         fs::write(&old, b"old line\n").unwrap();
         fs::write(&older, b"older line\n").unwrap();
         aged(&old, 120);
@@ -563,7 +603,7 @@ mod tests {
     #[test]
     fn a_plain_archive_beside_its_gzip_is_the_record_and_is_compressed_again() {
         let (_d, log) = dir();
-        let plain = archive_path(&log, &stamp(1_700_000_000), 0);
+        let plain = archive_path(&log, &at(1_700_000_000, 0));
         let gzip = suffixed(&plain, GZIP_SUFFIX);
         fs::write(&plain, b"first\nlate\n").unwrap();
         fs::write(&gzip, b"not what the plain file holds").unwrap();
@@ -577,7 +617,7 @@ mod tests {
     #[test]
     fn a_gzip_that_fails_leaves_the_plain_archive() {
         let (_d, log) = dir();
-        let plain = archive_path(&log, &stamp(1_700_000_000), 0);
+        let plain = archive_path(&log, &at(1_700_000_000, 0));
         fs::write(&plain, b"kept\n").unwrap();
         aged(&plain, 120);
         // gzip cannot read it, so it fails.
@@ -596,7 +636,7 @@ mod tests {
     fn retention_counts_plain_and_gzip_archives_and_keeps_the_one_just_made() {
         let (d, log) = dir();
         for (seconds, gzip) in [(1_600_000_000, true), (1_600_000_001, false), (1_600_000_002, true), (1_600_000_003, false)] {
-            let path = archive_path(&log, &stamp(seconds), 0);
+            let path = archive_path(&log, &at(seconds, 0));
             fs::write(if gzip { suffixed(&path, GZIP_SUFFIX) } else { path }, vec![b'a'; 10]).unwrap();
         }
         fs::write(&log, vec![b'x'; 200]).unwrap();
@@ -606,7 +646,7 @@ mod tests {
         assert!(names.contains(&format!("advisory.log.{}", stamp(1_600_000_003))), "{names:?}");
         let live = String::from_utf8_lossy(&fs::read(&log).unwrap()).into_owned();
         assert!(live.contains("; removed beyond the retention bounds: "), "{live}");
-        // The archive just made is kept whatever the total, and the newest.
+        // The newest, the archive just made, is kept whatever the total.
         fs::write(&log, vec![b'y'; 300]).unwrap();
         assert_eq!(rotate(&log, &Knobs { total: 1, ..knobs(100) }), Rotation::Rotated);
         let plain = plain_archives(&d.0);
