@@ -32,9 +32,12 @@
 //! then appends its own line in the same write and syncs it before it says
 //! the line is written. The lock belongs to the open file and goes when the
 //! file is closed, so a process that dies holding it leaves nothing to clean
-//! up: the next writer or reader takes it at once. A lock another process
-//! holds past LOCK_WAIT is an error: nothing is written or read without the
-//! lock.
+//! up: the next writer or reader takes it at once. A waiter waits while the
+//! store grows. Every writer lands its line under the lock, so a store that
+//! grew while the lock was refused is a lock its holders hand on, and the wait
+//! starts again: commits that overlap wait their turn, however many there
+//! are, and none is refused for the crowd. A lock held for LOCK_WAIT while no
+//! line lands is an error: nothing is written or read without the lock.
 //!
 //! The same lock orders every write of a ledger entry an approval stands on:
 //! a commit and a revoke of an entry each run under it from their first
@@ -195,8 +198,10 @@ const FIELDS: [&str; 4] = ["at", "hash", "via", "record"];
 /// The torn-line seal's byte. A writer ends a torn last line with it and a
 /// newline, and a line that holds it vouches for nothing.
 const SEAL: u8 = 0;
-/// How long a writer or a reader waits for the store lock. A holder writes
-/// one line or reads the file, so ten seconds is far past any honest holder.
+/// How long a writer or a reader waits for the store lock while no line
+/// lands in the store. A holder writes one line or reads the file, and ten
+/// seconds in which no line landed is taken for a holder that stopped. Each
+/// line that lands starts the wait again (`lock_store`).
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Who wrote a line.
@@ -379,7 +384,7 @@ fn index_within(dir: &Path, wait: Duration) -> Result<Index, Fault> {
         }
         Err(e) => return Err(Fault::operation(Outcome::Io(Err(e)), &store, |p| Action::Open(p))),
     };
-    os::flock_within(&file, os::FileLock::Shared, wait).map_err(|o| Fault::operation(o, &store, |p| Action::Lock(p)))?;
+    lock_store(&file, &store, os::FileLock::Shared, wait)?;
     let mut bytes = Vec::new();
     let mut f: &fs::File = &file;
     observed(f.read_to_end(&mut bytes), &store, |p| Action::Read(p))?;
@@ -556,11 +561,32 @@ fn log_line(log: &Path, at: &str, text: &[u8]) -> Result<(), Fault> {
     observed(f.write_all(&l), log, |p| Action::Write(p))
 }
 
+/// The store lock on `file`, the store at `store`, with its wait started
+/// again each time the store grew. Eight writers committing at once each
+/// held the lock for one commit, and a waiter whose ten seconds counted the
+/// whole queue was refused though every holder moved on. A store that grew is
+/// a holder that moved on: every writer lands its line under the lock. A
+/// length that cannot be read is no growth, and neither is a store that
+/// shrank, so neither lengthens the wait.
+fn lock_store(file: &fs::File, store: &Path, how: os::FileLock, wait: Duration) -> Result<(), Fault> {
+    let len = || file.metadata().ok().map(|m| m.len());
+    let mut seen = len();
+    os::flock_within(file, how, wait, || {
+        let now = len();
+        let grew = matches!((seen, now), (Some(was), Some(is)) if is > was);
+        if grew || seen.is_none() {
+            seen = now;
+        }
+        grew
+    })
+    .map_err(|o| Fault::operation(o, store, |p| Action::Lock(p)))
+}
+
 /// The store, opened and locked for a commit or a revoke. The lock goes with
 /// the file.
 fn locked(dir: &Path, wait: Duration) -> Result<fs::File, Fault> {
     let file = open_for_append(dir)?;
-    os::flock_within(&file, os::FileLock::Exclusive, wait).map_err(|o| Fault::operation(o, &path(dir), |p| Action::Lock(p)))?;
+    lock_store(&file, &path(dir), os::FileLock::Exclusive, wait)?;
     Ok(file)
 }
 
@@ -920,7 +946,7 @@ mod tests {
     }
     fn holder(dir: &Path, lock: os::FileLock) -> fs::File {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
-        os::flock_within(&f, lock, Duration::from_secs(1)).unwrap();
+        os::flock_within(&f, lock, Duration::from_secs(1), || false).unwrap();
         f
     }
     fn ino(p: &Path) -> u64 {
@@ -1333,7 +1359,7 @@ mod tests {
     }
     fn held_elsewhere(home: &Path) -> bool {
         let other = fs::File::open(path(home)).unwrap();
-        match os::flock_within(&other, os::FileLock::Exclusive, Duration::ZERO) {
+        match os::flock_within(&other, os::FileLock::Exclusive, Duration::ZERO, || false) {
             Ok(()) => false,
             Err(Outcome::Deadline) => true,
             Err(e) => panic!("the lock check failed: {e:?}"),
