@@ -25,8 +25,12 @@ core_reader_init "${ROOT_DIR}"
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-advisory-retention.XXXXXX")
 holder_pid=""
+rotation_pid=""
+stall_pid=""
 cleanup() {
   [[ -z "${holder_pid}" ]] || kill -9 "${holder_pid}" 2>/dev/null || true
+  [[ -z "${rotation_pid}" ]] || kill -9 "${rotation_pid}" 2>/dev/null || true
+  [[ -z "${stall_pid}" ]] || kill -9 "${stall_pid}" 2>/dev/null || true
   chmod -R u+rwx "${tmp_root}" 2>/dev/null || true
   rm -rf "${tmp_root}"
 }
@@ -352,6 +356,143 @@ done
   || fail "with KEEP=1, three rotations in ${seconds[0]} left ${counts[*]} archives: $(archives | tr '\n' ' ')"
 [[ "$(text "$(archives)")" == "run 3" ]] || fail "the archive that stands is not the one just made: $(archives)"
 pass "three rotations in one second with KEEP=1 leave one archive each time, the one just made"
+
+# ---- two rotations in one second -------------------------------------------
+# Earlier versions named an archive by its second alone, so a second rotation
+# in that second wrote over the first one's archive. Each rotation takes a
+# name nothing holds. With room for both, two rotations in one second leave
+# two archives, each whole, and every line in one of them once. A try whose
+# rotations straddled a second runs again.
+tries=0
+while :; do
+  fresh_home
+  sleep "$(python3 -c 'import time; print("%.3f" % (1.02 - time.time() % 1))')"
+  printf 'the first rotation moves this line\n' > "${log}"
+  core_rotate 1 5
+  printf 'the second rotation moves this line\n' >> "${log}"
+  core_rotate 1 5
+  [[ "$(archive_count)" == 2 ]] || fail "two rotations made $(archive_count) archives: $(archives | tr '\n' ' ')"
+  seconds=()
+  for name in $(archives); do
+    made="${name#advisory.log.}"
+    seconds+=("${made%%.*}")
+  done
+  [[ "${seconds[0]}" == "${seconds[1]}" ]] && break
+  tries=$((tries + 1))
+  (( tries < 5 )) || fail "two rotations straddled a second in five tries: ${seconds[*]}"
+  printf '# note: the two rotations straddled a second (%s); the row runs again\n' "${seconds[*]}"
+done
+first=$(archives | sed -n 1p)
+second=$(archives | sed -n 2p)
+[[ "$(text "${first}")" == 'the first rotation moves this line' ]] \
+  || fail "the first archive does not hold the first rotation's line alone: $(text "${first}")"
+head -n 1 "${home}/${second}" | grep -qF "bytes moved to ${first}" \
+  || fail "the second archive does not start with the first rotation's line: $(head -n 1 "${home}/${second}")"
+[[ "$(sed -n 2p "${home}/${second}")" == 'the second rotation moves this line' ]] \
+  || fail "the second archive does not hold the second rotation's line after it: $(text "${second}")"
+[[ "$(recorded 'the first rotation moves this line')" == 1 && "$(recorded 'the second rotation moves this line')" == 1 ]] \
+  || fail "the record does not hold each rotation's line once: $(archives | tr '\n' ' ')"
+pass "two rotations in one second make two archives, ${first} and ${second}, each whole, and every line is in one of them once"
+
+# ---- over the bound on lines that are not INFO -----------------------------
+# Earlier versions kept every line that was not INFO live, so a log over the
+# bound on those lines alone stayed over it, and the next process rotated it
+# again. A rotation moves every line. So the log rotates once, and not again
+# until it is at the bound again, whichever of the CLI and the core runs.
+fresh_home
+not_info() { # PREFIX
+  local i
+  for ((i = 0; i < 150; i++)); do
+    printf '[2026-08-01T00:00:00Z] check approve(clean) ecosystem=npm package=%s%d version=1.0.0 hash=sha256:h%d\n' "$1" "${i}" "${i}"
+    printf '[2026-08-01T00:00:00Z] WARN GHSA enrichment unavailable package=%s%d\n' "$1" "${i}"
+    printf '2026-08-01T00:00:00Z\tpost-verify: recorded as %s%d\n' "$1" "${i}"
+    printf 'a line with no time stamp %s%d\n' "$1" "${i}"
+  done
+}
+not_info n > "${log}"
+not_info n > "${home}/lines"
+grep -q ' INFO ' "${log}" && fail "the fixture holds an INFO line"
+bound=20000
+(( $(wc -c < "${log}") >= bound )) || fail "the fixture is under the bound: $(wc -c < "${log}") bytes"
+rotated=()
+step() { # cli|core
+  local count
+  count=$(archive_count)
+  if [[ "$1" == cli ]]; then cli_ok "${bound}"; else core_rotate "${bound}" 5; fi
+  rotated+=("$(( $(archive_count) - count ))")
+}
+for kind in cli core cli core cli; do step "${kind}"; done
+not_info m >> "${log}"
+not_info m >> "${home}/lines"
+for kind in cli core; do step "${kind}"; done
+[[ "${rotated[*]}" == "1 0 0 0 0 1 0" ]] \
+  || fail "seven runs over and under a bound of ${bound} bytes made archives ${rotated[*]}, not 1 0 0 0 0 1 0: $(archives | tr '\n' ' ')"
+{
+  cat "${log}"
+  for name in $(archives); do text "${name}" || fail "${name} is not whole"; done
+} > "${home}/record"
+miscounted=$(awk 'NR == FNR { seen[$0] = 0; next } ($0 in seen) { seen[$0]++ }
+  END { for (line in seen) if (seen[line] != 1) { n++; if (n <= 3) printf "%d times: %s; ", seen[line], line } print n + 0 }' \
+  "${home}/lines" "${home}/record")
+[[ "${miscounted##*; }" == 0 ]] || fail "lines of the fixture are not in the record once: ${miscounted}"
+pass "a log over the bound on lines that are not INFO rotates once, and not again until it is at the bound again, every line kept once"
+
+# ---- a rotation killed in the middle ---------------------------------------
+# SIGKILL ends a rotation wherever it is, and no trap runs. Here it lands
+# while gzip writes the temp file of a quiet archive, after the rename: the
+# rotation holds the lock, the temp file is half written, and the live file
+# is the new archive. A gzip first on PATH writes the start of a stream,
+# says so, and waits. The kernel lets the lock go with the process, so the
+# next rotation runs, removes the half-written temp file, and every line is
+# in the live file or one archive.
+fresh_home
+write_fixture
+inode_before=$(inode "${log}")
+old="${log}.20260801T000000Z"
+printf 'an old line\n' > "${old}"
+touch -t 202608010000 "${old}"
+stall=$(mktemp -d "${tmp_root}/stall.XXXXXX")
+ready="${stall}/ready"
+cat > "${stall}/gzip" <<'SH'
+#!/bin/sh
+printf '\037\213\010\000'
+echo "$$" > "${SAFEDEPS_TEST_STALL_READY}.part" && mv "${SAFEDEPS_TEST_STALL_READY}.part" "${SAFEDEPS_TEST_STALL_READY}"
+exec sleep 30
+SH
+chmod 700 "${stall}/gzip"
+# The rotation's cwd, and so the stalled gzip's, is outside the checkout.
+(cd "${tmp_root}" && exec env PATH="${stall}:${PATH}" SAFEDEPS_TEST_STALL_READY="${ready}" \
+  SAFEDEPS_HOME="${home}" SAFEDEPS_ADVISORY_LOG_MAX_BYTES=100000 SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS=3600 \
+  "${SAFEDEPS_TEST_CORE}" advisory-log rotate > "${tmp_root}/killed.out" 2>&1) &
+rotation_pid=$!
+for ((i = 0; i < 200; i++)); do
+  [[ -s "${ready}" ]] && break
+  sleep 0.05
+done
+[[ -s "${ready}" ]] || fail "the rotation did not reach gzip: $(cat "${tmp_root}/killed.out")"
+stall_pid=$(cat "${ready}")
+kill -9 "${rotation_pid}"
+wait "${rotation_pid}" 2>/dev/null || true
+rotation_pid=""
+kill -9 "${stall_pid}" 2>/dev/null || true
+stall_pid=""
+made=$(archives | grep -vxF "${old##*/}" || true)
+[[ ! -e "${log}" && -n "${made}" && "$(inode "${home}/${made}")" == "${inode_before}" ]] \
+  || fail "the kill did not land after the rename: $(cd "${home}" && printf '%s ' *)"
+[[ -f "${log}.compressing" && -f "${old}" && ! -e "${old}.gz" ]] \
+  || fail "the kill did not land inside the compression: $(cd "${home}" && printf '%s ' *)"
+printf '# condition: killed after the rename to %s, while gzip had written %s bytes of %s\n' \
+  "${made}" "$(wc -c < "${log}.compressing" | tr -d ' ')" "${old##*/}.gz"
+printf 'a line written after the kill\n' > "${log}"
+core_rotate 1 5
+[[ "$(archive_count)" == 3 ]] || fail "the rotation after the kill did not rotate: $(archives | tr '\n' ' ')"
+[[ ! -e "${log}.compressing" ]] || fail "the temp file the killed rotation left is still there"
+[[ ! -e "${old}" && "$(gzip -dc "${old}.gz")" == 'an old line' ]] \
+  || fail "the quiet archive was not compressed whole after the kill: $(archives | tr '\n' ' ')"
+cmp -s "${home}/${made}" "${home}/before" || fail "the archive the killed rotation made is not the live file it renamed"
+[[ "$(recorded 'an old line')" == 1 && "$(recorded 'a line written after the kill')" == 1 ]] \
+  || fail "the record does not hold the old line and the later one once each: $(archives | tr '\n' ' ')"
+pass "a rotation killed with SIGKILL inside its compression leaves no lock behind: the next rotation runs, removes the half-written temp file, and keeps every line once"
 
 # ---- a held name: the stamp in lower case ----------------------------------
 # Whether a name is free is the volume's answer, by its own rules of case and
