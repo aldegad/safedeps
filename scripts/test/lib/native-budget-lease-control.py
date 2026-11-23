@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """What a sweep does to the leases it finds, in a marker root of this run's own."""
-import contextlib,io,json,os,signal,struct,subprocess,sys,tempfile,threading,time
+import contextlib,errno,io,json,os,shutil,signal,struct,subprocess,sys,tempfile,threading,time
 from pathlib import Path
 from unittest import mock
 import native_budget_owners as owners
@@ -363,6 +363,35 @@ def main():
             try:receipt=owners.cleanup(owners.MARKERS/'finished')
             finally:Path.glob=listing
             results.append(check(receipt['reaped']==[],'a lease another sweep finished during the listing is nothing to clean'))
+            # On a Windows drive under WSL1 the loser's listing raises EINVAL while
+            # the winner's removal is pending. The errno does not say the lease
+            # went; its path does, and a lease that is still there is raised.
+            einval=OSError(errno.EINVAL,os.strerror(errno.EINVAL))
+            def removing(path,pattern):shutil.rmtree(path);raise OSError(errno.EINVAL,os.strerror(errno.EINVAL),str(path))
+            def refusing(path,pattern):raise OSError(errno.EINVAL,os.strerror(errno.EINVAL),str(path))
+            with markers(tmp,'einval-gone'):
+                stale=lease_of(dead_pid(),'gone','pending')
+                listing=Path.glob;Path.glob=removing
+                try:receipts=swept()
+                finally:Path.glob=listing
+                results.append(check(isinstance(receipts,list) and [r['reaped'] for r in receipts]==[[]] and not stale.exists(),
+                                     'a lease another sweep removed while its listing raised EINVAL is nothing to clean, and the sweep finishes'))
+            with markers(tmp,'einval-kept'):
+                stale=lease_of(dead_pid(),'gone','pending')
+                listing=Path.glob;Path.glob=refusing
+                try:died=swept()
+                finally:Path.glob=listing
+                results.append(check(died=='the sweep died: '+repr(einval) and stale.exists(),
+                                     'EINVAL from the listing of a lease that is still there is raised, and the lease stays'))
+            # A removal still pending when the wait for it ends is not known to be done.
+            with markers(tmp,'einval-pending'):
+                stale=lease_of(dead_pid(),'gone','pending')
+                listing=Path.glob;Path.glob=refusing
+                try:
+                    with mock.patch.object(owners,'GONE_SECONDS',.05,create=True),mock.patch.object(owners.os,'lstat',side_effect=einval):died=swept()
+                finally:Path.glob=listing
+                results.append(check(died=='the sweep died: '+repr(einval) and stale.exists(),
+                                     'a lease whose path still answers EINVAL when the wait ends is raised, and the lease stays'))
             # What getppid() answers for an orphan is init or a subreaper.
             other=sleeper();spawned.append(other)
             results.append(check(all(owners.judgment(pid,root) is None for pid in (0,1,other.pid)),
