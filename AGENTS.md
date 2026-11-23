@@ -94,7 +94,7 @@ GitHub CI is not used: no test workflow is created or run on GitHub. CI runs sep
 
 ## Testing
 
-- The suite runs on our hosts: alex-macbook-m1 and carenine for macOS (runner `~/safedeps-runs/slot.sh`), and WSL1 on the home Windows PC for Windows, the environment Kuma Studio's Windows build runs in. Linux is not tested: Kuma Studio ships for Windows and macOS only. A run has no time budget, and speed is not a goal.
+- The suite runs on our hosts: alex-macbook-m1 and carenine for macOS (runner `~/safedeps-runs/slot.sh`, installed from `scripts/ci/slot.sh` by `scripts/ci/install-slot.sh`; edit the repository, never a host's copy), and WSL1 on the home Windows PC for Windows, the environment Kuma Studio's Windows build runs in. Linux is not tested: Kuma Studio ships for Windows and macOS only. A run has no time budget, and speed is not a goal.
 - Two commands, one runner (`scripts/test/run-all.sh`). `npm test` is the development run: every battery except the native scan-failure census (`native-scan-failures.sh`) and `effect-trace-grid.sh`. `npm run test:release` runs every battery, those two included. A change that reaches the scan readings or the effect gate runs them by name: `scripts/test/native-scan-failures.sh`, `scripts/test/effect-trace-grid.sh`. Keep both commands green.
 - `run-all.sh --list` prints the batteries a run would start, with `--release` as for a run. `--units` prints the units the host runner splits that set into, and `--plan` adds each unit's weight and seconds.
 - The batteries run in parallel. They keep their state apart: each makes its own mktemp root, points `HOME` or `SAFEDEPS_HOME` into it, and starts its fixture servers on a port the kernel picks. A new battery keeps the same isolation, or it cannot run beside the others.
