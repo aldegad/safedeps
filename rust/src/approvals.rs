@@ -1098,7 +1098,9 @@ mod tests {
                         let n = t * 25 + k;
                         let (staged, entry) = stage(&dir, n, &format!("entry of {n}"));
                         let (hash, r) = (h(n), rec(n));
-                        assert_eq!(commit(&dir, &approval(n, &staged, &entry, &r, &hash), &mut Vec::new()), Answer::Approved);
+                        let mut err = Vec::new();
+                        let answer = commit(&dir, &approval(n, &staged, &entry, &r, &hash), &mut err);
+                        assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
                     }
                 })
             })
@@ -1142,6 +1144,97 @@ mod tests {
         assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap_err().text(), e);
         drop(held);
         assert_eq!(fs::metadata(path(&d.0)).unwrap().len(), 0);
+    }
+
+    /// Holders of the store lock that land `lines` store lines, one every
+    /// `each`, then keep the lock `quiet` longer and let it go. Shared holds
+    /// hand the lock on: each line is landed by a new hold taken before the
+    /// last one goes, so the lock is never free and every try of a commit
+    /// finds it held, as the waiters of a crowded store did, made certain. An
+    /// exclusive hold is one hold for the whole time, so a reader waits.
+    /// Returns once the lock is held, with the line hashes and the thread,
+    /// which ends when the lock goes.
+    fn growing(dir: &Path, lock: os::FileLock, lines: u8, each: Duration, quiet: Duration) -> (Vec<String>, std::thread::JoinHandle<()>) {
+        let dir = dir.to_owned();
+        let take = move || holder(&dir, lock);
+        let mut held = take();
+        let hashes = (0..lines).map(|k| h(200 + k)).collect();
+        let thread = std::thread::spawn(move || {
+            for k in 0..lines {
+                if lock == os::FileLock::Shared {
+                    let next = take();
+                    held = next;
+                }
+                let mut w: &fs::File = &held;
+                w.write_all(&line("2026-11-24T06:00:00Z", &h(200 + k), Via::Check, &rec(200 + k))).unwrap();
+                std::thread::sleep(each);
+            }
+            std::thread::sleep(quiet);
+            drop(held);
+        });
+        (hashes, thread)
+    }
+
+    #[test]
+    fn a_commit_waits_while_the_store_grows_however_long_the_lock_stays_held() {
+        // Commits that overlap: a commit whose wait for the lock ran out
+        // while the lock went from one commit to the next answered
+        // NotApproved(Store, Untouched). Here the lock is never free for
+        // twice the wait, and a line lands every twentieth of it.
+        let d = scratch();
+        let wait = Duration::from_secs(2);
+        let (mut want, relay) = growing(&d.0, os::FileLock::Shared, 40, Duration::from_millis(100), Duration::ZERO);
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (hash, r) = (h(1), rec(1));
+        let started = std::time::Instant::now();
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
+        let waited = started.elapsed();
+        relay.join().unwrap();
+        assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
+        assert!(waited > wait, "the commit answered within the wait, {waited:?}, so the lock was not held that long");
+        want.push(h(1));
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: want, broken: 0 });
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+        assert_eq!(logged(&d.0), vec![record(1)]);
+    }
+
+    #[test]
+    fn a_reader_waits_while_the_store_grows_however_long_the_lock_stays_held() {
+        let d = scratch();
+        let wait = Duration::from_secs(2);
+        let (want, writer) = growing(&d.0, os::FileLock::Exclusive, 40, Duration::from_millis(100), Duration::ZERO);
+        let started = std::time::Instant::now();
+        let ix = index_within(&d.0, wait).map_err(|e| String::from_utf8_lossy(&e.text()).into_owned());
+        let waited = started.elapsed();
+        writer.join().unwrap();
+        assert_eq!(ix, Ok(Index { present: true, hashes: want, broken: 0 }));
+        assert!(waited > wait, "the reader answered within the wait, {waited:?}, so the lock was not held that long");
+    }
+
+    #[test]
+    fn a_lock_held_past_the_wait_after_its_last_line_is_an_error_and_nothing_is_written() {
+        // The lock goes on being waited for while lines land, and only then:
+        // a holder that stops landing them and keeps the lock is waited for
+        // the wait, then the commit is refused, as a lock held past the wait
+        // always was.
+        let d = scratch();
+        let wait = Duration::from_millis(500);
+        let (want, relay) = growing(&d.0, os::FileLock::Shared, 5, Duration::from_millis(100), Duration::from_secs(4));
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let (hash, r) = (h(1), rec(1));
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+        assert!(!relay.is_finished(), "the commit answered only once the holder let the lock go");
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            format!("safedeps-core approvals: not committed: {0} could not be opened and locked: the lock of {0} did not finish before the deadline\n", path(&d.0).display())
+        );
+        relay.join().unwrap();
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: want, broken: 0 });
+        assert!(staged.exists() && !entry.exists());
+        assert!(logged(&d.0).is_empty());
     }
 
     #[test]
