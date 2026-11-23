@@ -513,6 +513,11 @@ rust/src/state/log.rs	append	boundary	capability	fs::OpenOptions::new	-	1
 rust/src/state/log.rs	append	boundary	capability	open	-	1
 rust/src/state/log.rs	append	boundary	file-mode	append	-	1
 rust/src/state/log.rs	append	human	advisory-rotation	write_all	data-field	1
+rust/src/state/log.rs	claim	boundary	capability	create_new	-	1
+rust/src/state/log.rs	claim	boundary	capability	fs::OpenOptions::new	-	1
+rust/src/state/log.rs	claim	boundary	capability	open	-	1
+rust/src/state/log.rs	claim	boundary	file-mode	write	-	1
+rust/src/state/log.rs	claim	data	copy-or-publish	fs::rename	-	1
 rust/src/state/log.rs	compress	boundary	capability	Command::new	-	1
 rust/src/state/log.rs	compress	boundary	capability	Stdio::null	-	2
 rust/src/state/log.rs	compress	boundary	capability	create_new	-	1
@@ -522,9 +527,8 @@ rust/src/state/log.rs	compress	boundary	capability	status	-	1
 rust/src/state/log.rs	compress	boundary	capability	stderr	-	1
 rust/src/state/log.rs	compress	boundary	capability	stdout	-	1
 rust/src/state/log.rs	compress	boundary	file-mode	write	-	1
-rust/src/state/log.rs	compress	data	copy-or-publish	fs::rename	-	1
 rust/src/state/log.rs	failed	human	advisory-or-reorg	append	other	1
-rust/src/state/log.rs	rotate	data	copy-or-publish	fs::rename	-	1
+rust/src/state/log.rs	publish	data	copy-or-publish	fs::hard_link	-	1
 rust/src/state/log.rs	rotate	human	advisory-or-reorg	append	data-field	1
 rust/src/state/log.rs	take	boundary	capability	create	-	1
 rust/src/state/log.rs	take	boundary	capability	fs::OpenOptions::new	-	1
