@@ -105,12 +105,19 @@ const rows = [
       source "$root/lib/providers/providers.sh"
       cat_calls=0
       missed() { printf 'rotation middle window not observed: %s\n' "$1" >&2; exit 1; }
+      # No "command <utility>" in this script. The /bin/bash of macOS 13
+      # (3.2.57) ends the shell under errexit when one fails, even in an if
+      # condition or in a function the rotator calls behind "|| true": the
+      # grep below that finds nothing killed the row there. The real cat is
+      # called by its path, and grep by name, since only cat is a function
+      # here. No backquote either: this script is a JavaScript template.
+      cat_bin=$(type -P cat) || missed 'no cat on PATH'
       cat() {
         if [[ $# == 1 && "$1" == "$log".compact.* ]]; then
           cat_calls=$((cat_calls + 1))
           [[ -f "$log" && ! -s "$log" ]] || missed 'live is not an empty file'
           [[ -d "$log.rotate.lock" ]] || missed 'the rotator holds no lock'
-          if command grep -q 'check approve' "$log"; then
+          if grep -q 'check approve' "$log"; then
             missed 'live still has an approve line'
           else
             rc=$?
@@ -118,9 +125,9 @@ const rows = [
           fi
           printf '0\n' > "$SAFEDEPS_HOME/window-size"
           "$root/bin/safedeps" --json re-check > "$SAFEDEPS_HOME/window.json" 2> "$SAFEDEPS_HOME/window.err"
-          command cat "$log" > "$SAFEDEPS_HOME/window-appends"
+          "$cat_bin" "$log" > "$SAFEDEPS_HOME/window-appends"
         fi
-        command cat "$@"
+        "$cat_bin" "$@"
       }
       SAFEDEPS_ADVISORY_LOG_MAX_BYTES=1
       safedeps_providers_init
