@@ -51,9 +51,11 @@ write_fixture() {
   bytes_before=$(wc -c < "${home}/before" | tr -d ' ')
 }
 
-# The first bytes of the live log are the fixture's: a run that did not rotate
-# left them where they were, whatever it appended after them.
-log_kept() { head -c "${bytes_before}" "${log}" | cmp -s - "${home}/before"; }
+# The first bytes of $1 are the fixture's. A run that did not rotate left them
+# in the live log, whatever it appended after them, and a later rotation
+# moves the fixture and those lines together.
+fixture_first() { head -c "${bytes_before}" "$1" | cmp -s - "${home}/before"; }
+log_kept() { fixture_first "${log}"; }
 
 # The CLI's own run. SAFEDEPS_ADVISORY_LOG in the environment is ignored by
 # design, and saying so is a log write, so `ledger` starts the rotation at
@@ -163,9 +165,11 @@ pass "a held lock leaves the log to its holder"
 kill -9 "${holder_pid}"
 wait "${holder_pid}" 2>/dev/null || true
 holder_pid=""
+inode_before=$(inode "${log}")
 cli_ok 100000
 [[ "$(archive_count)" == 1 ]] || fail "the run after the holder was killed did not rotate: $(archives)"
-cmp -s "${home}/$(archives)" "${home}/before" || fail "the archive is not the live file byte for byte"
+[[ "$(inode "${home}/$(archives)")" == "${inode_before}" ]] || fail "the archive is not the live file, renamed"
+fixture_first "${home}/$(archives)" || fail "the archive does not start with the live file's lines"
 pass "a holder killed with SIGKILL leaves no lock behind: the next run rotates"
 
 # ---- an earlier version's lock directory ------------------------------------
@@ -179,6 +183,7 @@ pass "an earlier version's lock directory younger than its 300-second window def
 touch -t 202001010000 "${log}.rotate.lock"
 cli_ok 100000
 [[ "$(archive_count)" == 1 ]] || fail "an old lock directory still deferred rotation: $(archives)"
+fixture_first "${home}/$(archives)" || fail "the archive does not start with the live file's lines"
 [[ -f "${log}.rotate.lock" && ! -d "${log}.rotate.lock" ]] || fail "the lock file does not stand where the directory stood"
 pass "one older than the window is removed by that version's rule, and the lock file stands in its place"
 
