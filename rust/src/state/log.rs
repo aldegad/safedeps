@@ -447,7 +447,9 @@ mod tests {
         let body = b"[t] INFO trace\n[t] check approve(clean) x\nno stamp at all\n".repeat(50);
         fs::write(&log, &body).unwrap();
         let inode = fs::metadata(&log).unwrap().ino();
-        assert_eq!(rotate(&log, &knobs(100)), Rotation::Rotated);
+        // The bound is above the rotation's own line, about 100 bytes, so the
+        // last look below asks whether the new file is left alone.
+        assert_eq!(rotate(&log, &knobs(1000)), Rotation::Rotated);
         let plain = plain_archives(&d.0);
         assert_eq!(plain.len(), 1, "{:?}", listing(&d.0));
         assert_eq!(fs::metadata(&plain[0]).unwrap().ino(), inode, "the archive is the live file, renamed");
@@ -460,7 +462,7 @@ mod tests {
         assert!(lock.file_type().is_file(), "the lock is a regular file, and it stays");
         assert_eq!(lock.permissions().mode() & 0o777, 0o600);
         // The new file is under the bound: the next look does not rotate it.
-        assert_eq!(rotate(&log, &knobs(100)), Rotation::Under);
+        assert_eq!(rotate(&log, &knobs(1000)), Rotation::Under);
     }
 
     #[test]
