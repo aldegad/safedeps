@@ -239,17 +239,16 @@ fn rotate(file: &Path, knobs: &Knobs) -> Rotation {
         Ok(_) => return Rotation::Under,
         Err(e) => return failed(file, io_said(e, Action::Read(file))),
     };
-    // Under the lock no other rotation names an archive, so the name is
-    // still free at the rename.
-    let made = match archives(file).map_err(|e| io_said(e, Action::Walk(directory(file))))
+    let first = match archives(file).map_err(|e| io_said(e, Action::Walk(directory(file))))
         .and_then(|listing| next(listing.newest.as_ref(), stamp(os::wall(os::WallRole::AdvisoryRotationName).seconds()))) {
-        Ok(made) => made,
+        Ok(first) => first,
         Err(why) => return failed(file, why),
     };
-    let archive = archive_path(file, &made);
-    if let Err(why) = touch(file) { return failed(file, why) }
-    if let Err(e) = fs::rename(file, &archive) { return failed(file, io_said(e, Action::Rename(&archive))) }
-    let mut said = [format!("advisory log rotated: {bytes} bytes moved to ").as_bytes(), name(&archive)].concat();
+    let Claimed { key: made, path: archive, passed } = match claim(file, first, 1) {
+        Ok(claimed) => claimed,
+        Err(why) => return failed(file, why),
+    };
+    let mut said = [format!("advisory log rotated: {bytes} bytes moved to ").as_bytes(), name(&archive), passed.as_slice()].concat();
     match archives(file) {
         Ok(listing) => compress_one(file, &listing.found, &made, knobs.quiet, &mut said),
         Err(e) => said.extend_from_slice(&[b"; no archive compressed: ".as_slice(), io_said(e, Action::Walk(directory(file))).as_slice()].concat()),
@@ -305,6 +304,20 @@ fn next(newest: Option<&Key>, stamp: String) -> Result<Key, Vec<u8>> {
         },
         _ => Ok((stamp.into_bytes(), 0)),
     }
+}
+
+/// What a rotation took: the archive's key and path, and what it says of the
+/// names it passed over.
+struct Claimed { key: Key, path: PathBuf, passed: Vec<u8> }
+
+/// Move `file` to the archive name of `first`. A rotation may try `tries`
+/// names; this one takes the first. Under the lock no other rotation names
+/// an archive, so the name is still free at the rename.
+fn claim(file: &Path, first: Key, _tries: usize) -> Result<Claimed, Vec<u8>> {
+    let path = archive_path(file, &first);
+    touch(file)?;
+    fs::rename(file, &path).map_err(|e| io_said(e, Action::Rename(&path)))?;
+    Ok(Claimed { key: first, path, passed: Vec::new() })
 }
 
 /// Set `file`'s mtime to now. A rename keeps a file's mtime, and the quiet
@@ -652,6 +665,62 @@ mod tests {
         let plain = plain_archives(&d.0);
         assert_eq!(plain.len(), 1, "{:?}", listing(&d.0));
         assert_eq!(fs::read(&plain[0]).unwrap(), vec![b'y'; 300]);
+    }
+
+    /// How many lines of the regular files in `dir` are `line`, a gzip file
+    /// read through.
+    fn records(dir: &Path, line: &[u8]) -> usize {
+        fs::read_dir(dir).unwrap().map(|e| e.unwrap().path())
+            .filter(|p| fs::symlink_metadata(p).unwrap().file_type().is_file())
+            .map(|p| { let bytes = fs::read(&p).unwrap(); if bytes.starts_with(&[0x1f, 0x8b]) { gunzip(&p) } else { bytes } })
+            .map(|text| text.split(|b| *b == b'\n').filter(|l| *l == line).count())
+            .sum()
+    }
+
+    // A volume of macOS takes a name's NFC and NFD forms for one name, and the
+    // listing reads names by their bytes. The archive names of a live file
+    // whose name is not ASCII have both forms.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_archive_name_held_in_its_other_unicode_form_is_passed_over() {
+        let (d, _) = dir();
+        let log = d.0.join("\u{AE30}\u{B85D}.log");
+        let second = 4_102_444_800;
+        fs::write(archive_path(&log, &at(second, 8)), b"an older record\n").unwrap();
+        let held = d.0.join(format!("\u{1100}\u{1175}\u{1105}\u{1169}\u{11A8}.log.{}.9", stamp(second)));
+        fs::write(&held, b"an existing record\n").unwrap();
+        let taken = archive_path(&log, &at(second, 9));
+        assert_ne!(taken.as_os_str(), held.as_os_str());
+        assert_eq!(fs::metadata(&taken).map(|m| m.ino()).ok(), Some(fs::metadata(&held).unwrap().ino()),
+            "the precondition: the volume takes the next archive name in NFC for the entry in NFD");
+        fs::write(&log, b"the current record\n").unwrap();
+        assert_eq!(rotate(&log, &knobs(1)), Rotation::Rotated);
+        assert_eq!(records(&d.0, b"an existing record"), 1, "{:?}", listing(&d.0));
+        assert_eq!(records(&d.0, b"the current record"), 1, "{:?}", listing(&d.0));
+        let made = archive_path(&log, &at(second, 10));
+        assert_eq!(fs::read(&made).unwrap(), b"the current record\n", "{:?}", listing(&d.0));
+        let said = String::from_utf8_lossy(&fs::read(&log).unwrap()).into_owned();
+        assert!(said.contains(&format!("moved to {}", made.file_name().unwrap().to_string_lossy())), "{said}");
+    }
+
+    // Two rotations that chose one number, or anything that does not take the
+    // lock: the other made the name after this rotation's listing read the
+    // directory, and the name holds the other's record.
+    #[test]
+    fn a_name_another_made_after_the_listing_is_passed_over() {
+        let (d, log) = dir();
+        let second = 4_102_444_800;
+        let theirs = archive_path(&log, &at(second, 9));
+        fs::write(&theirs, b"the other's record\n").unwrap();
+        fs::write(&log, b"this rotation's record\n").unwrap();
+        let claimed = claim(&log, at(second, 9), 2).expect("the name after it is free");
+        assert_eq!(records(&d.0, b"the other's record"), 1, "{:?}", listing(&d.0));
+        assert_eq!(fs::read(&theirs).unwrap(), b"the other's record\n", "the name the other made holds its record");
+        assert_eq!(claimed.key, at(second, 10));
+        assert_eq!(fs::read(&claimed.path).unwrap(), b"this rotation's record\n");
+        assert!(!log.exists(), "the live file was moved");
+        assert_eq!(String::from_utf8_lossy(&claimed.passed),
+            format!("; {} passed over: the creation of {} returned OS error 17", theirs.file_name().unwrap().to_string_lossy(), theirs.display()));
     }
 }
 

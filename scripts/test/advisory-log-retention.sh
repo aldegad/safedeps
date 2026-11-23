@@ -99,6 +99,63 @@ recorded() {
   grep -cxF -- "$1" "${home}/record" || true
 }
 
+# How many lines of every regular file in the home are $1, a file named .gz
+# or .GZ read through gzip. Unlike recorded, it reads every name: an entry
+# whose name is not an archive name holds a record too.
+held() {
+  local path body count n=0
+  for path in "${home}"/*; do
+    [[ -f "${path}" && ! -L "${path}" ]] || continue
+    case "${path}" in
+      *.gz|*.GZ) body=$(gzip -dc "${path}") || fail "${path##*/} is not whole" ;;
+      *) body=$(cat "${path}") ;;
+    esac
+    count=$(printf '%s\n' "${body}" | grep -cxF -- "$1" || true)
+    n=$((n + count))
+  done
+  printf '%s\n' "${n}"
+}
+
+# The condition of a held-name row, recorded on each run: whether the volume
+# takes the name $2 in the home for the entry $1. A listing reads names by
+# their bytes, so it does not read $1 as $2. Where the volume keeps the two
+# apart, the row says so and checks the records alone.
+condition=0
+takes() { # ENTRY NAME
+  if [[ -e "${home}/$2" && "$(inode "${home}/$2")" == "$(inode "${home}/$1")" ]]; then
+    condition=1
+    printf '# condition: the volume takes %s for %s\n' "$2" "$1"
+  else
+    condition=0
+    printf '# note: the volume keeps %s and %s apart; the row checks the records alone\n' "$1" "$2"
+  fi
+}
+
+# The archive names of the held-name rows: a second later than any clock
+# reads, so the rotation takes the name after the newest one there.
+stem=advisory.log.21000101T000000Z
+
+# A held-name row of the archive name: ENTRY holds a record beside the archive
+# .8, and the rotation takes the name after .8. The volume may take ENTRY for
+# that name; then the rotation passes over the name and takes .10.
+held_archive_row() { # ENTRY WHAT
+  fresh_home
+  printf 'an older record\n' > "${home}/${stem}.8"
+  printf 'an existing record\n' > "${home}/$1"
+  printf 'the current record\n' > "${log}"
+  takes "$1" "${stem}.9"
+  core_rotate 1 10
+  [[ "$(held 'an existing record')" == 1 && "$(held 'the current record')" == 1 && "$(held 'an older record')" == 1 ]] \
+    || fail "beside $2, the existing record is kept $(held 'an existing record') times and the current one $(held 'the current record') times"
+  if (( condition )); then
+    [[ "$(cat "${home}/${stem}.10")" == 'the current record' ]] || fail "the live file did not become ${stem}.10"
+    head -n 1 "${log}" | grep -qF "moved to ${stem}.10; ${stem}.9 passed over: the creation of " \
+      || fail "the rotation's line does not say it passed over ${stem}.9: $(head -n 1 "${log}")"
+    head -n 1 "${log}" | grep -qF "/${stem}.9 returned OS error 17" || fail "the rotation's line: $(head -n 1 "${log}")"
+  fi
+  pass "a rotation passes over an archive name held by $2, and keeps both records"
+}
+
 # The core's own rotation, as the CLI runs it once its look at the size says
 # the log is at the bound, with an hour's quiet window.
 core_rotate() { # MAX KEEP
@@ -293,6 +350,61 @@ done
   || fail "with KEEP=1, three rotations in ${seconds[0]} left ${counts[*]} archives: $(archives | tr '\n' ' ')"
 [[ "$(text "$(archives)")" == "run 3" ]] || fail "the archive that stands is not the one just made: $(archives)"
 pass "three rotations in one second with KEEP=1 leave one archive each time, the one just made"
+
+# ---- a held name: the stamp in lower case ----------------------------------
+# Whether a name is free is the volume's answer, by its own rules of case and
+# form, and the listing reads names by their bytes. A rotation that took the
+# listing's answer replaced the entry the volume found under the name.
+held_archive_row advisory.log.21000101t000000z.9 'an entry whose stamp is in lower case'
+
+# ---- a held name: the live name in upper case -------------------------------
+held_archive_row ADVISORY.LOG.21000101T000000Z.9 'an entry whose live name is in upper case'
+
+# ---- a held name: a long s ---------------------------------------------------
+# U+017F, which a case-insensitive volume of macOS folds to s. The archive
+# names are ASCII, and this is how a name that is not ASCII reaches them.
+held_archive_row $'advi\xc5\xbfory.log.21000101T000000Z.9' 'an entry with a long s for the s'
+
+# ---- a held name: the gzip name in upper case -------------------------------
+# A compression publishes its gzip file under the plain archive's name and
+# .gz. An entry the volume takes for that name holds another record.
+fresh_home
+printf 'an older record\n' > "${home}/${stem}.9"
+touch -t 202001010000 "${home}/${stem}.9"
+printf 'an existing record\n' | gzip -c > "${home}/${stem}.9.GZ"
+printf 'the current record\n' > "${log}"
+takes "${stem}.9.GZ" "${stem}.9.gz"
+core_rotate 1 10
+[[ "$(held 'an existing record')" == 1 && "$(held 'an older record')" == 1 && "$(held 'the current record')" == 1 ]] \
+  || fail "beside ${stem}.9.GZ, the existing record is kept $(held 'an existing record') times and the archive's own $(held 'an older record') times"
+if (( condition )); then
+  [[ -f "${home}/${stem}.9" ]] || fail "the archive whose gzip name is held is not left plain"
+  head -n 1 "${log}" | grep -qF "; ${stem}.9 left plain: the link to " \
+    || fail "the rotation's line does not say the archive was left plain: $(head -n 1 "${log}")"
+  head -n 1 "${log}" | grep -qF "/${stem}.9.gz returned OS error 17" || fail "the rotation's line: $(head -n 1 "${log}")"
+fi
+pass "a compression whose gzip name is held leaves the archive plain, and keeps both records"
+
+# ---- a held name: the temp name in upper case -------------------------------
+# A compression removes the temp file a compression that did not end left,
+# and writes its own there. An entry the volume takes for that name is not
+# such a file.
+fresh_home
+printf 'an older record\n' > "${home}/${stem}.8"
+touch -t 202001010000 "${home}/${stem}.8"
+printf 'an existing record\n' > "${home}/ADVISORY.LOG.COMPRESSING"
+printf 'the current record\n' > "${log}"
+takes ADVISORY.LOG.COMPRESSING advisory.log.compressing
+core_rotate 1 10
+[[ "$(held 'an existing record')" == 1 && "$(held 'an older record')" == 1 && "$(held 'the current record')" == 1 ]] \
+  || fail "beside ADVISORY.LOG.COMPRESSING, the existing record is kept $(held 'an existing record') times and the archive's own $(held 'an older record') times"
+if (( condition )); then
+  [[ -f "${home}/${stem}.8" ]] || fail "the archive is not left plain while the temp name is held"
+  head -n 1 "${log}" | grep -qF "; ${stem}.8 left plain: the creation of " \
+    || fail "the rotation's line does not say the archive was left plain: $(head -n 1 "${log}")"
+  head -n 1 "${log}" | grep -qF "/advisory.log.compressing returned OS error 17" || fail "the rotation's line: $(head -n 1 "${log}")"
+fi
+pass "a compression whose temp name is held leaves the archive plain, and keeps both records"
 
 # ---- retention -------------------------------------------------------------
 fresh_home
