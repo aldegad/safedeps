@@ -592,15 +592,40 @@ systemctl --user daemon-reload
 
 These systemd commands have not been run by the maintainers on a Linux host. Where there is no systemd user instance, add two crontab lines instead. cron does not run a slot the machine slept or was off through, and its PATH is short, so record tool directories with `configure --tool-path`.
 
+Both commands read the existing crontab first with `crontab -l`. Registration drops any line ending in `# safedeps-watch`, keeps every other line, and adds the two lines for 09:00 and 21:00, so running it again still leaves two watch lines, not four. Removal drops any line ending in `# safedeps-watch` and keeps every other line. When the account has no crontab and `crontab -l` prints `no crontab for <user>`, registration starts from an empty table and removal writes nothing. If `crontab -l` fails for any other reason, neither command writes anything. Each prints crontab's message and `crontab -l failed; nothing was written`, then exits non-zero. To add the two lines:
+
 ```bash
 wrapper="$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"
-( crontab -l 2>/dev/null; printf '0 9 * * * %s # safedeps-watch\n0 21 * * * %s # safedeps-watch\n' "$wrapper" "$wrapper" ) | crontab -
-crontab -l
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then tab="$d/tab"
+  elif grep -q 'no crontab for' "$d/err"; then tab=/dev/null
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$tab" > "$d/new" &&
+    printf '0 9 * * * %s # safedeps-watch\n0 21 * * * %s # safedeps-watch\n' "$wrapper" "$wrapper" >> "$d/new" &&
+    crontab - < "$d/new"
+) && crontab -l
 ```
 
-To remove the lines: `crontab -l | grep -v '# safedeps-watch$' | crontab -`.
+To remove the lines:
 
-These crontab commands were run once, on a macOS host: the two lines were added, read back and removed. An account that had no crontab before is left with an empty one, not with none. A scheduled run was not measured, and the commands have not been run on Linux.
+```bash
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then :
+  elif grep -q 'no crontab for' "$d/err"; then exit 0
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$d/tab" > "$d/new" && crontab - < "$d/new"
+)
+```
+
+The `no crontab for` text matches the message printed by macOS `crontab`, cronie and Debian's cron (sources: `/usr/bin/crontab` on macOS 13, 26 and 27; cronie `src/crontab.c`, `list_cmd`, https://github.com/cronie-crond/cronie/blob/master/src/crontab.c; Debian cron `crontab.c`, `list_cmd`, https://salsa.debian.org/debian/cron/-/blob/master/crontab.c; verified 2026-11-23). When no other lines remain, removal writes an empty crontab. An account that had no crontab before is left with an empty one, not with none.
+
+Both commands were tested on 2026-11-23 on macOS 13 (x86_64) and macOS 27 (arm64), in bash 3.2, zsh 5.9 and dash, both as scripts and pasted into interactive bash and zsh. A shell function stood in for `crontab` with no crontab program on PATH, so no real crontab was touched. With one unrelated line in the table, registering twice left that line and two watch lines. A failed read (exit 2 with no output, or exit 1 with another message) wrote nothing, left the table byte for byte unchanged, and exited 1 for both registration and removal. With no crontab, registration wrote the two lines and removal wrote nothing. A scheduled run, any run on Linux, and any run against a real crontab were not measured.
 
 #### Windows: Task Scheduler
 

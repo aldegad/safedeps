@@ -592,15 +592,40 @@ systemctl --user daemon-reload
 
 이 systemd 명령은 메인테이너가 Linux 호스트에서 실행해 보지 않았습니다. systemd 사용자 인스턴스가 없는 곳에서는 대신 crontab 두 줄을 넣습니다. cron은 기계가 잠들었거나 꺼져 있던 시각을 실행하지 않고, PATH가 짧으므로 `configure --tool-path`로 도구 디렉터리를 기록합니다.
 
+두 명령 모두 먼저 `crontab -l`로 기존 crontab을 읽습니다. 등록 명령은 `# safedeps-watch`로 끝나는 줄을 모두 빼고 나머지 줄은 유지한 뒤 09:00과 21:00 두 줄을 추가하므로, 다시 실행해도 watch 줄은 네 줄이 아니라 두 줄만 남습니다. 삭제 명령은 `# safedeps-watch`로 끝나는 줄을 모두 빼고 나머지 줄은 유지합니다. 계정에 crontab이 없어 `crontab -l`이 `no crontab for <user>`를 출력하면, 등록 명령은 빈 테이블에서 시작하고 삭제 명령은 아무것도 쓰지 않습니다. 다른 이유로 `crontab -l`이 실패하면 두 명령 모두 아무것도 쓰지 않습니다. 각각 crontab이 출력한 메시지와 `crontab -l failed; nothing was written`을 출력한 뒤 0이 아닌 코드로 종료합니다. 두 줄을 등록하려면:
+
 ```bash
 wrapper="$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"
-( crontab -l 2>/dev/null; printf '0 9 * * * %s # safedeps-watch\n0 21 * * * %s # safedeps-watch\n' "$wrapper" "$wrapper" ) | crontab -
-crontab -l
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then tab="$d/tab"
+  elif grep -q 'no crontab for' "$d/err"; then tab=/dev/null
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$tab" > "$d/new" &&
+    printf '0 9 * * * %s # safedeps-watch\n0 21 * * * %s # safedeps-watch\n' "$wrapper" "$wrapper" >> "$d/new" &&
+    crontab - < "$d/new"
+) && crontab -l
 ```
 
-두 줄을 지우려면: `crontab -l | grep -v '# safedeps-watch$' | crontab -`.
+두 줄을 지우려면:
 
-이 crontab 명령은 macOS 호스트에서 한 번 실행했습니다. 두 줄을 넣고, 읽어 오고, 지웠습니다. 전에 crontab이 없던 계정에는 crontab이 없는 상태가 아니라 빈 crontab이 남습니다. 예약 실행은 측정하지 않았고, Linux에서는 실행하지 않았습니다.
+```bash
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then :
+  elif grep -q 'no crontab for' "$d/err"; then exit 0
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$d/tab" > "$d/new" && crontab - < "$d/new"
+)
+```
+
+`no crontab for` 문구는 macOS `crontab`, cronie, Debian의 cron이 출력하는 메시지와 일치합니다(출처: macOS 13, 26, 27의 `/usr/bin/crontab`; cronie `src/crontab.c`, `list_cmd`, https://github.com/cronie-crond/cronie/blob/master/src/crontab.c; Debian cron `crontab.c`, `list_cmd`, https://salsa.debian.org/debian/cron/-/blob/master/crontab.c; 2026-11-23 확인). 다른 줄이 남지 않으면 삭제 명령은 빈 crontab을 씁니다. 이전에 crontab이 없던 계정에는 crontab이 없는 상태가 아니라 빈 crontab이 남습니다.
+
+두 명령은 2026-11-23에 macOS 13(x86_64)과 macOS 27(arm64)에서 bash 3.2, zsh 5.9, dash로 스크립트 실행과 대화형 bash 및 zsh 붙여넣기로 시험했습니다. PATH에 crontab 프로그램이 없는 상태에서 셸 함수로 `crontab`을 대신했으므로 실제 crontab은 건드리지 않았습니다. 테이블에 관련 없는 줄이 하나 있을 때 등록을 두 번 실행하면 그 줄과 watch 두 줄이 남았습니다. 읽기가 실패한 경우(출력 없이 종료 코드 2, 또는 다른 메시지와 함께 종료 코드 1)에는 등록과 삭제 모두 아무것도 쓰지 않았고, 테이블은 바이트 단위로 그대로 남았으며 종료 코드 1로 끝났습니다. crontab이 없을 때는 등록이 두 줄을 썼고 삭제는 아무것도 쓰지 않았습니다. 예약 실행, Linux에서의 실행, 실제 crontab을 대상으로 한 실행은 측정하지 않았습니다.
 
 #### Windows: Task Scheduler
 
