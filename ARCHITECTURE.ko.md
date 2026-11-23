@@ -958,6 +958,7 @@ ledger 디렉터리 하나는 하나의 `SAFEDEPS_HOME` 저장소에 속한다. 
 │   ├── sha256-abc123.json
 │   └── …
 ├── approvals.jsonl            ← 추가 전용 승인 출처 저장소 (approved-specs/ 와 분리)
+├── approvals.turn             ← 저장소 lock 의 마지막 차례; lock 을 기다리는 쪽만 읽는다
 ├── snapshots/                 ← reorg snapshot (v1 계승, 전 lockfile 로 확장)
 │   └── <id>/ { package-lock.json, yarn.lock, pnpm-lock.yaml, poetry.lock, uv.lock,
 │               Cargo.lock, go.sum, Gemfile.lock, meta.json }

@@ -964,6 +964,7 @@ The `approvals-provenance` regression battery exercises real `check` and `re-che
 │   ├── sha256-abc123.json
 │   └── …
 ├── approvals.jsonl            ← append-only approval provenance store (separate from approved-specs/)
+├── approvals.turn             ← the last hold of the store lock; only a waiter for the lock reads it
 ├── snapshots/                 ← reorg snapshots (inherited from v1, extended to all lockfiles)
 │   └── <id>/ { package-lock.json, yarn.lock, pnpm-lock.yaml, poetry.lock, uv.lock,
 │               Cargo.lock, go.sum, Gemfile.lock, meta.json }
