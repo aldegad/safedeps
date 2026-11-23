@@ -477,6 +477,20 @@ mod tests {
     }
 
     #[test]
+    fn a_new_archive_takes_a_name_after_the_newest_so_retention_keeps_it() {
+        let (d, log) = dir();
+        // The archive a rotation of a later second than the clock reads
+        // left, after retention removed the first name of that second.
+        fs::write(d.0.join("advisory.log.21000101T000000Z.1"), b"made before\n").unwrap();
+        fs::write(&log, vec![b'x'; 200]).unwrap();
+        assert_eq!(rotate(&log, &Knobs { keep: 1, ..knobs(100) }), Rotation::Rotated);
+        let names = listing(&d.0);
+        let archives: Vec<&String> = names.iter().filter(|n| parse(b"advisory.log", n.as_bytes()).is_some()).collect();
+        assert_eq!(archives, ["advisory.log.21000101T000000Z.2"], "{names:?}");
+        assert_eq!(fs::read(d.0.join(archives[0])).unwrap(), vec![b'x'; 200], "the archive that stands is the one just made");
+    }
+
+    #[test]
     fn a_held_lock_leaves_the_file_to_its_holder() {
         let (d, log) = dir();
         fs::write(&log, vec![b'x'; 200]).unwrap();
@@ -527,13 +541,21 @@ mod tests {
         assert_eq!(fs::read(&made).unwrap(), vec![b'x'; 200]);
         let older_name = older.file_name().unwrap().to_string_lossy().into_owned();
         assert!(String::from_utf8_lossy(&fs::read(&log).unwrap()).contains(&format!("; {older_name} compressed to {older_name}.gz")));
-        // Quiet is read from the last write, not from the name: the archive
-        // the last rotation made has not been written for the window, and
-        // the older one was written just now.
+        // Quiet counts from the later of the last write and the rename. The
+        // archive the last rotation made was renamed just now, though its
+        // file was last written two minutes before it, and the older one was
+        // written just now: the next rotation, a moment later, compresses
+        // neither.
         fs::write(&log, vec![b'y'; 200]).unwrap();
         fs::OpenOptions::new().append(true).open(&old).unwrap().write_all(b"a late line\n").unwrap();
         assert_eq!(rotate(&log, &quiet), Rotation::Rotated);
         assert_eq!(fs::read(&old).unwrap(), b"old line\na late line\n", "an archive written inside the window stays plain");
+        assert!(made.exists(), "an archive renamed inside the window stays plain: {:?}", listing(&d.0));
+        // Once its rename is further back than the window, a rotation
+        // compresses it.
+        aged(&made, 120);
+        fs::write(&log, vec![b'z'; 200]).unwrap();
+        assert_eq!(rotate(&log, &quiet), Rotation::Rotated);
         assert!(!made.exists());
         assert_eq!(gunzip(&suffixed(&made, GZIP_SUFFIX)), vec![b'x'; 200]);
     }

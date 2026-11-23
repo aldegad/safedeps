@@ -83,6 +83,31 @@ archives() {
 }
 archive_count() { archives | wc -l | tr -d ' '; }
 inode() { local number rest; read -r number rest < <(ls -di "$1") || return 1; printf '%s\n' "${number}"; }
+# The text of the live file or an archive, by name, gzip read through.
+text() {
+  if [[ "$1" == *.gz ]]; then gzip -dc "${home}/$1"; else cat "${home}/$1"; fi
+}
+# How many lines of the live file and the archives together are $1.
+recorded() {
+  local name
+  {
+    cat "${log}"
+    for name in $(archives); do
+      text "${name}" || fail "${name} is not whole"
+    done
+  } > "${home}/record"
+  grep -cxF -- "$1" "${home}/record" || true
+}
+
+# The core's own rotation, as the CLI runs it once its look at the size says
+# the log is at the bound, with an hour's quiet window.
+core_rotate() { # MAX KEEP
+  local rc=0
+  env SAFEDEPS_HOME="${home}" SAFEDEPS_ADVISORY_LOG_MAX_BYTES="$1" SAFEDEPS_ADVISORY_LOG_KEEP="$2" \
+    SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS=3600 \
+    "${SAFEDEPS_TEST_CORE}" advisory-log rotate 2> "${home}/core.err" || rc=$?
+  [[ "${rc}" == 0 ]] || fail "the core's rotation exited ${rc}: $(cat "${home}/core.err")"
+}
 
 # Holds an exclusive flock(2) on $1 until killed.
 hold() {
@@ -204,6 +229,70 @@ CLI_ENV=()
 [[ ! -e "${log}.compressing" ]] || fail "the compression left its temp file"
 grep -qF "; ${old##*/} compressed to ${old##*/}.gz" "${log}" || fail "the rotation's line does not say what it compressed: $(head -n 1 "${log}")"
 pass "a later rotation compresses a plain archive nobody wrote for the quiet window, and leaves the new one and a fresh one plain"
+
+# ---- a line written into an archive after the next rotation ----------------
+# A writer that opened the live file before the rename writes into the
+# archive. Here the file had gone unwritten for longer than the quiet window
+# before the rename, and a rename keeps a file's mtime. The window must count
+# from the rename all the same: the next rotation, a moment later, leaves the
+# archive plain, and the line the writer writes after it is kept.
+fresh_home
+printf 'a line written long ago\n' > "${log}"
+touch -t 202001010000 "${log}"
+inode_before=$(inode "${log}")
+exec 7>>"${log}"
+core_rotate 1 5
+first=$(archives)
+[[ "$(archive_count)" == 1 && "$(inode "${home}/${first}")" == "${inode_before}" ]] \
+  || fail "the first rotation did not rename the file the writer holds: $(archives)"
+# The first rotation's line made a new live file at the bound of one byte.
+core_rotate 1 5
+[[ "$(archive_count)" == 2 ]] || fail "the second rotation did not rename the new live file: $(archives)"
+printf 'a line written after the next rotation\n' >&7
+exec 7>&-
+seed=$(recorded 'a line written long ago')
+late=$(recorded 'a line written after the next rotation')
+[[ -f "${home}/${first}" ]] || fail "the archive the writer holds was compressed a moment after its rename: $(archives)"
+[[ "${seed}" == 1 && "${late}" == 1 ]] \
+  || fail "the record holds the first line ${seed} times and the late one ${late} times: $(archives)"
+pass "a writer that opened the log before its rename keeps a line it writes after the next rotation, though the file was last written long before"
+
+# ---- three rotations in one second -----------------------------------------
+# Retention removes the oldest names first, so archive names must sort in the
+# order the archives were made. With KEEP=1 each rotation removes the archive
+# the one before it made. The next rotation in that second must not take the
+# name the removal freed: that name sorts first, and retention would keep the
+# archive it took for the oldest. The row reads the three names' second from
+# the names themselves, and a try whose rotations straddled a second runs
+# again.
+tries=0
+while :; do
+  fresh_home
+  # Start just after a second turns, so three runs of the core fit in it.
+  sleep "$(python3 -c 'import time; print("%.3f" % (1.02 - time.time() % 1))')"
+  counts=()
+  seconds=()
+  for n in 1 2 3; do
+    printf 'run %d\n' "${n}" > "${log}"
+    core_rotate 1 1
+    counts+=("$(archive_count)")
+    made=""
+    for name in $(archives); do
+      if [[ "$(text "${name}")" == "run ${n}" ]]; then made="${name}"; fi
+    done
+    [[ -n "${made}" ]] || fail "no archive holds run ${n}: $(archives)"
+    made="${made#advisory.log.}"
+    seconds+=("${made%%.*}")
+  done
+  [[ "${seconds[0]}" == "${seconds[1]}" && "${seconds[1]}" == "${seconds[2]}" ]] && break
+  tries=$((tries + 1))
+  (( tries < 5 )) || fail "three rotations straddled a second in five tries: ${seconds[*]}"
+  printf '# note: the three rotations straddled a second (%s); the row runs again\n' "${seconds[*]}"
+done
+[[ "${counts[*]}" == "1 1 1" ]] \
+  || fail "with KEEP=1, three rotations in ${seconds[0]} left ${counts[*]} archives: $(archives | tr '\n' ' ')"
+[[ "$(text "$(archives)")" == "run 3" ]] || fail "the archive that stands is not the one just made: $(archives)"
+pass "three rotations in one second with KEEP=1 leave one archive each time, the one just made"
 
 # ---- retention -------------------------------------------------------------
 fresh_home
