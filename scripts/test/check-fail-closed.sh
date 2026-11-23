@@ -72,7 +72,7 @@ PATH="${guard_bin}:${PATH}"
 port_file="${tmp_root}/port"
 state_file="${tmp_root}/state.json"
 printf '%s\n' '{"vulnerable":["fixture-dep@1.0.0","example.com/mod@v1.0.0"],"kev":["fixture-kev-dep@1.0.0"]}' > "${state_file}"
-( cd "${tmp_root}" && exec node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${port_file}" "${state_file}" ) &
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-provider.py" "${port_file}" "${state_file}" ) &
 server_pid=$!
 for _ in {1..50}; do
   [[ -s "${port_file}" ]] && break

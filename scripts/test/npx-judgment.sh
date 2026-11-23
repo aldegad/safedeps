@@ -81,7 +81,7 @@ oracle_native_io_forms
 
 port_file="${tmp_root}/port"
 printf '%s\n' '{"vulnerable":[]}' > "${tmp_root}/provider-state.json"
-( cd "${tmp_root}" && exec node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${port_file}" "${tmp_root}/provider-state.json" ) &
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-provider.py" "${port_file}" "${tmp_root}/provider-state.json" ) &
 server_pid=$!
 for _ in {1..50}; do
   [[ -s "${port_file}" ]] && break

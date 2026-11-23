@@ -765,8 +765,7 @@ EVILREG_DIR="${tmp_root}/evilreg"
 mkdir -p "${EVILREG_DIR}/tarballs"
 cp "${EVIL_DIR}/sd-approved-1.0.0.tgz" "${EVILREG_DIR}/tarballs/sd-approved-1.0.0.tgz"
 cp "${EVIL_DIR}/src/package.json" "${EVILREG_DIR}/tarballs/sd-approved-1.0.0.tgz.json"
-( cd "${tmp_root}" && exec -a "${CHILD_MARKER}" \
-    node "${ROOT_DIR}/scripts/test/fixture-registry.mjs" \
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-registry.py" --mark "${CHILD_MARKER}" \
     "${EVILREG_DIR}/registry.port" "${EVILREG_DIR}/tarballs" "${EVILREG_DIR}/registry.log" \
     "${EVILREG_DIR}/registry.trace" ) &
 owned_children+=("$!")
