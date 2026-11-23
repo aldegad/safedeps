@@ -526,7 +526,7 @@ Who runs it is the host's choice:
 - **The operating system's scheduler** otherwise: launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler on Windows. Commands for each follow. The agent then reads what the scan found when a session starts.
 - **Not a scheduler that runs in the cloud.** The scan reads the lockfiles on your computer and writes its state there, and a cloud run can read neither.
 
-Every scheduler runs the same wrapper, `scripts/safedeps-recheck-alert.sh`. Tell the scan which projects to read once, on any operating system, from the package directory (or your clone):
+The operating system schedulers below all run the same wrapper, `scripts/safedeps-recheck-alert.sh`. Whether an agent's routine or one of those schedulers runs the scan, tell the scan once which projects to read. Until you do, a scan has no project list, its summary line reads `population missing 0`, and no project's lockfile is read. Run this once, on any operating system, from the package directory (or your clone):
 
 ```bash
 cd "$(npm root -g)/@aldegad/safedeps"
@@ -536,7 +536,9 @@ node scripts/install/install-safedeps-recheck-agent.mjs configure \
   --followup remote_mount=remote-mount-plan
 ```
 
-`--population-command` is the absolute path of the command that lists your project roots. It prints one `name<TAB>path` a line. `--exclude` is an absolute prefix the scan never reads. `--followup KIND=PLAN` names the plan that owns an unmeasured kind. `--tool-path DIR` names a directory for node, pnpm, yarn or bun. A scheduler's PATH may have no pnpm, yarn or bun, so the installer records their directories. Without `--tool-path` it searches its own PATH. An option not given keeps what is there. `install` takes the same options.
+`--population-command` is the absolute path of the command that lists your project roots. It prints one root per line, either `name<TAB>path` or an absolute path alone. `--exclude` is an absolute prefix the scan never reads. `--followup KIND=PLAN` names the plan that owns an unmeasured kind. `--tool-path DIR` names a directory for node, pnpm, yarn or bun. A scheduler's PATH may have no pnpm, yarn or bun, so the installer records their directories. Without `--tool-path` it searches its own PATH. An option not given keeps what is there. `install` takes the same options.
+
+After the first run, check `safedeps watch status` to confirm that the projects you listed are included. Look for `population fresh <count>` and `roots walked N/M` in the summary line. `population fresh <count>` means the command exited 0 and printed at least one root. `<count>` is the number of roots it printed. In `roots walked N/M`, M is the number of those roots the scan could open, and N is the number it read in full. Neither is above `<count>`. M is lower when a root is on a network mount, under an excluded prefix (`--exclude`), or could not be reached. N is lower when the walk of a root did not finish.
 
 #### macOS: launchd
 

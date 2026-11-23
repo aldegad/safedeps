@@ -526,7 +526,7 @@ ledger 디렉터리 하나는 하나의 `SAFEDEPS_HOME` 저장소에 속합니�
 - 그렇지 않으면 **운영체제의 예약 기능**입니다. macOS는 launchd, Linux는 systemd 사용자 타이머 또는 cron, Windows는 작업 스케줄러입니다. 각각의 명령은 아래에 있습니다. 이 경우 에이전트는 세션을 시작할 때 scan이 찾은 것을 읽습니다.
 - **클라우드에서 도는 예약 기능은 쓰지 않습니다.** scan은 내 컴퓨터의 lockfile을 읽고 상태도 거기에 씁니다. 클라우드 실행은 둘 다 읽지 못합니다.
 
-모든 예약 기능은 같은 wrapper, `scripts/safedeps-recheck-alert.sh`를 실행합니다. 어떤 프로젝트를 읽을지는 운영체제와 상관없이 한 번만, 패키지 디렉터리(또는 clone)에서 알려 줍니다.
+아래의 운영체제 예약 기능은 모두 같은 wrapper, `scripts/safedeps-recheck-alert.sh`를 실행합니다. 에이전트 루틴이 scan을 실행하든 이 예약 기능 중 하나가 실행하든, 어떤 프로젝트를 읽을지는 scan에 한 번 알려 주어야 합니다. 그렇게 하기 전까지 scan에는 프로젝트 목록이 없으며, 요약 줄은 `population missing 0`으로 표시되고 어떤 프로젝트의 lockfile도 읽지 않습니다. 아래 명령을 운영체제와 상관없이 패키지 디렉터리(또는 clone)에서 한 번 실행합니다:
 
 ```bash
 cd "$(npm root -g)/@aldegad/safedeps"
@@ -536,7 +536,9 @@ node scripts/install/install-safedeps-recheck-agent.mjs configure \
   --followup remote_mount=remote-mount-plan
 ```
 
-`--population-command`는 프로젝트 root 목록을 출력하는 명령의 절대 경로입니다. 이 명령은 한 줄에 `name<TAB>path` 하나를 출력합니다. `--exclude`는 scan이 절대 읽지 않는 절대 경로 prefix입니다. `--followup KIND=PLAN`은 측정되지 않은 kind를 맡는 plan을 지정합니다. `--tool-path DIR`은 node, pnpm, yarn, bun이 있는 디렉터리를 지정합니다. 예약 기능의 PATH에는 pnpm, yarn, bun이 없을 수 있으므로 installer가 이들의 디렉터리를 기록합니다. `--tool-path`가 없으면 installer 자신의 PATH에서 찾습니다. 지정하지 않은 옵션은 기존 값을 유지합니다. `install`도 같은 옵션을 받습니다.
+`--population-command`는 프로젝트 root 목록을 출력하는 명령의 절대 경로입니다. 이 명령은 한 줄에 root 하나를 `name<TAB>path` 형식이나 절대 경로만으로 출력합니다. `--exclude`는 scan이 절대 읽지 않는 절대 경로 prefix입니다. `--followup KIND=PLAN`은 측정되지 않은 kind를 맡는 plan을 지정합니다. `--tool-path DIR`은 node, pnpm, yarn, bun이 있는 디렉터리를 지정합니다. 예약 기능의 PATH에는 pnpm, yarn, bun이 없을 수 있으므로 installer가 이들의 디렉터리를 기록합니다. `--tool-path`가 없으면 installer 자신의 PATH에서 찾습니다. 지정하지 않은 옵션은 기존 값을 유지합니다. `install`도 같은 옵션을 받습니다.
+
+첫 실행 뒤에는 `safedeps watch status`로 지정한 프로젝트가 포함되었는지 확인합니다. 요약 줄에서 `population fresh <count>`와 `roots walked N/M`을 봅니다. `population fresh <count>`는 명령이 0으로 종료하고 root를 하나 이상 출력했음을 뜻합니다. `<count>`는 명령이 출력한 root 수입니다. `roots walked N/M`에서 M은 scan이 열 수 있었던 root 수이고, N은 그중 끝까지 읽은 root 수입니다. 둘 다 `<count>`보다 클 수 없습니다. root가 네트워크 마운트에 있거나, 제외한 prefix(`--exclude`) 아래에 있거나, 접근할 수 없을 때 M이 낮아집니다. root의 walk가 끝나지 않았을 때 N이 낮아집니다.
 
 #### macOS: launchd
 

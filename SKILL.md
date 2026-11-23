@@ -161,8 +161,19 @@ When you install safedeps for a user, or when they ask about new advisories, set
 
 1. Ask first: "Does an agent run on this computer with a scheduled routine or automation, one that runs here and not in the cloud?"
 2. Offer the path that fits the answer: Path 1 if yes, Path 2 if no. Recommend twice a day, 09:00 and 21:00 local time. An advisory can be published at any hour, and a slot missed while the computer slept is followed by another twelve hours later. Let the user pick other times.
-3. Ask how you, the agent, should learn what a scan found: [How the agent learns of a finding](#how-the-agent-learns-of-a-finding).
-4. After the first scan, read what it could reach: [macOS: check what the scan could read](#macos-check-what-the-scan-could-read).
+3. On either path, ask which project folders the scan should read and record them before the first scan: [Choose the projects](#choose-the-projects).
+4. Ask how you, the agent, should learn what a scan found: [How the agent learns of a finding](#how-the-agent-learns-of-a-finding).
+5. After the first scan, check that the folders the user chose were read: [Choose the projects](#choose-the-projects). On macOS, also check [macOS: check what the scan could read](#macos-check-what-the-scan-could-read).
+
+### Choose the projects
+
+Both paths need this step before the first scan. Without it, a scan has no project list, its summary line reads `population missing 0`, and no project's lockfile is read.
+
+1. Ask the user which project folders to watch.
+2. Write a small executable script that prints those folders, one per line, either `name<TAB>path` or an absolute path alone. On macOS, put the script outside protected folders such as `~/Documents`, because a launchd job cannot read under them.
+3. Record the script once, from the package directory, with `node scripts/install/install-safedeps-recheck-agent.mjs configure --population-command <the script's absolute path>`. Other options, such as `--exclude` and `--tool-path`, are in [`README.md`](./README.md#re-checking-what-is-already-installed).
+
+After the first scan, check `safedeps watch status`. `population fresh <count>` should equal the number of folders the script prints, and `roots walked N/M` should show that same number for both N and M. A lower M means some folders were not opened, such as a network mount, an excluded prefix or a path the scan could not reach. A lower N means some folders were not read in full. Tell the user which number fell short. Do not call the folders that were not read clean.
 
 ### Path 1: an agent that runs on this computer (first choice)
 
