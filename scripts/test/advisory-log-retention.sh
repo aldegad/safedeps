@@ -15,6 +15,8 @@ cd "${ROOT_DIR}"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+# A skip is a TAP row the host runner's verdict reads, and never a pass.
+skip() { printf 'ok - %s: SKIPPED (%s)\n' "$1" "$2"; }
 
 # The CLI rows run the checkout's CLI, which runs the core beside it.
 # shellcheck source=lib/core-reader.sh
@@ -425,24 +427,35 @@ grep -qF '; removed beyond the retention bounds: ' "${log}" || fail "the rotatio
 pass "retention keeps three archives, plain and gzip counted together, and the rotation's line names what it removed"
 
 # ---- a rotation that cannot make the archive name says so ------------------
-fresh_home
-write_fixture
-mkdir -p "${home}/cache/osv-vuln" "${home}/cache/kev" "${home}/cache/ghsa" "${home}/approved-specs"
-: > "${log}.rotate.lock"
-# The CLI's output files exist first: in a home it cannot write to, the
-# redirect would fail and the CLI would not run at all.
-: > "${home}/cli.out"
-: > "${home}/cli.err"
-chmod 500 "${home}"
-cli 100000
-chmod 700 "${home}"
-grep -q '^safedeps-core advisory-log: advisory log not rotated: the creation of .* returned OS error ' "${home}/cli.err" \
-  || fail "stderr does not say the rotation failed: $(cat "${home}/cli.err")"
-log_kept || fail "a rotation that could not make the archive name changed the log"
-[[ "$(archive_count)" == 0 ]] || fail "a rotation that could not make the archive name made an archive: $(archives)"
-grep -q '\] ERROR advisory log not rotated: the creation of .* returned OS error ' "${log}" \
-  || fail "the log does not say the rotation failed"
-pass "a rotation that cannot make the archive name leaves the log whole, and says why on stderr and in the log"
+# The row needs a home this uid cannot make a file in. The volume is asked
+# first, as e2e asks it: for root, and on a Windows drive in WSL1, a
+# directory's mode does not stop the creation, and there the row says it is
+# skipped and why.
+row="a rotation that cannot make the archive name leaves the log whole, and says why on stderr and in the log"
+reason=$(python3 "${ROOT_DIR}/scripts/measure/core-post-test-fixtures.py" permission-probe \
+  --directory "${tmp_root}" --operation create) || fail "permission capability probe failed: create"
+if [[ -n "${reason}" ]]; then
+  skip "${row}" "${reason}"
+else
+  fresh_home
+  write_fixture
+  mkdir -p "${home}/cache/osv-vuln" "${home}/cache/kev" "${home}/cache/ghsa" "${home}/approved-specs"
+  : > "${log}.rotate.lock"
+  # The CLI's output files exist first: in a home it cannot write to, the
+  # redirect would fail and the CLI would not run at all.
+  : > "${home}/cli.out"
+  : > "${home}/cli.err"
+  chmod 500 "${home}"
+  cli 100000
+  chmod 700 "${home}"
+  grep -q '^safedeps-core advisory-log: advisory log not rotated: the creation of .* returned OS error ' "${home}/cli.err" \
+    || fail "stderr does not say the rotation failed: $(cat "${home}/cli.err")"
+  log_kept || fail "a rotation that could not make the archive name changed the log"
+  [[ "$(archive_count)" == 0 ]] || fail "a rotation that could not make the archive name made an archive: $(archives)"
+  grep -q '\] ERROR advisory log not rotated: the creation of .* returned OS error ' "${log}" \
+    || fail "the log does not say the rotation failed"
+  pass "${row}"
+fi
 
 # The hooks rotate through the same core, from the post hook's provider
 # initialization.
