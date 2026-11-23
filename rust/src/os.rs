@@ -380,6 +380,7 @@ pub enum WallRole {
     ProviderCacheExpiry,
     StateLockAge,
     AdvisoryRotationLockAge,
+    AdvisoryArchiveQuiet,
     StateRetention,
     StateTempName,
     PostTempName,

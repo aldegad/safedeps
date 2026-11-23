@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The CLI rotation contract, exercised through real native pre/post calls."""
-from collections import Counter
+"""The rotation contract, exercised through real native pre/post calls."""
+import fcntl
 import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -14,6 +14,12 @@ import threading
 
 CORE = sys.argv[1]
 TRACE = re.compile(rb"^\[[^]]*\] INFO ")
+ARCHIVE = re.compile(r"^advisory\.log\.\d{8}T\d{6}Z(?:\.[1-9]\d*)?(?:\.gz)?$")
+
+
+def archives(state):
+    """The archives in the state directory, plain and gzip."""
+    return {path for path in state.iterdir() if ARCHIVE.match(path.name)}
 
 
 class Batch(BaseHTTPRequestHandler):
@@ -93,7 +99,8 @@ def run(batch_url):
         assert sum(bool(TRACE.match(line)) for line in before.splitlines()) == 40, before
         assert before.startswith(evidence), before
         assert len(before) > 1000, len(before)
-        assert not list(state.glob("advisory.log.*.gz"))
+        assert not archives(state)
+        assert not (state / "advisory.log.rotate.lock").exists(), "a look under the bound made the lock file"
         print("ok - native pre/post append evidence and 40 INFO live answers below the configured bound")
 
         # As in the CLI battery, the threshold and keep count are explicit
@@ -105,30 +112,36 @@ def run(batch_url):
             older.append(archive)
         env["SAFEDEPS_ADVISORY_LOG_MAX_BYTES"] = "1000"
         lock({})  # Provider initialization rotates, then adds no new INFO.
-        held = state / "advisory.log.rotate.lock"
-        held.mkdir()
-        call("post", "npm ci")
-        assert log.read_bytes().startswith(before), "a held lock compacted the live log"
-        assert set(state.glob("advisory.log.*.gz")) == set(older)
-        held.rmdir()
-        print("ok - native rotation defers while the existing rotation lock is held")
+        with open(state / "advisory.log.rotate.lock", "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            call("post", "npm ci")
+            assert log.read_bytes().startswith(before), "a held lock rotated the live log"
+            assert archives(state) == set(older)
+        print("ok - native rotation defers while another process holds the rotation lock")
 
         before = log.read_bytes()
+        inode = log.stat().st_ino
         call("post", "npm ci")
         after = log.read_bytes()
-        archives = set(state.glob("advisory.log.*.gz"))
-        fresh = archives - set(older)
-        assert len(fresh) == 1, archives
+        found = archives(state)
+        fresh = found - set(older)
+        assert len(fresh) == 1, found
         archive = fresh.pop()
-        assert gzip.decompress(archive.read_bytes()).startswith(before), "archive lost original bytes"
-        retained = Counter(line for line in before.splitlines(keepends=True) if not TRACE.match(line))
-        actual = Counter(after.splitlines(keepends=True))
-        assert not retained - actual, retained - actual
+        assert not archive.name.endswith(".gz"), "the new archive is compressed"
+        assert archive.stat().st_ino == inode, "the archive is not the live file renamed"
+        assert archive.read_bytes().startswith(before), "the archive lost bytes of the live file"
+        # The rotated file's evidence and INFO lines left the live file. The
+        # run's own WARN lines may repeat earlier ones to the second, so they
+        # are not compared.
         assert not any(TRACE.match(line) for line in after.splitlines()), after
-        assert b"advisory log rotated" in after, after
+        assert evidence not in after and b"pre-guard DENY" not in after, after
+        assert after.startswith(b"[") and b"] WARN advisory log rotated: " in after.splitlines()[0], after
+        assert f"bytes moved to {archive.name}".encode() in after.splitlines()[0], after
         assert len(after) < len(before), (len(before), len(after))
-        print(f"ok - native rotation archives original bytes, keeps all evidence and drops INFO ({len(before)} -> {len(after)} bytes)")
-        assert archives == {archive, older[-1], older[-2]}, archives
+        lock_file = state / "advisory.log.rotate.lock"
+        assert lock_file.is_file() and not lock_file.is_symlink(), "the lock is not a regular file"
+        print(f"ok - native rotation renames the whole live log to a plain archive, and the new log starts with its line ({len(before)} -> {len(after)} bytes)")
+        assert found == {archive, older[-1], older[-2]}, found
         assert all(not path.exists() for path in older[:-2])
         print("ok - native retention keeps exactly three newest archives and removes the five oldest")
 

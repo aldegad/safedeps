@@ -85,73 +85,35 @@ function approveLine(name, hash) {
 }
 
 const rows = [
-  ['a real shell rotation between approval and re-check preserves provenance inside and after its rewrite window', (dir) => {
+  ['a core rotation between approval and re-check moves the approve line into an archive, and provenance stands', (dir) => {
     const hash = approve(dir);
     const before = store(dir);
     const log = path.join(dir, 'advisory.log');
+    const whole = fs.readFileSync(log);
     const inode = fs.statSync(log).ino;
-    assert(fs.readFileSync(log, 'utf8').includes(`hash=${hash}`));
-    // check's shell provider initialization still calls this rotator
-    // (lib/providers/providers.sh: safedeps_providers_init -> rotate_once).
-    // The core has its own rotator in rust/src/state/log.rs; this row measures
-    // only the shell one. re-check's provenance index takes no rotate.lock.
-    // The real `cat temp > live` opens/truncates live before invoking cat.
-    // A finished rotation retains approvals, so even the old log-only verdict
-    // passes after it: the window, not a finished rotation alone, is the control.
-    run(dir, 'bash', ['-c', String.raw`
-      set -euo pipefail
-      root="$1"
-      log="$SAFEDEPS_HOME/advisory.log"
-      source "$root/lib/providers/providers.sh"
-      cat_calls=0
-      missed() { printf 'rotation middle window not observed: %s\n' "$1" >&2; exit 1; }
-      # No "command <utility>" in this script. The /bin/bash of macOS 13
-      # (3.2.57) ends the shell under errexit when one fails, even in an if
-      # condition or in a function the rotator calls behind "|| true": the
-      # grep below that finds nothing killed the row there. The real cat is
-      # called by its path, and grep by name, since only cat is a function
-      # here. No backquote either: this script is a JavaScript template.
-      cat_bin=$(type -P cat) || missed 'no cat on PATH'
-      cat() {
-        if [[ $# == 1 && "$1" == "$log".compact.* ]]; then
-          cat_calls=$((cat_calls + 1))
-          [[ -f "$log" && ! -s "$log" ]] || missed 'live is not an empty file'
-          [[ -d "$log.rotate.lock" ]] || missed 'the rotator holds no lock'
-          if grep -q 'check approve' "$log"; then
-            missed 'live still has an approve line'
-          else
-            rc=$?
-            [[ "$rc" == 1 ]] || missed 'live could not be searched'
-          fi
-          printf '0\n' > "$SAFEDEPS_HOME/window-size"
-          "$root/bin/safedeps" --json re-check > "$SAFEDEPS_HOME/window.json" 2> "$SAFEDEPS_HOME/window.err"
-          "$cat_bin" "$log" > "$SAFEDEPS_HOME/window-appends"
-        fi
-        "$cat_bin" "$@"
-      }
-      SAFEDEPS_ADVISORY_LOG_MAX_BYTES=1
-      safedeps_providers_init
-      [[ "$cat_calls" == 1 ]] || missed "cat called $cat_calls times"
-      printf '%s\n' "$cat_calls" > "$SAFEDEPS_HOME/window-calls"
-    `, 'rotation-window', root]);
-    assert.equal(fs.readFileSync(path.join(dir, 'window-calls'), 'utf8'), '1\n', 'rotation middle window not observed');
-    assert.equal(fs.readFileSync(path.join(dir, 'window-size'), 'utf8'), '0\n', 'rotation middle window not observed');
-    const during = JSON.parse(fs.readFileSync(path.join(dir, 'window.json'), 'utf8'));
-    console.log(`# shell rotation window: ${JSON.stringify(during)}`);
-    // Observe what the nested re-check appended without making the verdict
-    // depend on the bytes that the outer cat subsequently overwrites.
-    const appends = fs.readFileSync(path.join(dir, 'window-appends'));
-    console.log(`# shell rotation: calls=1 live_bytes_at_call=0 nested_append_bytes=${appends.length}`
-      + ` appended_bytes_survive=${fs.readFileSync(log).includes(appends)}`);
-    const after = recheck(dir, 'completed shell rotation');
+    assert(whole.includes(`hash=${hash}`));
+    // re-check's first log write starts the rotation: the CLI looks at the
+    // size and runs the core's (lib/providers/providers.sh:
+    // safedeps_providers_init -> safedeps_advisory_log_rotate_once ->
+    // safedeps-core advisory-log rotate). The core renames the whole file, so
+    // the approve line leaves the live file before re-check reads anything,
+    // and no window rewrites it. re-check reads the approvals store, a file
+    // no rotation touches.
+    const during = JSON.parse(run(dir, cli, ['--json', 're-check'], { SAFEDEPS_ADVISORY_LOG_MAX_BYTES: '1' }));
+    console.log(`# core rotation: ${JSON.stringify(during)}`);
     assert.deepEqual(during.errors, []);
     assert.deepEqual(during.suspected_forgery, []);
     assert.equal(during.checked, 1);
+    const archives = fs.readdirSync(dir).filter((name) => /^advisory\.log\.\d{8}T\d{6}Z(?:\.[1-9]\d*)?(?:\.gz)?$/.test(name));
+    assert.equal(archives.length, 1, `the core did not rotate once: ${fs.readdirSync(dir).join(' ')}`);
+    const archive = path.join(dir, archives[0]);
+    assert.equal(fs.statSync(archive).ino, inode, 'the archive is not the live file, renamed');
+    assert.deepEqual(fs.readFileSync(archive), whole, 'the archive is not the whole live file');
+    const live = fs.readFileSync(log, 'utf8');
+    assert(!live.includes(`hash=${hash}`), 'the approve line is still live');
+    assert(live.includes(`advisory log rotated: ${whole.length} bytes moved to ${archives[0]}`), live);
+    const after = recheck(dir, 'after a core rotation');
     assert.equal(after.checked, 1);
-    assert.equal(fs.statSync(log).ino, inode);
-    const archives = fs.readdirSync(dir).filter((name) => name.endsWith('.gz'));
-    assert.equal(archives.length, 1, 'the real rotator did not archive once');
-    assert(gunzipSync(fs.readFileSync(path.join(dir, archives[0]))).includes(`hash=${hash}`));
     assert.deepEqual(store(dir), before);
   }],
   ['a synthetic overlap with a clipped live prefix does not lose real approval provenance', (dir) => {
