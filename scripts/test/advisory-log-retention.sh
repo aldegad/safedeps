@@ -136,6 +136,9 @@ pass "the lock file stays, and the next run leaves the new file under the bound 
 fresh_home
 write_fixture
 tree=$(mktemp -d "${tmp_root}/no-core.XXXXXX")
+# The CLI names its own directory as `pwd -P` reads it, and on macOS the
+# temporary directory is under a link (/var -> /private/var).
+tree=$(cd -P "${tree}" && pwd -P)
 mkdir -p "${tree}/bin"
 cp bin/safedeps "${tree}/bin/safedeps"
 cp -R lib "${tree}/lib"

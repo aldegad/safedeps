@@ -104,14 +104,24 @@ const rows = [
     assert.deepEqual(during.errors, []);
     assert.deepEqual(during.suspected_forgery, []);
     assert.equal(during.checked, 1);
-    const archives = fs.readdirSync(dir).filter((name) => /^advisory\.log\.\d{8}T\d{6}Z(?:\.[1-9]\d*)?(?:\.gz)?$/.test(name));
-    assert.equal(archives.length, 1, `the core did not rotate once: ${fs.readdirSync(dir).join(' ')}`);
-    const archive = path.join(dir, archives[0]);
-    assert.equal(fs.statSync(archive).ino, inode, 'the archive is not the live file, renamed');
-    assert.deepEqual(fs.readFileSync(archive), whole, 'the archive is not the whole live file');
-    const live = fs.readFileSync(log, 'utf8');
-    assert(!live.includes(`hash=${hash}`), 'the approve line is still live');
-    assert(live.includes(`advisory log rotated: ${whole.length} bytes moved to ${archives[0]}`), live);
+    // Each process looks once, and re-check runs two that look: the CLI's
+    // call to the core, then the core's provider initialization. At a bound
+    // of one byte the second finds the first one's new live file over it
+    // too. So the row asks where the approve line went, not how many
+    // rotations ran.
+    const names = fs.readdirSync(dir);
+    const archives = names.filter((name) => /^advisory\.log\.\d{8}T\d{6}Z(?:\.[1-9]\d*)?(?:\.gz)?$/.test(name));
+    assert(archives.length >= 1, `the core did not rotate: ${names.join(' ')}`);
+    assert(archives.every((name) => !name.endsWith('.gz')), `an archive was compressed inside the quiet window: ${names.join(' ')}`);
+    const renamed = archives.filter((name) => fs.statSync(path.join(dir, name)).ino === inode);
+    assert.equal(renamed.length, 1, `no archive is the live file, renamed: ${names.join(' ')}`);
+    assert.deepEqual(fs.readFileSync(path.join(dir, renamed[0])), whole, 'the archive is not the whole live file');
+    const text = (name) => fs.readFileSync(path.join(dir, name), 'utf8');
+    const record = ['advisory.log', ...archives];
+    assert.deepEqual(record.filter((name) => text(name).includes(`hash=${hash}`)), renamed,
+      'the approve line is not in the renamed archive alone');
+    const rotated = `advisory log rotated: ${whole.length} bytes moved to ${renamed[0]}`;
+    assert(record.some((name) => text(name).includes(rotated)), `no line names the archive: ${rotated}`);
     const after = recheck(dir, 'after a core rotation');
     assert.equal(after.checked, 1);
     assert.deepEqual(store(dir), before);
