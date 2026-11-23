@@ -600,6 +600,8 @@ crontab -l
 
 두 줄을 지우려면: `crontab -l | grep -v '# safedeps-watch$' | crontab -`.
 
+이 crontab 명령은 macOS 호스트에서 한 번 실행했습니다. 두 줄을 넣고, 읽어 오고, 지웠습니다. 전에 crontab이 없던 계정에는 crontab이 없는 상태가 아니라 빈 crontab이 남습니다. 예약 실행은 측정하지 않았고, Linux에서는 실행하지 않았습니다.
+
 #### Windows: Task Scheduler
 
 safedeps는 WSL 안에서 돕니다. wrapper의 경로는 WSL 셸에서 `echo "$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"`로, 배포판 이름은 `wsl -l -v`로 찾습니다. `schtasks /Create`는 작업 하나에 일정 하나를 받으므로, 두 시각은 작업 두 개가 됩니다(출처: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create, 2026-11-23 확인). Windows 터미널에서 `<distro>`와 `<wrapper>`를 채워 실행합니다.

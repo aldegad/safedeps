@@ -600,6 +600,8 @@ crontab -l
 
 To remove the lines: `crontab -l | grep -v '# safedeps-watch$' | crontab -`.
 
+These crontab commands were run once, on a macOS host: the two lines were added, read back and removed. An account that had no crontab before is left with an empty one, not with none. A scheduled run was not measured, and the commands have not been run on Linux.
+
 #### Windows: Task Scheduler
 
 safedeps runs inside WSL. Find the wrapper's path in your WSL shell with `echo "$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"`, and the distribution's name with `wsl -l -v`. `schtasks /Create` takes one schedule per task, so the two slots are two tasks (source: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create, verified 2026-11-23). In a Windows terminal, with `<distro>` and `<wrapper>` filled in:
