@@ -2,6 +2,19 @@
 
 [English](CHANGELOG.md)
 
+## 2.26.0
+
+- `advisory.log`를 크기가 제한된 레코드로 변경했다. 승인 출처 정보는 `approvals.jsonl`에 있으며, 로그에서 판정이나 출처 정보를 읽는 코드는 없다. 라이브 파일이 `SAFEDEPS_ADVISORY_LOG_MAX_BYTES`(기본값 67108864)에 도달하면 로테이션으로 파일 전체의 이름을 `advisory.log.<UTC stamp>` 아카이브로 변경하며, 같은 초에 나중에 아카이브하는 경우 타임스탬프 뒤에 `.<n>`을 붙인다. writer가 다음 줄을 추가하면 새 라이브 파일이 만들어진다. 이제 어떤 코드도 라이브 파일을 다시 쓰거나, 잘라내거나, 컴팩션하지 않는다.
+  호환성을 깨는 변경: `INFO`가 아닌 줄은 더 이상 라이브 파일에 끝없이 남아 있지 않는다. 로테이션은 다른 모든 줄과 함께 해당 줄들을 아카이브로 옮기며, 보존 정책은 해당 아카이브와 함께 그 줄들을 제거한다.
+- 로그를 로테이션하는 구현은 코어에 있는 하나뿐이다: `safedeps-core advisory-log rotate`. CLI와 watch는 먼저 크기를 확인하고 한도에 도달했을 때만 코어를 실행한다. post hook은 provider 초기화 단계에서 로테이션한다. `lib/advisory-log-rotate.sh`는 제거되었다. 코어가 없으면 CLI와 watch는 로테이션하지 않는다. CLI와 watch는 실행마다 한 번 stderr에 이를 알리며, 경로와 크기, 한도를 표시하고 이에 대한 줄은 로그에 쓰지 않는다.
+- 로테이션 잠금은 절대 제거되지 않는 일반 파일인 `advisory.log.rotate.lock`에 대한 `flock(2)`다. 잠금 보유자가 어떤 방식으로 종료되든 커널이 잠금을 해제한다. 잠금이 이미 설정된 것을 발견한 로테이션은 기다리지 않는다. `SAFEDEPS_ADVISORY_LOG_LOCK_STALE_SECONDS`는 제거된다. 잠금은 사용 기간을 기준으로 회수되지 않기 때문이다.
+- 로테이션은 새 빈 파일로 아카이브 이름을 선점한 다음(`O_CREAT|O_EXCL`), 라이브 파일을 그 파일 위에 이름을 바꿔 놓는다. 따라서 볼륨은 대소문자와 유니코드 형식에 관한 자체 규칙에 따라 이름을 사용할 수 있는지 판별한다. 점유된 이름은 다음 번호로 건너뛰고, 로테이션의 줄에는 그 이름이 기록된다. 아카이브 이름은 시계가 무엇을 가리키든 아카이브가 만들어진 순서대로 정렬된다.
+- 압축은 대기한다. 새 아카이브는 비압축 상태로 남는다. 이름 변경 전에 라이브 파일을 연 작성자가 이름 변경 후 아카이브에 기록하기 때문이다. 이후 로테이션에서는 비압축 아카이브 중 최대 하나를 gzip으로 압축한다. 대상은 `SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS`(새 설정, 기본값 3600)보다 오랫동안 기록이 없었던 가장 오래된 아카이브다. 대기 시간은 이름 변경 시점부터 계산한다. gzip 파일은 `link(2)`로 게시되므로 아무것도 대체하지 않는다. 압축에 실패하면 비압축 아카이브는 그대로 남는다. 이전 파일을 대기 시간보다 오래 열어 둔 작성자가 압축 과정에서 해당 파일을 읽은 뒤 기록하면, 그 줄은 여전히 유실될 수 있다.
+- 보존 시 일반 아카이브와 gzip 아카이브를 `SAFEDEPS_ADVISORY_LOG_KEEP`(기본값 5) 및 `SAFEDEPS_ADVISORY_LOG_ARCHIVE_TOTAL_BYTES`(기본값 536870912)에 대해 합산한다. 가장 오래된 아카이브부터 제거하며, 방금 만든 아카이브는 항상 유지한다. 로테이션은 목록에서 바이트 단위로 읽은 이름 외에는 어떤 이름도 제거하지 않는다.
+- core가 `advisory.log`에 쓰는 각 줄은 한 번의 쓰기다. 로테이션은 새 라이브 파일에 `WARN advisory log rotated: <bytes> bytes moved to <archive>` 한 줄을 쓴 뒤, 로테이션이 수행한 다른 작업을 기록한다. 로테이션할 수 없었던 경우에는 `ERROR advisory log not rotated: <reason>` 한 줄을 쓰며, `safedeps-core advisory-log rotate`는 stderr에 사유를 출력하고 1로 종료한다.
+- 이전 버전은 새 잠금 파일이 있는 홈을 로테이션하지 않는다. 이전 버전의 잠금은 같은 경로에 디렉터리였으며, 그 경로에 일반 파일이 있으면 이전 버전의 `mkdir`와 오래된 잠금 제거가 모두 실패한다. 이는 코드에서 확인했다. 이전 버전이 해당 경로에 남긴 잠금 디렉터리는 해당 버전 자체의 300초 기간보다 경과 시간이 짧은 동안 유지된다. 더 오래된 디렉터리는 제거하고 그 자리에 잠금 파일을 만든다. 이전 버전으로 돌아가려면 `advisory.log.rotate.lock`을 제거해야 한다. 그렇지 않으면 해당 버전은 로그를 로테이션하지 않는다.
+- 업그레이드: 2.25.0의 경우처럼 설치 프로그램으로 watch 런타임을 새로 고친다. 그때까지는 이전 로그 코드를 실행하고 `agent_runtime_stale: true`를 보고한다. 2.21.0부터 2.24.0까지의 런타임은 라이브 `advisory.log`에서 승인 출처 정보를 읽으므로, 로테이션 이후에는 해당 런타임의 `re-check`가 `missing_advisory_log_approval` 사유로 `suspected_forgery` 아래에 정상 승인을 보고할 수 있다. 이는 코드에서 읽은 내용이지, 측정한 결과가 아니다. 보존 정책으로 이전 승인 줄이 들어 있는 아카이브가 제거되기 전에 `safedeps approvals migrate`를 실행하고, 로테이션이 한 번 실행된 뒤에는 해당 아카이브의 이름을 지정한다.
+
 ## 2.25.0
 
 - 승인 저장소 I/O, `advisory.log`, 마이그레이션 JSON의 `outcome`/`reread_outcome` 필드는 이제 `Outcome::describe`를 사용한다 (`Create`, `Open`, `Write`, `Sync`, `Rename`, `Lock`을 추가하고, 잠금 기한에는 기존 `Outcome::Deadline`을 사용함). `advisory.log`에서는 `outcome=`이 항상 마지막에 온다. 마이그레이션은 회수 라인에서 키워드, 타임스탬프, 바로 뒤따르는 `hash=` 단어만 읽고 이후 바이트는 무시하며(기존 `outcome=os-error-N` 호환성을 보존함), `check approve(`, `check approve-undone` 또는 `check approve-in-doubt`를 포함하는 인식되지 않은 라인을 `broken`으로 표시한다. 코어가 커밋 답변을 제공하지 않으면 셸은 하드 링크 식별 정보와 함께 `ended before it answered`만 보고한다. 설치 프로그램의 `machineCore`는 `spawnSync` 결과를 로컬에서 렌더링한다(시작 오류, 선택적 시그널이 있는 시작 후 오류, 시그널 또는 종료). 오류 코드는 원문 그대로 유지하며 `errno`를 해석하거나 원시 Node `error.message`를 노출하지 않는다.

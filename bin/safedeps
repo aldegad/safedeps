@@ -1869,7 +1869,8 @@ safedeps approvals migrate [<archive>...] [--json]
 
   Move into the approvals store the approvals that checks made before it.
   The migration reads the approve lines of ~/.safedeps/advisory.log and of
-  each archive named: a rotated advisory.log.<stamp>.gz, or a plain file. For
+  each archive named: a rotated advisory.log.<stamp> or its .gz, or another
+  file. A name that ends in .gz is read through gzip. For
   each hash a ledger entry confirms, it writes one store line. An entry
   confirms a hash when it stands at the hash's path and its own fields give
   that hash again.

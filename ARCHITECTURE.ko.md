@@ -946,7 +946,7 @@ ledger 디렉터리 하나는 하나의 `SAFEDEPS_HOME` 저장소에 속한다. 
 
 `approve_lines`가 포함된 모든 마이그레이션 보고서에는 `inserted`, `not_inserted`, `duplicates`, `unconfirmed`, `taken_back` 다섯 개 수치가 들어가며, 수치를 알 수 있을 때 `inserted + not_inserted + duplicates + unconfirmed + taken_back = approve_lines`가 성립한다(성공 시 `not_inserted`는 `0`). 이와 별도로 `cache`, `broken`, `torn`, 입력별 수치, 미확인 해시별 사유를 함께 보고한다. 마이그레이션 재실행은 멱등하며 이전에 넣은 항목은 `duplicates`로 셉니다. 쓰기 전 실패(`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`)는 아무것도 쓰지 않고 `inserted: 0`인 짧은 보고서를 반환한다. `approvals_store_write_failed`는 같은 lock과 파일 디스크립터로 자신의 해시를 다시 읽어 `inserted`와 `not_inserted`를 계산하며, 다시 읽기에 실패하면 둘 다 문자열 `"unknown"`으로 두고 `reread_outcome`을 남긴다(0을 지어내거나 합계를 단정하지 않음). 끝에 잘린 줄이 남으면 다음 쓰기 때 broken 줄로 봉인한다. `approvals_store_unsynced`는 쓴 줄이 모두 들어갔지만 sync에 실패한 상태로, 결과를 포함해 실패로 보고한다. core는 실패 시 exit `1`, 사용법 오류 시 exit `2`로 끝나며, CLI는 둘 다 exit `4`로 끝난다. 마이그레이션 재시도는 안전하며, 부분 결과는 성공이 아니다.
 
-`approvals-provenance` 회귀 테스트 묶음은 빈 라이브 로그로 이어지는 셸 로그 로테이션 동안의 실제 `check`와 `re-check`, 인위적으로 겹친 아카이브와 잘린 라이브 로그(실제 동시 로테이션을 측정한 것은 아님), 감사 로그에 수동으로 승인 줄을 써 넣은 정직한 해시 위조 항목 거부, 일반 승인 및 cache 동작, 그리고 레거시 마이그레이션 멱등성을 검증한다.
+`approvals-provenance` 회귀 테스트 묶음은 코어 바이너리가 수행하여 승인 줄을 아카이브로 옮기는 로테이션에서 실제 `check`와 `re-check`를 테스트하고, 합성으로 만든 중첩 아카이브와 잘린 라이브 로그(측정된 동시 로테이션은 아님), 수동으로 작성한 승인 감사 줄이 있어도 위조된 honest-hash 항목을 거부하는 동작, 정상적인 승인 및 캐시 동작, 레거시 마이그레이션의 멱등성을 테스트한다.
 
 ---
 
@@ -979,17 +979,37 @@ ledger 디렉터리 하나는 하나의 `SAFEDEPS_HOME` 저장소에 속한다. 
 ├── accepted-risk.jsonl       ← SAFEDEPS_ACCEPT_RISK에 의해 유지된 설치의 추가 전용 감사 기록
 ├── judging/                   ← 판정할 호출을 맡은 post 실행마다 <pid>-<start>.json 하나씩 쓰이고 판정이 돌아오면 지워지는 판정 표식
 ├── reorg.log                  ← reorg event (append-only)
-└── advisory.log               ← advisory-gate 결정 (approve / block)
+├── advisory.log               ← advisory-gate 결정(승인 / 차단), 크기가 제한된 레코드
+├── advisory.log.<stamp>[.<n>][.gz]  ← 해당 아카이브는 나중 로테이션이 그중 하나를 압축할 때까지 압축되지 않은 상태
+└── advisory.log.rotate.lock   ← 로테이션의 flock(2) 파일, 절대 제거되지 않음
 ```
 
 - `approved-specs/` 는 ledger SSoT, spec 당 atomic JSON write.
 - `approvals.jsonl` 은 cache 확인과 `re-check` 가 읽는 추가 전용 승인 출처 저장소이며, `advisory.log` 는 감사 로그 전용으로 출처 증명에는 쓰지 않는다.
 - `snapshots/` 는 v1 설계 + Python/Rust/Go/Ruby lockfile 추가.
 - `cache/osv-vuln/` 는 OSV advisory record 를 응답이 준 (`id`, `modified`) 쌍으로 보관. `cache/kev/` 는 CISA KEV daily catalog 를 24h freshness rule 로 보관. `cache/osv/` 는 더 이상 쓰지도 읽지도 않으며, 이전 버전이 남긴 파일은 무시.
-- `advisory.log` 는 모든 approve/block 결정의 audit trail.
+- `advisory.log`는 모든 승인/차단 결정의 감사 추적 기록이다. 로테이션으로 크기가 제한되며, 판정이나 출처 정보는 여기서 읽지 않는다. [advisory.log 로테이션](#advisorylog-rotation) 참조.
 - `accepted-risk.jsonl`은 `SAFEDEPS_ACCEPT_RISK`에 의해 유지된 모든 설치의 타임스탬프, 도구 사용 ID, 프로젝트, 명령어, 사유 및 수용된 문제를 저장하는 감사 기록이다.
 - `judging/`은 판정 표식을 담는다. 판정할 호출을 맡은 post 실행마다 `<pid>-<start>.json` 하나가 있고, `pid`, `start`, `opened_at`, `tool_use_id`, `project`, `command`를 저장한다. 실행은 판정이 돌아오면 자기 표식을 지우고, 돌아오지 않는 실행은 표식을 남긴다. 다음 post 실행은 실행이 사라진 표식마다 `advisory.log` 에 NOT JUDGED 한 줄을 한 번 쓰고 그 표식을 지운다. claim(`<mark>.<pid>-<start>.claim`)은 실행이 알리려고 가져간 표식이다.
 - `watch/` 는 watch 를 담는다: lock, config, 그리고 publish 된 단 하나의 state 인 `state.json`; [The watch](#the-watch) 참고.
+
+### advisory.log rotation
+
+**로그는 크기가 제한된 레코드이며, 로테이션은 로그의 이름을 변경한다.** `advisory.log`에는 결정, 우회 및 실패가 기록된다. 승인 저장소에 출처 정보가 있으므로 로그에서는 판정도 출처 정보도 읽지 않는다. 따라서 로테이션 때 라이브 파일에 남겨둘 줄이 없으며, 로테이션은 파일을 다시 쓰지 않는다. 2.26.0 이전에는 로테이션이 라이브 파일을 제자리에서 컴팩션했다. 파일 전체를 아카이브하고, `INFO`가 아닌 모든 줄로 라이브 파일을 다시 썼다. 이 설계는 그런 줄이 적다는 가정에 기반했다. 그런 줄로 채워진 로그는 크기 제한을 계속 초과했기 때문에 모든 프로세스에서 다시 로테이션되어 오래된 아카이브를 밀어냈다. 라이브 파일을 다시 쓰는 동안 추가된 줄은 유실될 수 있었다. Bash와 Rust로 작성된 두 구현은 잠금 하나를 두고 서로 합의해야 했다. 이제는 코어의 구현 하나가 로테이션한다(`rust/src/state/log.rs`). 커널이 잠금을 보유하며, 로테이션은 이름 변경으로 이루어진다.
+
+**누가 로테이션하는가.** post hook은 provider 초기화 시(`post/providers.rs`) 로테이션한다. CLI와 watch는 `lib/providers/providers.sh`를 불러온다. `safedeps_advisory_log_rotate_once`는 크기를 확인하고 한도에 도달한 경우에만 `safedeps-core advisory-log rotate`를 실행하므로, 한도 미만인 실행에서는 core를 시작하지 않는다. 각 프로세스는 한 번 확인한다. 숫자가 아닌 크기나 한도는 한도 미만으로 읽히지 않으며, core는 둘 다 다시 읽는다. core가 없으면 CLI는 로테이션하지 않는다. CLI는 실행당 한 번 stderr에 경로, 크기, 한도를 표시한다. 이 경우 로그에는 줄을 쓰지 않는다. 그 줄은 크기가 제한되지 않은 파일에 한 줄을 더 추가하는 것이고, 아무도 그 줄을 읽지 않기 때문이다.
+
+**잠금은 커널 소유다.** 잠금은 제거되지 않는 일반 파일인 `advisory.log.rotate.lock`에 대한 `flock(2)`이다. 보유자가 어떤 방식으로든 종료하면 커널이 잠금을 해제한다. 따라서 잠금은 이름으로 해제되지 않고, 경과 시간으로 회수되지 않으며, 트랩에 연결되지 않는다. 잠금이 점유된 것을 발견한 로테이션은 기다리지 않는다. 점유자가 로테이션 중이기 때문이다. writer는 잠금을 절대 획득하지 않는다. 잠금이 걸린 상태에서 로테이션은 크기를 다시 확인한다. 이전에 잠금을 보유했던 로테이션이 이미 파일을 로테이션했을 수 있기 때문이다.
+
+**볼륨은 이름을 사용할 수 있는지 여부를 알려 준다.** 로테이션은 아카이브 이름으로 새 빈 파일을 만든 뒤(`O_CREAT|O_EXCL`), 라이브 파일의 mtime을 현재 시각으로 설정하고, 라이브 파일의 이름을 자신이 만든 파일로 변경한다. 볼륨은 대소문자나 유니코드 형식에 따라 하나의 이름을 두 가지 표기로 사용할 수 있고, 목록은 이름을 바이트 단위로 읽는다. 따라서 목록으로는 이름을 사용할 수 있는지 알 수 없으며, 이름을 선점하는 호출로 알 수 있다. 이미 점유된 이름은 EEXIST를 반환한다. 로테이션은 그 이름을 건너뛰고 그 뒤에 정렬되는 다음 번호로 넘어가며, 해당 줄에는 건너뛴 각 이름이 기록된다. 디렉터리 항목 수보다 하나 더 많은 이름까지만 시도한다. 첫 번째로 시도하는 이름은 현재 초의 첫 번째 이름이거나, 최신 아카이브 이름이 현재 초 또는 그 이후 초에 해당하는 경우 그 이름 다음 이름이다. 따라서 시계가 가리키는 시각과 관계없이 이름은 아카이브가 만들어진 순서대로 정렬된다. 라이브 파일을 건드리거나 이름을 변경할 수 없는 로테이션은 자신이 만든 이름을 제거한다. 이름을 만든 뒤 이름을 변경하기 전에 종료되는 로테이션은 그 이름을 빈 아카이브로 남긴다. 다음 로테이션은 그 이름을 최신 아카이브로 읽으며, 보존 정책은 이를 개수에 포함한다.
+
+**압축은 쓰기 없는 구간을 기다린다.** 이름을 바꾸기 전에 라이브 파일을 연 writer는 이름을 바꾼 뒤 아카이브에 쓴다. 따라서 새 아카이브는 압축되지 않은 상태로 유지된다. 나중에 로테이션이 아카이브를 압축하는 것은 `SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS`(기본값 3600) 동안 해당 아카이브에 아무것도 쓰이지 않은 뒤뿐이며, 이 시간은 mtime을 기준으로 계산한다. 이름을 바꿔도 파일의 mtime은 유지되므로, 로테이션은 이름을 바꾸기 직전에 라이브 파일을 터치하며, 이 시간은 이름을 바꾼 시점이나 이후 쓰기 시점부터 계산된다. 로테이션은 훅 안에서 실행되므로, 자신이 만든 아카이브를 제외하고 쓰기 없는 아카이브 중 가장 오래된 것 하나만 압축한다. gzip은 로테이션이 새로 만들고 동기화하는 파일인 `advisory.log.compressing`에 쓴다. 로테이션은 `link(2)`로 이 파일을 `<archive>.gz`라는 이름으로 게시하므로, 이미 사용 중인 이름이면 `EEXIST`가 반환되고 아무것도 교체되지 않는다. gzip이 파일을 읽는 동안 파일이 커지지 않은 경우에만 압축되지 않은 파일을 제거한다. 파일이 커졌다면 두 파일 모두 그대로 남으며, 이후 로테이션이 다시 압축할 때까지 압축되지 않은 파일이 레코드가 된다. 압축이 실패하면 압축되지 않은 파일은 그대로 남고, 로테이션의 줄에 실패 이유가 기록된다. 줄은 보존 정책에 따라 레코드에서 제거되거나, writer가 이전 파일을 쓰기 없는 구간보다 오래 열어 둔 채 압축이 파일을 읽은 뒤에 썼을 때 레코드에서 사라진다.
+
+**보존 정책은 모든 아카이브를 계산한다.** `SAFEDEPS_ADVISORY_LOG_KEEP` (기본값 5)와 `SAFEDEPS_ADVISORY_LOG_ARCHIVE_TOTAL_BYTES` (기본값 536870912)는 일반 아카이브와 gzip 아카이브를 함께 최신순으로 계산한다. 둘 중 하나라도 한도를 넘으면 오래된 아카이브가 제거된다. 가장 최신 아카이브, 방금 만들어진 아카이브는 한도와 관계없이 보존된다. 로테이션은 목록에서 바이트 단위로 읽은 이름만 제거한다. 압축이 남긴 임시 파일, 일반 레코드 옆의 gzip 파일, 한도를 넘는 아카이브가 이에 해당한다.
+
+**한 줄, 한 번 쓰기.** 코어가 기록하는 각 줄은 `[<UTC time>] <level> <message>` 형식이며, append를 위해 열린 디스크립터에 한 번의 쓰기로 기록된다. 로테이션은 새 라이브 파일에 WARN 줄 하나를 기록한다. `advisory log rotated: <bytes> bytes moved to <archive>` 메시지 뒤에는 건너뛴 이름들, 압축 내역 및 제거 내역이 이어진다. 로테이션이 실제로 수행되지 않으면 `advisory log not rotated: <reason>`이라는 ERROR 줄 하나를 기록하고, `safedeps-core advisory-log rotate`는 stderr에 이유를 출력하며 종료 코드 1로 끝난다. 이 줄들에 포함된 각 I/O 결과는 `Outcome::describe`의 텍스트다.
+
+**이전 버전.** 이전 버전은 `advisory.log.rotate.lock`에 디렉터리를 만들어 로테이션을 잠갔다. 이전 버전은 보유자가 남겨 둔 잠금이 300초보다 오래되면 만료된 잠금으로 간주했다. 일반 파일이 있으면 이전 버전은 로테이션을 전혀 할 수 없다. `mkdir`이 실패하고, 만료된 잠금으로 간주한 것을 제거하는 작업도 실패한다. 해당 경로에서 발견되는 디렉터리는 이전 버전이 만든 것이다. 이전 버전의 대기 시간보다 짧은 디렉터리는 유지되며, 이 로테이션은 실행되지 않는다. 더 오래된 디렉터리는 이전 버전의 규칙에 따라 제거되고, 그 자리에 잠금 파일이 만들어진다. 이는 코드를 읽어 확인했다. 이전 버전으로 되돌아가는 사용자는 잠금 파일을 제거해야 한다. 그렇지 않으면 해당 버전은 로그를 로테이션하지 않는다. 2.21.0부터 2.24.0까지의 watch 런타임은 라이브 파일에서 출처 정보를 읽는다. 로테이션 후 재검사에서는 정당한 승인이 `suspected_forgery`로, 사유는 `missing_advisory_log_approval`로 보고될 수 있다. 이는 코드를 읽어 확인한 것이며 측정한 결과는 아니다. 설치 프로그램으로 런타임을 새로 고치면 이 문제가 사라진다. 두 버전이 동시에 하나의 `SAFEDEPS_HOME`에 쓰는 경우는 측정하지 않았다.
 
 ### The watch
 
