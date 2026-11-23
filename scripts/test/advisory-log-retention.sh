@@ -414,12 +414,15 @@ not_info n > "${home}/lines"
 grep -q ' INFO ' "${log}" && fail "the fixture holds an INFO line"
 bound=20000
 (( $(wc -c < "${log}") >= bound )) || fail "the fixture is under the bound: $(wc -c < "${log}") bytes"
+# A run rotated when an archive name stands that did not before it. The
+# count of archives would not say so once retention removes as many as a
+# run makes.
 rotated=()
 step() { # cli|core
-  local count
-  count=$(archive_count)
+  local before
+  before=$(archives)
   if [[ "$1" == cli ]]; then cli_ok "${bound}"; else core_rotate "${bound}" 5; fi
-  rotated+=("$(( $(archive_count) - count ))")
+  rotated+=("$(comm -13 <(printf '%s\n' "${before}" | sed 's/\.gz$//' | sort) <(archives | sed 's/\.gz$//' | sort) | grep -c . || true)")
 }
 for kind in cli core cli core cli; do step "${kind}"; done
 not_info m >> "${log}"
