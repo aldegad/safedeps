@@ -98,8 +98,12 @@ slot() { # pid, then the identity it holds or nothing
 # a failure part way leaves and exits 1: sed reads the file PROBE_CUT in the
 # path's place, ls leaves out the names PROBE_CUT lists, sort prints only the
 # last line of its order, and the rest print PROBE_CUT. date takes the format
-# as the path. With PROBE_MODE=record, mkdir makes the slot, then the paths its
-# record goes to as directories, and ends 0.
+# as the path. With PROBE_SKIP=n the first n calls it picks go to the real tool
+# and note nothing, so a row can make a later call of the same step fail. With
+# PROBE_MODE=record, mkdir makes the slot, then the paths its record goes to as
+# directories, and ends 0. With PROBE_MODE=taken, mkdir makes the slot and
+# writes into it the record PROBE_CUT holds, a pid and then an identity, as
+# another run that took the slot first, and ends 1 as a mkdir that finds it.
 probe="${tmp_root}/probe"
 mkdir -p "${probe}"
 {
@@ -120,6 +124,11 @@ if [[ "${tool}" == "${PROBE_TOOL}" ]]; then
     esac
   done
 fi
+if [[ -n "${hit}" && -n "${PROBE_SKIP}" ]]; then
+  printf x >> "${PROBE_SEEN}.calls"
+  calls=$(< "${PROBE_SEEN}.calls")
+  (( ${#calls} > PROBE_SKIP )) || hit=""
+fi
 [[ -n "${hit}" ]] || exec "${real}" "$@"
 : > "${PROBE_SEEN}"
 case "${tool}" in
@@ -127,10 +136,14 @@ case "${tool}" in
        "${real}" "${args[@]}" ;;
   ls) "${real}" "$@" | "${real_grep}" -vxF -f "${PROBE_CUT}" ;;
   sort) "${real}" "$@" | "${real_tail}" -n 1 ;;
-  mkdir) if [[ "${PROBE_MODE}" == record ]]; then
-           "${real}" "$@" && "${real}" "${PROBE_FILE}/identity" "${PROBE_FILE}/pid"
-           exit
-         fi ;;
+  mkdir) case "${PROBE_MODE}" in
+           record) "${real}" "$@" && "${real}" "${PROBE_FILE}/identity" "${PROBE_FILE}/pid"
+                   exit ;;
+           taken) "${real}" "$@" || exit 1
+                  { read -r pid; read -r identity; } < "${PROBE_CUT}"
+                  printf '%s\n' "${identity}" > "${PROBE_FILE}/identity"
+                  printf '%s\n' "${pid}" > "${PROBE_FILE}/pid" ;;
+         esac ;;
   *) "${real_cat}" "${PROBE_CUT}" ;;
 esac
 exit 1
@@ -138,7 +151,7 @@ EOF
 } > "${probe}/fail"
 chmod +x "${probe}/fail"
 for tool in cat sed ls date sort python3 dirname mkdir mv rm; do ln -s fail "${probe}/${tool}"; done
-probe_tool=""; probe_file=""; probe_mode=""
+probe_tool=""; probe_file=""; probe_mode=""; probe_skip=""
 cut_short() { # tool, path, bytes: the next row's runner reads path with tool to all but its last bytes, and the read fails
   probe_tool="$1"; probe_file="$2"
   head -c "$(( $(wc -c < "$2") - $3 ))" "$2" > "${tmp_root}/cut"
@@ -147,16 +160,20 @@ fails() { # tool, the argument that picks its call ('' for every call), then wha
   probe_tool="$1"; probe_file="$2"; shift 2
   printf '%s' "$@" > "${tmp_root}/cut"
 }
+taken() { # path: the next row's runner's second mkdir of path finds the slot another run made first, held by the witness
+  probe_tool=mkdir; probe_file="$1"; probe_mode=taken; probe_skip=1
+  printf '%s\n%s\n' "${witness}" "${witness_id}" > "${tmp_root}/cut"
+}
 # runner_env: the next row's runner's environment, in $env.
 runner_env() {
   env=(HOME="${home}")
   [[ -z "${probe_tool}" ]] || env+=(PATH="${probe}:${PATH}" PROBE_TOOL="${probe_tool}" PROBE_FILE="${probe_file}"
-    PROBE_CUT="${tmp_root}/cut" PROBE_SEEN="${tmp_root}/seen" PROBE_MODE="${probe_mode}")
+    PROBE_CUT="${tmp_root}/cut" PROBE_SEEN="${tmp_root}/seen" PROBE_MODE="${probe_mode}" PROBE_SKIP="${probe_skip}")
 }
 # read_seen: a row that made a step fail holds only if the runner took that step.
 read_seen() {
   [[ -z "${probe_tool}" || -e "${tmp_root}/seen" ]] || got="${got}, and it never ran the failing ${probe_tool} ${probe_file##*/}"
-  probe_tool=""; probe_file=""; probe_mode=""
+  probe_tool=""; probe_file=""; probe_mode=""; probe_skip=""
 }
 # gone_pid: a pid the kernel no longer has, in $dead; fails when it came back at once.
 gone_pid() {
@@ -168,7 +185,7 @@ gone_pid() {
 
 # start: a suite behind the records, in the background; $suite is its pid.
 start() {
-  rm -f "${tmp_root}/ran" "${tmp_root}/err" "${tmp_root}/seen"
+  rm -f "${tmp_root}/ran" "${tmp_root}/err" "${tmp_root}/seen" "${tmp_root}/seen.calls"
   local env; runner_env
   # Started as a host starts it, by its own #! line.
   # The marker is an argument the suite ignores, so the sweep finds the runner.
@@ -202,7 +219,7 @@ expect() { # ran|waited, label
 # and the row says so.
 refuses() {
   local label="$1" env rc i refuser got="" before; shift
-  rm -f "${tmp_root}/seen"
+  rm -f "${tmp_root}/seen" "${tmp_root}/seen.calls"
   before=$(ls "${home}/safedeps-runs/.queue")
   runner_env
   ( cd "${tmp_root}" && exec env "${env[@]}" "$@" "${home}/safedeps-runs/slot.sh" row true "${MARK}" ) \
@@ -326,8 +343,19 @@ if gone_pid; then
   expect ran "a gone ticket ahead that cannot be removed is still gone, and the suite behind it runs"
   fresh 1; slot "${dead}"; fails rm "${home}/safedeps-runs/.slot"
   expect waited "a gone holder's slot that cannot be removed is not taken"
-  fresh 1; slot "${dead}"; fails mkdir "${home}/safedeps-runs/.slot"
-  expect waited "a gone holder's slot that is removed but cannot be made again is not taken"
+  # Another run takes the slot between this run's removal of it and its mkdir:
+  # the first mkdir, which finds the gone holder's slot, is not the failing one.
+  fresh 1; slot "${dead}"; taken "${home}/safedeps-runs/.slot"
+  start
+  got=$(decided)
+  stop "${suite}"
+  read_seen
+  [[ "$(cat "${home}/safedeps-runs/.slot/pid" 2>/dev/null)" == "${witness}" ]] || got="${got}, and the slot is not the other run's"
+  if [[ "${got}" == waited ]]; then
+    pass "a gone holder's slot that another run makes again first stays that run's, and the suite waits"
+  else
+    fail "a gone holder's slot that another run makes again first stays that run's, and the suite waits (the suite: ${got})"
+  fi
 else
   fail "a pid the kernel no longer has (pid ${dead} came back at once)"
 fi
