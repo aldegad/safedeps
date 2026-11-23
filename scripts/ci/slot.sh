@@ -26,16 +26,29 @@
 #
 # A value a verdict rests on is used only when every step that made it ended
 # 0: where the reader is, N, this run's start, the clock, this run's ticket,
-# the queue's list and its order, a record, the kernel's answer, and the record
-# of the slot this run takes. A step that fails gives nothing, even after it
-# printed part of an answer. So a pipeline fails when any of its commands
-# fails, and each such value is a plain assignment whose status is read where it
-# is made, never a substitution inside a word or a list. Before this run holds
-# a ticket, a value it cannot know means it does not queue (exit 2); after, it
-# waits and looks again. A ticket whose start cannot be read is judged on its
-# pid, which is its name, alone, and a name that holds no pid is a ticket whose
-# process is not known. A slot whose pid cannot be read stays, and a slot whose
-# record this run cannot write is given back.
+# the queue's list and its order, a record, the kernel's answer, the claim of a
+# record judged gone, and the record of the slot this run takes. A step that
+# fails gives nothing, even after it printed part of an answer. So a pipeline
+# fails when any of its commands fails, and each such value is a plain
+# assignment whose status is read where it is made, never a substitution
+# inside a word or a list. Before this run holds a ticket, a value it cannot
+# know means it does not queue (exit 2); after, it waits and looks again. A
+# ticket whose start cannot be read is judged on its pid, which is its name,
+# alone, and a name that holds no pid is a ticket whose process is not known.
+# A slot whose pid cannot be read stays, and a slot whose record this run
+# cannot write is given back.
+#
+# A waiter removes only the record it judged gone, and never one another run
+# made since. Two waiters can judge one gone record at once, and the first to
+# remove it puts its own in its place. So a waiter first claims what it judged
+# with a rename to a name of its own: the slot's pid file inside the slot, the
+# ticket inside the queue, where ls does not list a name that starts with a
+# dot. One rename of a name can succeed, so two waiters cannot both claim it,
+# and a claimed slot stays where it is, so no run can make it again. Then the
+# waiter judges what it claimed, the pid it moved and the start read while the
+# claim is still there, and removes it only when that process is gone. A record
+# it claimed that is not known to be gone goes back under its name. So the
+# record another run put there stays, and is judged again on the next look.
 set -o pipefail
 B="$HOME/safedeps-runs"; Q="$B/.queue"; owner="$1"; shift
 nl=$'\n'
@@ -66,6 +79,36 @@ gone() {
   local said
   case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
   said=$(kernel running "$1" "$2") && [ "$said" = gone ]
+}
+# reap <slot>: removes a slot judged gone, and succeeds only when it did. It
+# claims the slot by moving the pid file to .reap-<this pid> inside it, then
+# judges the pid it moved and the start beside it. The start counts only when
+# the claim is still there after it is read: a run that removes the slot and
+# makes it again in the meantime takes the claim with it. A claimed slot whose
+# process is not known to be gone gets its pid file back.
+reap() {
+  local c="$1/.reap-$$" p who
+  mv "$1/pid" "$c" 2>/dev/null || return 1
+  if p=$(cat "$c" 2>/dev/null); then
+    who=$(cat "$1/identity" 2>/dev/null) || who=""
+    [ -e "$c" ] && gone "$p" "$who" && rm -rf "$1" && return 0
+  fi
+  mv "$c" "$1/pid" 2>/dev/null
+  return 1
+}
+# reap_ticket <name> <pid>: removes a ticket judged gone. It fails only when the
+# ticket it claimed there is not known to be gone and went back, so that ticket
+# is still in the queue. The claim moves the ticket to .reap-<this pid> in the
+# queue, and the judgment is made again on the ticket it moved, under the pid
+# the name holds. A claim that fails leaves nothing under the name for this
+# run to remove, and the ticket stays gone on the record already read.
+reap_ticket() {
+  local c="$Q/.reap-$$" who
+  mv "$Q/$1" "$c" > /dev/null 2>&1 || return 0
+  who=$(sed -n 2p "$c" 2>/dev/null) || who=""
+  if gone "$2" "$who"; then rm -f "$c" > /dev/null 2>&1; return 0; fi
+  mv "$c" "$Q/$1" > /dev/null 2>&1
+  return 1
 }
 ME=$(kernel identity $$) && [ -n "$ME" ] ||
   refuse "the kernel gave no start for this run (pid $$, reader $LIB/native_budget_owners.py), so a later process under the same pid could pass for it"
@@ -105,7 +148,29 @@ my_pos() {
     p=${p#"${p%%[!0]*}"}
     case "$p" in ''|*[!0-9]*) i=$((i + 1)); continue ;; esac
     who=$(sed -n 2p "$Q/$f" 2>/dev/null) || who=""
-    if gone "$p" "$who"; then rm -f "$Q/$f"; else i=$((i + 1)); fi
+    if gone "$p" "$who" && reap_ticket "$f" "$p"; then :; else i=$((i + 1)); fi
+  done
+  return 1
+}
+# take <slot>: whether this run now holds the slot. A slot whose process is
+# gone is removed and taken in the same look, so the runner does not report a
+# gone holder as busy. A slot this run could not remove after it judged it
+# gone is judged again, up to three times in a look.
+take() {
+  local L="$1" p who try
+  for try in 1 2 3; do
+    if mkdir "$L" 2>/dev/null; then
+      # The slot is this run's once its record is written; others judge the
+      # holder by that record alone.
+      { printf '%s\n' "$ME" > "$L/identity" && echo $$ > "$L/pid"; } 2>/dev/null && return 0
+      echo "slot.sh: the record of $L could not be written, so the slot is given back — $(date +%T)" >&2
+      rm -rf "$L"
+      return 1
+    fi
+    p=$(cat "$L/pid" 2>/dev/null) || return 1
+    who=$(cat "$L/identity" 2>/dev/null) || who=""
+    gone "$p" "$who" || return 1
+    reap "$L"
   done
   return 1
 }
@@ -114,18 +179,7 @@ while [ -z "$MYL" ]; do
   pos=$(my_pos) || pos=""
   if [ -n "$pos" ] && [ "$pos" -le "$N" ]; then
     for L in $SLOTS; do
-      # A slot whose process is gone is removed and taken in the same look, so
-      # the runner does not report a gone holder as busy.
-      if ! mkdir "$L" 2>/dev/null; then
-        p=$(cat "$L/pid" 2>/dev/null) || continue
-        who=$(cat "$L/identity" 2>/dev/null) || who=""
-        gone "$p" "$who" && rm -rf "$L" && mkdir "$L" 2>/dev/null || continue
-      fi
-      # The slot is this run's once its record is written; others judge the
-      # holder by that record alone.
-      if { printf '%s\n' "$ME" > "$L/identity" && echo $$ > "$L/pid"; } 2>/dev/null; then MYL="$L"; break; fi
-      echo "slot.sh: the record of $L could not be written, so the slot is given back — $(date +%T)" >&2
-      rm -rf "$L"
+      if take "$L"; then MYL="$L"; break; fi
     done
   fi
   [ -n "$MYL" ] && break
