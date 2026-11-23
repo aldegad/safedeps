@@ -50,6 +50,13 @@ Default schedule: 09:00 and 21:00 local time, one launchd calendar slot each.
 --hour HH --minute MM     one slot, as before --times (hour 9 and minute 0
                           when one of the two is left out). Give either
                           --times or --hour/--minute, not both.
+install --runtime-only    build the runtime in ~/.safedeps/agent and write
+                          the watch options, and touch nothing of launchd: no
+                          plist is written, loaded or started. For a host whose
+                          scheduler is not launchd. Takes no schedule.
+uninstall                 unload the agent and remove its plist. The runtime
+                          in ~/.safedeps/agent and the watch's state and
+                          config under ~/.safedeps stay.
 The runtime carries this machine's core, bin/native/<os>-<arch>/safedeps-core,
 from this checkout: its re-check reads the approvals store with it. A checkout
 without it is refused (core-missing) before anything is built.
@@ -74,7 +81,7 @@ not given keeps what is there):
 
 function parseArgs(argv) {
   const args = {
-    command: argv[0] || 'install', times: [], hour: null, minute: null, schedule: null, root: '',
+    command: argv[0] || 'install', times: [], hour: null, minute: null, schedule: null, runtimeOnly: false, root: '',
     populationCommand: null, populationArgs: [], populationTimeout: null, excludes: [], followups: {}, toolPath: [],
   };
   if (args.command === '-h' || args.command === '--help') {
@@ -82,7 +89,9 @@ function parseArgs(argv) {
   }
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--times') {
+    if (arg === '--runtime-only') {
+      args.runtimeOnly = true;
+    } else if (arg === '--times') {
       args.times.push(...String(argv[++i] ?? '').split(','));
     } else if (arg === '--hour') {
       args.hour = Number(argv[++i]);
@@ -112,6 +121,12 @@ function parseArgs(argv) {
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
+  }
+  if (args.runtimeOnly && args.command !== 'install') {
+    throw new Error('--runtime-only is an option of install');
+  }
+  if (args.runtimeOnly && (args.times.length > 0 || args.hour !== null || args.minute !== null)) {
+    throw new Error('--runtime-only registers no schedule; --times, --hour and --minute have nothing to set');
   }
   args.schedule = parseSchedule(args);
   if (args.populationCommand !== null && !path.isAbsolute(args.populationCommand)) {
@@ -631,6 +646,11 @@ function install(args) {
   }
   const core = requireMachineCore();
 
+  if (args.runtimeOnly) {
+    installRuntimeOnly(args, core);
+    return;
+  }
+
   fs.mkdirSync(launchAgentsDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(safedepsHome, { recursive: true, mode: 0o700 });
   fs.chmodSync(wrapperPath, 0o755);
@@ -666,6 +686,29 @@ function install(args) {
   }, null, 2));
 }
 
+// The runtime and the watch options, as install builds and writes them, and
+// nothing of launchd: a host whose scheduler is something else (an agent's
+// routine, cron) refreshes the copy it runs without a launchd agent coming
+// back and starting a scan. A plist already there is left as it is, and the
+// report says whether there is one. CORE is requireMachineCore's answer, asked
+// before anything is written, as install asks it.
+function installRuntimeOnly(args, core) {
+  fs.mkdirSync(safedepsHome, { recursive: true, mode: 0o700 });
+  fs.chmodSync(wrapperPath, 0o755);
+  const watch = planWatchConfig(args);
+  installRuntime(agentRoot, core, { ownsRoot: true });
+  writeWatchConfig(watch);
+  console.log(JSON.stringify({
+    installed: true,
+    runtime_only: true,
+    agentRoot,
+    program: installedWrapperPath,
+    runtime: JSON.parse(fs.readFileSync(path.join(agentRoot, RUNTIME_META), 'utf8')),
+    launchd: { touched: false, plistPath, plist_present: fs.existsSync(plistPath) },
+    watch: { configPath: watch.configPath, excludePath: watch.excludePath, config: watch.config, excludes: watch.excludes, toolPath: watch.toolSource },
+  }, null, 2));
+}
+
 function uninstall() {
   if (process.platform !== 'darwin') {
     throw new Error('launchd re-check agent uninstall is supported on macOS only');
@@ -674,7 +717,7 @@ function uninstall() {
   if (fs.existsSync(plistPath)) {
     fs.rmSync(plistPath);
   }
-  console.log(JSON.stringify({ installed: false, label: LABEL, plistPath, agentRoot }, null, 2));
+  console.log(JSON.stringify({ installed: false, label: LABEL, plistPath, agentRoot, runtime_kept: fs.existsSync(agentRoot) }, null, 2));
 }
 
 function readJson(file) {
