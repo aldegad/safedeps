@@ -7,13 +7,25 @@
 //! from it: the approvals store holds provenance (approvals.rs). So a
 //! rotation has no line to keep live, and it never rewrites the file. Under
 //! the lock it renames the whole live file to an archive name that nothing
-//! holds yet. The next line any writer appends makes a new live file.
+//! holds. The next line any writer appends makes a new live file.
 //!
 //! Archive names sort in the order the archives were made, whatever the
 //! clock reads. A rotation takes the first name of its second, or the name
 //! after the newest one where that is of the same second or a later one.
 //! Retention removes the oldest names first, so it removes the oldest
 //! archives, and the newest name is the archive just made.
+//!
+//! Whether anything holds a name is the volume's answer, not the listing's.
+//! A volume may take two spellings for one name, by case or by Unicode
+//! form, and the listing reads names by their bytes. So a rotation makes
+//! the name first, as a new empty file, and renames the live file over that
+//! file of its own. A name held already answers EEXIST, and the rotation
+//! passes over it to the next number, which sorts after it. A compression
+//! publishes its gzip file by link(2), which answers the same way. A
+//! rotation removes no name but those the listing read, byte for byte. One
+//! that ends between making the name and the rename leaves that name an
+//! empty archive: the next rotation reads it as the newest, and retention
+//! counts it.
 //!
 //! A writer that opened the live file before the rename and writes after it
 //! writes into the archive. So a new archive stays plain. Only a later
@@ -155,8 +167,14 @@ struct Listing {
     /// The archives, oldest first: the regular files. A name that is gone by
     /// the time it is read is not one of them.
     found: BTreeMap<Key, Archive>,
-    /// The newest archive name anything holds, a regular file or not.
+    /// The newest archive name the listing read, a regular file or not.
     newest: Option<Key>,
+    /// How many entries the directory held. No more names than these are
+    /// held by entries the listing does not read as archives.
+    entries: usize,
+    /// The directory holds the compression's temp file under its own name,
+    /// as a compression that did not end left it.
+    temp: bool,
 }
 
 /// The directory `file` is in.
@@ -167,10 +185,14 @@ fn directory(file: &Path) -> &Path {
 /// What stands beside `file` under archive names.
 fn archives(file: &Path) -> io::Result<Listing> {
     let live = name(file);
-    let mut listing = Listing { found: BTreeMap::new(), newest: None };
+    let temp = [live, COMPRESS_SUFFIX].concat();
+    let mut listing = Listing { found: BTreeMap::new(), newest: None, entries: 0, temp: false };
     for entry in fs::read_dir(directory(file))? {
         let entry = entry?;
-        let Some((key, gzip)) = parse(live, entry.file_name().as_bytes()) else { continue };
+        listing.entries += 1;
+        let read = entry.file_name();
+        if read.as_bytes() == temp.as_slice() { listing.temp = true; continue }
+        let Some((key, gzip)) = parse(live, read.as_bytes()) else { continue };
         listing.newest = listing.newest.take().max(Some(key.clone()));
         // DirEntry::metadata does not follow a link.
         let meta = match entry.metadata() {
@@ -239,18 +261,18 @@ fn rotate(file: &Path, knobs: &Knobs) -> Rotation {
         Ok(_) => return Rotation::Under,
         Err(e) => return failed(file, io_said(e, Action::Read(file))),
     };
-    let first = match archives(file).map_err(|e| io_said(e, Action::Walk(directory(file))))
-        .and_then(|listing| next(listing.newest.as_ref(), stamp(os::wall(os::WallRole::AdvisoryRotationName).seconds()))) {
+    let (first, tries) = match archives(file).map_err(|e| io_said(e, Action::Walk(directory(file))))
+        .and_then(|listing| Ok((next(listing.newest.as_ref(), stamp(os::wall(os::WallRole::AdvisoryRotationName).seconds()))?, listing.entries + 1))) {
         Ok(first) => first,
         Err(why) => return failed(file, why),
     };
-    let Claimed { key: made, path: archive, passed } = match claim(file, first, 1) {
+    let Claimed { key: made, path: archive, passed } = match claim(file, first, tries) {
         Ok(claimed) => claimed,
         Err(why) => return failed(file, why),
     };
     let mut said = [format!("advisory log rotated: {bytes} bytes moved to ").as_bytes(), name(&archive), passed.as_slice()].concat();
     match archives(file) {
-        Ok(listing) => compress_one(file, &listing.found, &made, knobs.quiet, &mut said),
+        Ok(listing) => compress_one(file, &listing, &made, knobs.quiet, &mut said),
         Err(e) => said.extend_from_slice(&[b"; no archive compressed: ".as_slice(), io_said(e, Action::Walk(directory(file))).as_slice()].concat()),
     }
     // The listing again: a compression changed what the archives hold.
@@ -291,18 +313,23 @@ fn take(lock: &Path) -> Result<Option<fs::File>, Vec<u8>> {
     }
 }
 
-/// The key of the archive a rotation makes in the second `stamp`: the
-/// second's first, or the one after `newest`, the newest name anything
-/// holds, where that is of the same second or a later one. So the names
-/// sort in the order the archives were made whatever the clock reads, and
-/// the plain and gzip names of the key are both free.
+/// The key of the first archive name a rotation tries in the second
+/// `stamp`: the second's first, or the one after `newest`, the newest name
+/// the listing read, where that is of the same second or a later one. So the
+/// names sort in the order the archives were made whatever the clock reads.
+/// Whether anything holds the name is for the volume to say (`claim`).
 fn next(newest: Option<&Key>, stamp: String) -> Result<Key, Vec<u8>> {
     match newest {
-        Some((second, n)) if second.as_slice() >= stamp.as_bytes() => match n.checked_add(1) {
-            Some(after) => Ok((second.clone(), after)),
-            None => Err([b"no archive number follows ".as_slice(), n.to_string().as_bytes(), b" in ", second.as_slice()].concat()),
-        },
+        Some(key) if key.0.as_slice() >= stamp.as_bytes() => after(key),
         _ => Ok((stamp.into_bytes(), 0)),
+    }
+}
+
+/// The key after `key` in its second.
+fn after((second, n): &Key) -> Result<Key, Vec<u8>> {
+    match n.checked_add(1) {
+        Some(after) => Ok((second.clone(), after)),
+        None => Err([b"no archive number follows ".as_slice(), n.to_string().as_bytes(), b" in ", second.as_slice()].concat()),
     }
 }
 
@@ -310,14 +337,41 @@ fn next(newest: Option<&Key>, stamp: String) -> Result<Key, Vec<u8>> {
 /// names it passed over.
 struct Claimed { key: Key, path: PathBuf, passed: Vec<u8> }
 
-/// Move `file` to the archive name of `first`. A rotation may try `tries`
-/// names; this one takes the first. Under the lock no other rotation names
-/// an archive, so the name is still free at the rename.
-fn claim(file: &Path, first: Key, _tries: usize) -> Result<Claimed, Vec<u8>> {
-    let path = archive_path(file, &first);
-    touch(file)?;
-    fs::rename(file, &path).map_err(|e| io_said(e, Action::Rename(&path)))?;
-    Ok(Claimed { key: first, path, passed: Vec::new() })
+/// Move `file` to the archive name of `first`, or of the first number after
+/// it that nothing holds, trying at most `tries` names.
+///
+/// The rotation makes the name as a new empty file (O_CREAT|O_EXCL), so the
+/// volume answers whether anything holds it, by its own rules of case and
+/// form, in the call that takes it. A name held already answers EEXIST.
+/// Each held name is another entry, so one try more than the directory had
+/// entries finds a free name, unless entries are made while it tries. The
+/// rename replaces only the file the rotation made. A rotation that cannot
+/// touch or rename the live file removes that file again.
+fn claim(file: &Path, first: Key, tries: usize) -> Result<Claimed, Vec<u8>> {
+    let mut key = first;
+    let mut passed = Vec::new();
+    let mut tried = 1;
+    let path = loop {
+        let path = archive_path(file, &key);
+        match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+            Ok(_) => break path,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tried < tries => {
+                passed.extend_from_slice(&[b"; ".as_slice(), name(&path), b" passed over: ", io_said(e, Action::Create(&path)).as_slice()].concat());
+                key = after(&key)?;
+                tried += 1;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists =>
+                return Err([format!("each of {tries} archive names is held; ").as_bytes(), io_said(e, Action::Create(&path)).as_slice()].concat()),
+            Err(e) => return Err(io_said(e, Action::Create(&path))),
+        }
+    };
+    match touch(file).and_then(|()| fs::rename(file, &path).map_err(|e| io_said(e, Action::Rename(&path)))) {
+        Ok(()) => Ok(Claimed { key, path, passed }),
+        Err(why) => Err(match fs::remove_file(&path) {
+            Ok(()) => why,
+            Err(e) => [why.as_slice(), b"; ", removal_said(&path, e).as_slice()].concat(),
+        }),
+    }
 }
 
 /// Set `file`'s mtime to now. A rename keeps a file's mtime, and the quiet
@@ -339,12 +393,13 @@ fn quiet(meta: &fs::Metadata, now: SystemTime, window: Duration) -> bool {
 /// Compress the oldest plain archive that has been quiet for the window,
 /// other than the one this rotation made. One per rotation, since a
 /// rotation runs inside a hook.
-fn compress_one(file: &Path, found: &BTreeMap<Key, Archive>, made: &Key, window: Duration, said: &mut Vec<u8>) {
+fn compress_one(file: &Path, listing: &Listing, made: &Key, window: Duration, said: &mut Vec<u8>) {
     let now = os::wall(os::WallRole::AdvisoryArchiveQuiet).system_time();
-    let Some((plain, _)) = found.iter().filter(|(key, _)| *key != made)
-        .filter_map(|(_, archive)| archive.plain.as_ref()).find(|(_, meta)| quiet(meta, now, window)) else { return };
+    let Some((plain, gzip_read)) = listing.found.iter().filter(|(key, _)| *key != made)
+        .find_map(|(_, archive)| archive.plain.as_ref().filter(|(_, meta)| quiet(meta, now, window)).map(|(plain, _)| (plain, archive.gzip.is_some())))
+        else { return };
     let gzip = suffixed(plain, GZIP_SUFFIX);
-    let what = match compress(file, plain, &gzip) {
+    let what = match compress(file, listing.temp, plain, &gzip, gzip_read) {
         Ok(true) => [b"; ".as_slice(), name(plain), b" compressed to ", name(&gzip)].concat(),
         Ok(false) => [b"; ".as_slice(), name(plain), b" compressed to ", name(&gzip), b" and left plain too: it was written while gzip read it"].concat(),
         Err(why) => [b"; ".as_slice(), name(plain), b" left plain: ", why.as_slice()].concat(),
@@ -355,14 +410,16 @@ fn compress_one(file: &Path, found: &BTreeMap<Key, Archive>, made: &Key, window:
 /// gzip `plain` into `gzip` by way of the temp file, then remove `plain`
 /// unless it grew while gzip read it. True where `plain` was removed. A
 /// compression that fails leaves `plain` as it was.
-fn compress(file: &Path, plain: &Path, gzip: &Path) -> Result<bool, Vec<u8>> {
+///
+/// It removes no name but those the listing read: the temp file a
+/// compression that did not end left (`temp_read`), and the archive's gzip
+/// file (`gzip_read`), beside which the plain file is the record. It makes
+/// the temp file new and publishes the gzip file by link(2), so an entry the
+/// volume takes for either name, which the listing does not read, answers
+/// EEXIST and is left as it is.
+fn compress(file: &Path, temp_read: bool, plain: &Path, gzip: &Path, gzip_read: bool) -> Result<bool, Vec<u8>> {
     let temp = suffixed(file, COMPRESS_SUFFIX);
-    // What a compression that did not end left.
-    match fs::remove_file(&temp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(removal_said(&temp, e)),
-    }
+    if temp_read { remove(&temp)? }
     let out = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp).map_err(|e| io_said(e, Action::Create(&temp)))?;
     let synced = out.try_clone().map_err(|e| io_said(e, Action::Open(&temp)))?;
     let before = fs::symlink_metadata(plain).map_err(|e| io_said(e, Action::Read(plain)))?.len();
@@ -374,12 +431,13 @@ fn compress(file: &Path, plain: &Path, gzip: &Path) -> Result<bool, Vec<u8>> {
     };
     let done = if !ran.success() { Err(ran.describe(Action::Gzip, Form::Action)) }
         else if let Err(e) = synced.sync_all() { Err(io_said(e, Action::Sync(&temp))) }
-        else if let Err(e) = fs::rename(&temp, gzip) { Err(io_said(e, Action::Rename(gzip))) }
         else { Ok(()) };
-    if let Err(why) = done {
-        let _ = fs::remove_file(&temp);
-        return Err(why);
-    }
+    drop(synced);
+    let done = done.and_then(|()| publish(&temp, gzip, gzip_read));
+    // Published or not, the temp file is done with: a published gzip file is
+    // a second name of it.
+    let _ = fs::remove_file(&temp);
+    done?;
     // A write gzip did not read is in the plain file only, and the plain
     // file is the record while it stands: the next rotation compresses it
     // again.
@@ -390,9 +448,27 @@ fn compress(file: &Path, plain: &Path, gzip: &Path) -> Result<bool, Vec<u8>> {
     }
 }
 
+/// Publish the whole, synced temp file as `gzip` by link(2): a name held
+/// already answers EEXIST, and nothing is replaced. A gzip file the listing
+/// read under that name is removed first, since the plain file beside it is
+/// the record.
+fn publish(temp: &Path, gzip: &Path, gzip_read: bool) -> Result<(), Vec<u8>> {
+    if gzip_read { remove(gzip)? }
+    fs::hard_link(temp, gzip).map_err(|e| io_said(e, Action::Link(gzip)))
+}
+
+/// Remove `path`, a name the listing read. One gone already is removed.
+fn remove(path: &Path) -> Result<(), Vec<u8>> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(removal_said(path, e)),
+    }
+}
+
 /// Remove the archives beyond the bounds, newest kept first: past `keep`
 /// archives, or once all of them together pass `total` bytes. The newest is
-/// the archive this rotation made (`next`), and it is kept whatever the
+/// the archive this rotation made (`claim`), and it is kept whatever the
 /// bounds.
 fn prune(found: &BTreeMap<Key, Archive>, knobs: &Knobs, said: &mut Vec<u8>) {
     let mut bytes: u64 = 0;
@@ -721,6 +797,33 @@ mod tests {
         assert!(!log.exists(), "the live file was moved");
         assert_eq!(String::from_utf8_lossy(&claimed.passed),
             format!("; {} passed over: the creation of {} returned OS error 17", theirs.file_name().unwrap().to_string_lossy(), theirs.display()));
+    }
+
+    #[test]
+    fn a_rotation_tries_no_more_names_than_it_was_given() {
+        let (d, log) = dir();
+        let second = 4_102_444_800;
+        for n in [9, 10] { fs::write(archive_path(&log, &at(second, n)), format!("record {n}\n")).unwrap(); }
+        fs::write(&log, b"this rotation's record\n").unwrap();
+        let Err(why) = claim(&log, at(second, 9), 2) else { panic!("a third name was tried: {:?}", listing(&d.0)) };
+        assert_eq!(String::from_utf8_lossy(&why),
+            format!("each of 2 archive names is held; the creation of {} returned OS error 17", archive_path(&log, &at(second, 10)).display()));
+        assert_eq!(fs::read(&log).unwrap(), b"this rotation's record\n");
+        assert_eq!(listing(&d.0), ["advisory.log", "advisory.log.21000101T000000Z.10", "advisory.log.21000101T000000Z.9"]);
+    }
+
+    #[test]
+    fn a_rotation_that_cannot_touch_the_live_file_removes_the_name_it_made() {
+        let (d, log) = dir();
+        fs::write(&log, vec![b'x'; 200]).unwrap();
+        // The touch opens the file to set its time, and cannot.
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o000)).unwrap();
+        let rotation = rotate(&log, &knobs(100));
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+        let why = match rotation { Rotation::Failed(why) => String::from_utf8_lossy(&why).into_owned(), other => panic!("{other:?}") };
+        assert!(why.starts_with(&format!("advisory log not rotated: the open of {} returned OS error 13", log.display())), "{why}");
+        assert_eq!(listing(&d.0), ["advisory.log", "advisory.log.rotate.lock"], "the name it made is gone");
+        assert_eq!(fs::read(&log).unwrap(), vec![b'x'; 200]);
     }
 }
 

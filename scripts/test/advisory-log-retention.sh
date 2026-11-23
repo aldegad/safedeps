@@ -424,7 +424,7 @@ cmp -s "${home}/$(archives | grep -v '^advisory\.log\.2026080')" "${home}/before
 grep -qF '; removed beyond the retention bounds: ' "${log}" || fail "the rotation's line does not say what retention removed"
 pass "retention keeps three archives, plain and gzip counted together, and the rotation's line names what it removed"
 
-# ---- a rotation that cannot rename says so ---------------------------------
+# ---- a rotation that cannot make the archive name says so ------------------
 fresh_home
 write_fixture
 mkdir -p "${home}/cache/osv-vuln" "${home}/cache/kev" "${home}/cache/ghsa" "${home}/approved-specs"
@@ -436,13 +436,13 @@ mkdir -p "${home}/cache/osv-vuln" "${home}/cache/kev" "${home}/cache/ghsa" "${ho
 chmod 500 "${home}"
 cli 100000
 chmod 700 "${home}"
-grep -q '^safedeps-core advisory-log: advisory log not rotated: the rename to .* returned OS error ' "${home}/cli.err" \
+grep -q '^safedeps-core advisory-log: advisory log not rotated: the creation of .* returned OS error ' "${home}/cli.err" \
   || fail "stderr does not say the rotation failed: $(cat "${home}/cli.err")"
-log_kept || fail "a rotation that could not rename changed the log"
-[[ "$(archive_count)" == 0 ]] || fail "a rotation that could not rename made an archive: $(archives)"
-grep -q '\] ERROR advisory log not rotated: the rename to .* returned OS error ' "${log}" \
+log_kept || fail "a rotation that could not make the archive name changed the log"
+[[ "$(archive_count)" == 0 ]] || fail "a rotation that could not make the archive name made an archive: $(archives)"
+grep -q '\] ERROR advisory log not rotated: the creation of .* returned OS error ' "${log}" \
   || fail "the log does not say the rotation failed"
-pass "a rotation that cannot rename leaves the log whole, and says why on stderr and in the log"
+pass "a rotation that cannot make the archive name leaves the log whole, and says why on stderr and in the log"
 
 # The hooks rotate through the same core, from the post hook's provider
 # initialization.
