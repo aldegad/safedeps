@@ -619,7 +619,7 @@ schtasks /Delete /TN safedeps-watch-0900 /F
 schtasks /Delete /TN safedeps-watch-2100 /F
 ```
 
-These commands were run once on Windows 10: both tasks were created, read back as daily at 09:00 and 21:00 with the action above, deleted, and then not found. A scheduled run of the action through `wsl.exe` was not measured.
+These commands were run once on Windows 10: both tasks were created, read back as daily at 09:00 and 21:00 with the action above, deleted, and then not found. The query also read `Power Management: Stop On Battery Mode, No Start On Batteries`, so on a laptop running on battery a slot does not start. A scheduled run of the action through `wsl.exe` was not measured.
 
 #### What a run does
 

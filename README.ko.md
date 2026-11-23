@@ -619,7 +619,7 @@ schtasks /Delete /TN safedeps-watch-0900 /F
 schtasks /Delete /TN safedeps-watch-2100 /F
 ```
 
-이 명령은 Windows 10에서 한 번 실행했습니다. 두 작업이 만들어졌고, 위의 동작으로 매일 09:00과 21:00에 도는 것으로 읽혔고, 지워졌고, 그 뒤에는 찾을 수 없었습니다. `wsl.exe`를 통한 예약 실행은 측정하지 않았습니다.
+이 명령은 Windows 10에서 한 번 실행했습니다. 두 작업이 만들어졌고, 위의 동작으로 매일 09:00과 21:00에 도는 것으로 읽혔고, 지워졌고, 그 뒤에는 찾을 수 없었습니다. 조회 결과에는 `Power Management: Stop On Battery Mode, No Start On Batteries`도 있었으므로, 배터리로 도는 노트북에서는 그 시각에 작업이 시작되지 않습니다. `wsl.exe`를 통한 예약 실행은 측정하지 않았습니다.
 
 #### What a run does
 
