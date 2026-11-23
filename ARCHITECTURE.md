@@ -372,8 +372,8 @@ Key fields:
 Lifecycle:
 
 ```
-approve            install            confirm              re-check (daily)
-───────            ───────            ───────              ────────────────
+approve            install            confirm              re-check (twice daily)
+───────            ───────            ───────              ──────────────────────
 ledger entry  ──►  hook passes   ──►  post-verify match  ──►  OSV re-query
 approved_at=now    spec matches       confirmed = true          │
 expires_at=+30d                                                 ▼

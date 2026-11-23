@@ -372,8 +372,8 @@ TIER 3 — ENRICHMENT / CROSS-CHECK
 Lifecycle:
 
 ```
-approve            install            confirm              re-check (daily)
-───────            ───────            ───────              ────────────────
+approve            install            confirm              re-check (twice daily)
+───────            ───────            ───────              ──────────────────────
 ledger 신규    ──►  hook 통과     ──►  post-verify 일치   ──►  OSV 재조회
 approved_at=now    spec 일치          confirmed = true          │
 expires_at=+30d                                                 ▼

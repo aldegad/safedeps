@@ -19,12 +19,28 @@
 - provider 호출이나 ledger/로그 쓰기 없이 현재 `advisory.log`와 지정한 기존 아카이브(`.gz` 포함)에서 검증된 승인을 가져오는 `safedeps [--json] approvals migrate [<archive>...]`를 추가했습니다(이전 `safedeps migrate`와는 별개입니다).
   업그레이드 후 마이그레이션하지 않은 기존 미보증 ledger 항목은 마이그레이션하거나 다시 확인하기 전까지 항목당 한 번씩 provider 재조회를 포함해 처음부터 다시 검사합니다.
   마이그레이션은 수치를 알 수 있을 때 합계가 `approve_lines`가 되는 다섯 개 수치(`inserted`, `not_inserted`, `duplicates`, `unconfirmed`, `taken_back`)를 보고하고, `approve-undone`과 `approve-in-doubt` 철회를 반영하며, 재실행 시 멱등하게 동작하고 명명된 오류(`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`, `approvals_store_write_failed`, `approvals_store_unsynced`)를 보고합니다.
-- daily watch LaunchAgent installer가 `bin/safedeps`, `lib/`, wrapper와 함께 머신 코어(`bin/native/<os>-<arch>/safedeps-core`)를 복사하고 runtime source digest에 포함하도록 갱신했습니다. 코어가 없거나 사용할 수 없거나 심볼릭 링크이면 기존 runtime을 덮어쓰기 전에 `core-missing`으로 거부합니다.
-  코어 바이너리가 있는 checkout에서 기존 `--hour`와 `--minute` 일정을 지정해 agent를 다시 설치하세요. 다시 설치하기 전에는 이전 runtime이 기존 로그 로직으로 계속 동작하며 `agent_runtime_stale: true`를 보고합니다.
+- watch LaunchAgent installer가 `bin/safedeps`, `lib/`, wrapper와 함께 머신 코어(`bin/native/<os>-<arch>/safedeps-core`)를 복사하고 runtime source digest에 포함하도록 갱신했습니다. 코어가 없거나 사용할 수 없거나 심볼릭 링크이면 기존 runtime을 덮어쓰기 전에 `core-missing`으로 거부합니다.
+  코어 바이너리가 있는 checkout에서 runtime을 갱신하세요. 스케줄러가 LaunchAgent인 호스트에서는 호스트에 설치했던 것과 같은 `--times`(또는 `--hour`와 `--minute`)를 넘겨 `install`을 실행하세요. 이를 생략하고 다시 설치하면 09:00과 21:00으로 설정됩니다. 스케줄러가 다른 것(에이전트 루틴이나 cron 등)인 호스트에서는 `install --runtime-only`를 실행하세요. 갱신하기 전에는 이전 runtime이 기존 로그 로직으로 계속 동작하며 `agent_runtime_stale: true`를 보고합니다.
   예약 실행에서 `core_missing`이 발생하면 `recheck_failed`에 re-check 종료 상태와 오류를 기록하고 해당 실행의 watch 경고도 그대로 올립니다.
 - 빈 라이브 로그로 이어지는 셸 로그 로테이션 동안의 실제 `check`와 `re-check`, 인위적으로 겹친 아카이브와 잘린 라이브 로그(실제 동시 로테이션 측정은 아님), 위조 항목 거부, 일반 승인 및 cache 흐름, 레거시 마이그레이션 멱등성을 검증하는 `approvals-provenance` 회귀 테스트 묶음을 추가했습니다.
 - 런타임 다이제스트에 현재 머신의 `bin/native/<os>-<arch>/safedeps-core`를 포함했습니다. 소스 코어가 누락되어도 스캔은 자체적으로 실패하거나 오류 행을 추가하거나 경고를 올리지 않으며, `stale: true` 대신 런타임 메타데이터 진단으로 `source_digest_now: null`, `stale: null`, 그리고 `step: find`, `find`의 0이 아닌 종료 코드인 `exit`, 코어 경로가 포함된 `said`를 담은 `source_unreadable`을 기록합니다. 반면 인스톨러 상태 확인은 JSON 다이제스트나 stale 판정 없이 `core-missing`과 경로를 출력하고 코드 `1`로 종료합니다(`safedeps_watch_core_file`이 경로를 지정할 수 없는 미지원 플랫폼에서는 스캔의 기존 생략 동작을 유지하며 인스톨러는 `core-missing`으로 거부합니다).
-- daily watch의 비용을 문서화했습니다. ledger re-check는 매 실행마다 모든 항목에 대해 OSV에 실시간으로 질의하므로, full scan 비용은 ledger 크기에 따라 늘어납니다. `GITHUB_TOKEN`이 없으면 GitHub의 비인증 한도에 도달한 뒤부터 GHSA 교차 확인을 건너뛰며, 건너뛸 때마다 WARN 줄을 남깁니다. scan 중에 수동으로 `safedeps re-check`를 실행하면 `75`로 종료합니다.
+- watch의 비용을 문서화했습니다. ledger re-check는 매 실행마다 모든 항목에 대해 OSV에 실시간으로 질의하므로, full scan 비용은 ledger 크기에 따라 늘어납니다. `GITHUB_TOKEN`이 없으면 GitHub의 비인증 한도에 도달한 뒤부터 GHSA 교차 확인을 건너뛰며, 건너뛸 때마다 WARN 줄을 남깁니다. scan 중에 수동으로 `safedeps re-check`를 실행하면 `75`로 종료합니다.
+- watch LaunchAgent의 기본 일정을 하루 한 번(`--hour`와 `--minute`로 다른 시각을 지정하지 않으면 09:00)에서 현지 시각 09:00과 21:00의 하루 두 번으로 변경했습니다. 보안 권고는 어느 시각에나 게시될 수 있고, 컴퓨터가 잠든 사이 놓친 슬롯이 있어도 12시간 뒤에 다음 슬롯이 돌아오기 때문입니다.
+  `node scripts/install/install-safedeps-recheck-agent.mjs install`은 이제 기본값인 09:00과 21:00 또는 `--times HH:MM[,HH:MM...]`로 지정한 슬롯을 오름차순 `StartCalendarInterval` 배열로 기록합니다.
+  `--hour`와 `--minute`는 여전히 슬롯 하나를 지정하며 둘 중 하나를 생략하면 시는 `9`, 분은 `0`을 기본값으로 씁니다. 두 형식을 함께 주거나 범위를 벗어난 슬롯 또는 같은 슬롯을 두 번 주면 빌드나 등록 전에 거부합니다.
+  설치 보고서의 `schedule`은 이제 `{hour, minute}` 객체 하나가 아니라 `HH:MM` 문자열 목록이며, 슬롯 없이 다시 설치하면 다시 09:00과 21:00으로 설정됩니다.
+- 스케줄러가 에이전트 루틴이나 cron인 호스트에서 runtime을 갱신할 때 `launchd` 에이전트가 다시 생기지 않도록 `install-safedeps-recheck-agent.mjs`에 `install --runtime-only`를 추가했습니다.
+  `install`과 마찬가지로 현재 머신의 코어를 포함해 `~/.safedeps/agent`에 runtime을 빌드하고 watch 옵션을 기록하지만, `launchd`에는 아무것도 쓰거나 로드하거나 시작하지 않습니다. 이미 있는 plist는 그대로 두며 보고서에 존재 여부를 알립니다.
+  일정 인자는 받지 않으며 `--times`, `--hour`, `--minute`를 거부하고, 코어가 없는 checkout은 `core-missing`으로 거부합니다.
+  `uninstall`은 이제 `runtime_kept`를 보고합니다. 에이전트를 언로드하고 plist를 삭제하지만 runtime과 watch 상태 및 설정은 그대로 남깁니다.
+- `node scripts/install/install-safedeps-hooks.mjs --watch-notice`로 Claude Code용 opt-in 세션 시작 watch 알림을 추가했습니다. `scripts/safedeps-watch-notice.sh`를 `SessionStart` 훅(매처 `startup|resume`, 타임아웃 10초)으로 등록합니다.
+  이 훅은 `safedeps --json watch status`를 읽어 아직 어느 소비자도 가져가지 않은 이벤트, 마지막 스캔에서 끝까지 읽지 못한 루트, 아직 게시된 스캔이 없음, 또는 상태 읽기 실패와 그 출력을 에이전트 컨텍스트로 출력합니다. 그 외에는 아무것도 출력하지 않으며, 이미 가져간 이벤트는 다시 알리지 않고 모든 경로에서 아무것도 막지 않은 채 `0`으로 종료합니다.
+  요청한 경우에만, 그리고 Claude Code에만 등록합니다. 일반 설치는 기존 알림 설정을 유지하고, `--no-watch-notice`는 게이트를 유지한 채 알림만 제거하며, `--uninstall`은 나머지와 함께 제거합니다. 다른 엔진은 `SKILL.md`에 안내된 한 줄을 지침 파일에 넣어 쓰며, 인스톨러는 지침 파일을 쓰지 않습니다.
+  훅 인스톨러는 이제 알 수 없는 인자나 `--watch-notice`와 `--no-watch-notice`를 함께 주거나 `--uninstall`과 함께 주는 경우 아무것도 등록하기 전에 거부합니다("Nothing was registered."). 등록된 명령을 셸이 실행하는 방식대로 검증하는 `watch-notice` 테스트 배터리를 추가했습니다.
+- `README`, `SKILL.md`, `ARCHITECTURE`, `RELEASING`에 watch 스캔을 실행할 스케줄러 선택 기준을 문서화했습니다.
+  `README`의 "Daily Watch With macOS Alerts" 절을 "Re-checking What Is Already Installed"로 바꿨습니다. 호스트가 스케줄러를 고르며 사용자 컴퓨터에서 도는 에이전트 스케줄러를 우선하고, 없으면 운영체제 스케줄러를 쓰며, 클라우드 실행은 lockfile도 `~/.safedeps/watch/`도 읽을 수 없으므로 클라우드 스케줄러는 쓰지 않습니다. `launchd`(인스톨러), Linux의 systemd 사용자 타이머 또는 crontab 두 줄, Windows의 `schtasks` 작업 두 개 명령과 실제로 실행해 본 항목과 실행하지 않은 항목을 함께 적었습니다.
+  `SKILL.md`에 "Re-checking what is already installed"를 추가했습니다. 에이전트가 먼저 사용자 컴퓨터에서 에이전트가 도는지 묻고 맞는 경로를 제안하며, 하루 두 번을 권장하되 사용자가 다른 시각을 고를 수 있게 합니다. 로컬 에이전트 루틴이 finding을 수정할 때는 브랜치에서 프로젝트 테스트를 돌리며 병합 전에 확인을 구합니다.
+  `ARCHITECTURE`에는 macOS가 `launchd` 작업의 책임을 wrapper 인터프리터인 `/usr/bin/env`에 지우고 해당 프로세스에 Full Disk Access가 없어 macOS 보호 폴더를 읽지 못한다는 점과, 그런 루트가 `roots walked N/M (K incomplete)`에서 `root_walk_incomplete`로 표시되며 `safedeps`는 사용자에게 `/usr/bin/env`에 Full Disk Access를 주라고 요구하지 않는다는 점을 적었습니다. `RELEASING` 7단계는 LaunchAgent 호스트에서는 같은 슬롯으로, 그 외에는 `install --runtime-only`로 runtime을 갱신하도록 수정했습니다.
 
 ## 2.24.0
 
