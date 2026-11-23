@@ -779,9 +779,9 @@ Old unconfirmed snapshots are automatically pruned (keeping the 10 most recent),
 | `SAFEDEPS_ADVISORY_LOG_MAX_BYTES` | 67108864 | The size at which the live file rotates |
 | `SAFEDEPS_ADVISORY_LOG_KEEP` | 5 | How many archives are kept, plain and gzip counted together |
 | `SAFEDEPS_ADVISORY_LOG_ARCHIVE_TOTAL_BYTES` | 536870912 | How many bytes all archives together may hold |
-| `SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS` | 3600 | How long a plain archive goes unwritten before a rotation compresses it |
+| `SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS` | 3600 | How long a plain archive waits after its modification time before a rotation compresses it |
 
-- **Archives.** An archive is `advisory.log.<UTC stamp>`, such as `advisory.log.20261124T061500Z`, with `.1`, `.2` and so on after the stamp for later archives of the same second. A new archive stays plain, because a process that opened the log before the rename may still write to it. A later rotation compresses it to `<archive>.gz` once nothing has written to it for the quiet window. A rotation compresses at most one archive.
+- **Archives.** An archive is `advisory.log.<UTC stamp>`, such as `advisory.log.20261124T061500Z`, with `.1`, `.2` and so on after the stamp for later archives of the same second. A new archive stays plain, because a process that opened the log before the rename may still write to it. A later rotation compresses it to `<archive>.gz` once the quiet window has passed since its modification time. A rotation compresses at most one archive.
 - **Retention.** Past either bound, the oldest archives are removed first. The archive just made is always kept.
 - **The lock.** `advisory.log.rotate.lock` is the rotation's lock file. It stays in place. The kernel releases the lock when the rotating process exits, however it ends, so a killed rotation does not block the next one. A temporary `advisory.log.compressing` exists while a compression runs.
 - **Who rotates.** The core rotates (`safedeps-core advisory-log rotate`). The CLI and the watch look at the size first and start the core only at the bound. The post hook rotates when it starts its provider queries. Each process looks once.
@@ -790,7 +790,7 @@ Old unconfirmed snapshots are automatically pruned (keeping the 10 most recent),
 
 Limits:
 
-- A line leaves the record by retention. It can also be lost when the process that wrote it opened the log before a rotation, held it open for longer than the quiet window, and wrote after a later rotation's compression read that archive.
+- A line leaves the record by retention. It can also be lost when its process writes to an archive after a later rotation's compression read that archive. The quiet window counts from the archive's modification time. Just before it renames the log, a rotation touches it, setting its modification time to now. The window starts at that touch, not at the rename, and a later write starts it again. A process that opened the log before the touch can lose a line this way when it held the log open for longer than the quiet window. A process that opened the log between the touch and the rename has less of the window, because the window has run since the touch. So it can lose a line even though it held the log open for less than the window. If the rotation paused there for longer than the window, such a process can have none left.
 - A rotation that ends between creating an archive name and the rename leaves that name as an empty archive. The next rotation reads it as the newest archive, and retention counts it.
 - Two versions of safedeps writing to one `SAFEDEPS_HOME` at the same time were not measured.
 
