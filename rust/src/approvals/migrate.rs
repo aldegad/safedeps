@@ -93,9 +93,9 @@
 //!                named.
 //!
 //! Why a read and not a sync for each line: a sync waits for the disk, and a
-//! run moves a thousand lines or more while every commit waits for the lock,
-//! for at most LOCK_WAIT while no line lands. One write and one sync keep the
-//! lock as short as a run can.
+//! run moves a thousand lines or more in one hold of the lock, and a commit
+//! waits for one hold LOCK_WAIT at most. One write and one sync keep the lock
+//! as short as a run can.
 //!
 //! The counts. Every report that gives the approve lines gives the same five
 //! counts, and they add up to the approve lines: inserted, not inserted,

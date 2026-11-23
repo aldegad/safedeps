@@ -32,12 +32,25 @@
 //! then appends its own line in the same write and syncs it before it says
 //! the line is written. The lock belongs to the open file and goes when the
 //! file is closed, so a process that dies holding it leaves nothing to clean
-//! up: the next writer or reader takes it at once. A waiter waits while the
-//! store grows. Every writer lands its line under the lock, so a store that
-//! grew while the lock was refused is a lock its holders hand on, and the wait
-//! starts again: commits that overlap wait their turn, however many there
-//! are, and none is refused for the crowd. A lock held for LOCK_WAIT while no
-//! line lands is an error: nothing is written or read without the lock.
+//! up: the next writer or reader takes it at once.
+//!
+//! The turn. A waiter waits while the lock changes hands. Every hold of the
+//! lock, a writer's or a reader's, writes its turn as it takes the lock, in
+//! `approvals.turn` beside the store: the holder's pid, the hold's number in
+//! its process and the time the hold began, one line of fixed width written
+//! over the last. A process numbers its own holds, and a pid used again
+//! begins its holds at another time, so two holds write two turns. After each
+//! try the lock refused, a waiter reads the turn, and a turn other than the
+//! last one it read is the lock in a new hold: the wait starts again. So
+//! commits that overlap wait their turn, however many there are, and none is
+//! refused for the crowd, while one hold that keeps the lock for LOCK_WAIT is
+//! an error: nothing is written or read without the lock. A turn that cannot
+//! be read is the last one read, so it never lengthens a wait, and a hold that
+//! cannot write its turn leaves the last one standing: either costs a waiter
+//! its patience, never the lock. Readers that hold the lock together each
+//! write a turn, and the last write stands. A read that meets a write half
+//! done reads a turn it has not seen, or none. The turn is no record: only a
+//! waiter reads it, and it vouches for nothing.
 //!
 //! The same lock orders every write of a ledger entry an approval stands on:
 //! a commit and a revoke of an entry each run under it from their first
@@ -181,6 +194,7 @@ use std::{
         fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -198,10 +212,10 @@ const FIELDS: [&str; 4] = ["at", "hash", "via", "record"];
 /// The torn-line seal's byte. A writer ends a torn last line with it and a
 /// newline, and a line that holds it vouches for nothing.
 const SEAL: u8 = 0;
-/// How long a writer or a reader waits for the store lock while no line
-/// lands in the store. A holder writes one line or reads the file, and ten
-/// seconds in which no line landed is taken for a holder that stopped. Each
-/// line that lands starts the wait again (`lock_store`).
+/// How long a writer or a reader waits for the store lock while one hold
+/// keeps it. A holder writes one line or reads the file, so a hold of ten
+/// seconds is taken for a holder that stopped. Each new hold starts the wait
+/// again (the turn, `lock_store`).
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Who wrote a line.
@@ -384,7 +398,7 @@ fn index_within(dir: &Path, wait: Duration) -> Result<Index, Fault> {
         }
         Err(e) => return Err(Fault::operation(Outcome::Io(Err(e)), &store, |p| Action::Open(p))),
     };
-    lock_store(&file, &store, os::FileLock::Shared, wait)?;
+    lock_store(dir, &file, os::FileLock::Shared, wait)?;
     let mut bytes = Vec::new();
     let mut f: &fs::File = &file;
     observed(f.read_to_end(&mut bytes), &store, |p| Action::Read(p))?;
@@ -561,32 +575,92 @@ fn log_line(log: &Path, at: &str, text: &[u8]) -> Result<(), Fault> {
     observed(f.write_all(&l), log, |p| Action::Write(p))
 }
 
-/// The store lock on `file`, the store at `store`, with its wait started
-/// again each time the store grew. Eight writers committing at once each
-/// held the lock for one commit, and a waiter whose ten seconds counted the
-/// whole queue was refused though every holder moved on. A store that grew is
-/// a holder that moved on: every writer lands its line under the lock. A
-/// length that cannot be read is no growth, and neither is a store that
-/// shrank, so neither lengthens the wait.
-fn lock_store(file: &fs::File, store: &Path, how: os::FileLock, wait: Duration) -> Result<(), Fault> {
-    let len = || file.metadata().ok().map(|m| m.len());
-    let mut seen = len();
+/// The turn's file, beside the store.
+const TURN: &str = "approvals.turn";
+
+/// The holds of the store lock this process took, which number its turns.
+static HOLDS: AtomicU64 = AtomicU64::new(0);
+
+/// One hold of the store lock, as its holder wrote it when it took the lock:
+/// its pid, the hold's number in its process, and the time the hold began,
+/// in seconds and nanoseconds since the epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Turn {
+    pid: u32,
+    hold: u64,
+    secs: i64,
+    nanos: u32,
+}
+
+impl Turn {
+    /// The length of every turn's line. Each field has a fixed width, so a
+    /// turn is written over the last whole, and nothing is truncated.
+    const LEN: usize = 63;
+
+    fn line(&self) -> String {
+        format!("{:010} {:020} {:020}.{:09}\n", self.pid, self.hold, self.secs, self.nanos)
+    }
+
+    /// A turn's line, or None for bytes that are not one.
+    fn parse(line: &[u8; Self::LEN]) -> Option<Self> {
+        let text = std::str::from_utf8(line).ok()?.strip_suffix('\n')?;
+        let (pid, rest) = text.split_once(' ')?;
+        let (hold, began) = rest.split_once(' ')?;
+        let (secs, nanos) = began.split_once('.')?;
+        let digits = |field: &str, width: usize| field.len() == width && field.bytes().all(|b| b.is_ascii_digit());
+        if !(digits(pid, 10) && digits(hold, 20) && digits(secs, 20) && digits(nanos, 9)) {
+            return None;
+        }
+        Some(Self { pid: pid.parse().ok()?, hold: hold.parse().ok()?, secs: secs.parse().ok()?, nanos: nanos.parse().ok()? })
+    }
+}
+
+/// Writes this hold's turn over the last, under the lock it just took. The
+/// open does not wait for a FIFO's reader, and only a regular file is
+/// written to.
+fn write_turn(dir: &Path) -> io::Result<()> {
+    let began = os::wall(os::WallRole::ApprovalsTurn);
+    let turn = Turn { pid: std::process::id(), hold: HOLDS.fetch_add(1, Ordering::Relaxed), secs: began.seconds(), nanos: began.nanos() };
+    let file = fs::OpenOptions::new().write(true).create(true).mode(0o600).custom_flags(os::O_NONBLOCK).open(dir.join(TURN))?;
+    if !file.metadata()?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    file.write_all_at(turn.line().as_bytes(), 0)
+}
+
+/// The turn beside the store, or None where no turn can be read.
+fn read_turn(dir: &Path) -> Option<Turn> {
+    let file = fs::OpenOptions::new().read(true).custom_flags(os::O_NONBLOCK).open(dir.join(TURN)).ok()?;
+    let mut line = [0u8; Turn::LEN];
+    file.read_exact_at(&mut line, 0).ok()?;
+    Turn::parse(&line)
+}
+
+/// The store lock on `file`, the store in `dir`, then this hold's turn, with
+/// the wait started again each time the turn changed (the module's "The
+/// turn"). The first turn read is the one the wait started on.
+fn lock_store(dir: &Path, file: &fs::File, how: os::FileLock, wait: Duration) -> Result<(), Fault> {
+    let mut seen = None;
     os::flock_within(file, how, wait, || {
-        let now = len();
-        let grew = matches!((seen, now), (Some(was), Some(is)) if is > was);
-        if grew || seen.is_none() {
+        let now = read_turn(dir);
+        let handed_on = matches!((seen, now), (Some(was), Some(is)) if is != was);
+        if now.is_some() {
             seen = now;
         }
-        grew
+        handed_on
     })
-    .map_err(|o| Fault::operation(o, store, |p| Action::Lock(p)))
+    .map_err(|o| Fault::operation(o, &path(dir), |p| Action::Lock(p)))?;
+    // A turn not written leaves the last one standing: a waiter's patience,
+    // never the lock.
+    let _ = write_turn(dir);
+    Ok(())
 }
 
 /// The store, opened and locked for a commit or a revoke. The lock goes with
 /// the file.
 fn locked(dir: &Path, wait: Duration) -> Result<fs::File, Fault> {
     let file = open_for_append(dir)?;
-    lock_store(&file, &path(dir), os::FileLock::Exclusive, wait)?;
+    lock_store(dir, &file, os::FileLock::Exclusive, wait)?;
     Ok(file)
 }
 
@@ -948,7 +1022,7 @@ mod tests {
     /// A hold of the store lock, taken as a writer or a reader takes it.
     fn holder(dir: &Path, lock: os::FileLock) -> fs::File {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
-        lock_store(&f, &path(dir), lock, Duration::from_secs(1)).unwrap();
+        lock_store(dir, &f, lock, Duration::from_secs(1)).unwrap();
         f
     }
     fn ino(p: &Path) -> u64 {
@@ -1240,6 +1314,29 @@ mod tests {
         assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
         assert!(staged.exists() && !entry.exists());
         assert!(logged(&d.0).is_empty());
+    }
+
+    #[test]
+    fn a_turn_that_cannot_be_read_is_no_handoff() {
+        // A waiter that cannot read the turn takes it for the last one read,
+        // however often it looks: a holder that keeps the lock is waited for
+        // the wait and no longer.
+        let d = scratch();
+        let held = holder(&d.0, os::FileLock::Exclusive);
+        fs::remove_file(d.0.join(TURN)).unwrap();
+        fs::create_dir(d.0.join(TURN)).unwrap();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let dir = d.0.clone();
+        let waiter = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            commit_with(&dir, &approval(1, &staged, &entry, &rec(1), &h(1)), Duration::from_millis(300), &Real, &mut err)
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        let answered = waiter.is_finished();
+        drop(held);
+        let answer = waiter.join().unwrap();
+        assert!(answered, "the commit still waited when the holder let the lock go");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
     }
 
     /// A commit's steps as `Real` runs them, but paced: the lock kept
