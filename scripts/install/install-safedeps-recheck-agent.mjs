@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-/* Install a per-user macOS launchd agent for the daily safedeps watch scan
- * (the ledger re-check, then every registered project and the host's JDKs). */
+/* Install a per-user macOS launchd agent for the safedeps watch scan (the
+ * ledger re-check, then every registered project and the host's JDKs), at
+ * 09:00 and 21:00 local time unless --times names other slots. */
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -40,14 +41,19 @@ const watchExcludePath = path.join(watchDir, 'exclude');
 const TOOL_NAMES = ['node', 'npm', 'pnpm', 'yarn', 'bun'];
 
 function usage() {
-  console.log(`usage: install-safedeps-recheck-agent.mjs <install|uninstall|status> [--hour HH] [--minute MM] [watch options]
+  console.log(`usage: install-safedeps-recheck-agent.mjs <install|uninstall|status> [--times HH:MM,HH:MM] [watch options]
        install-safedeps-recheck-agent.mjs stage --root DIR
        install-safedeps-recheck-agent.mjs configure [watch options]
 
-Default schedule: 09:00 local time.
+Default schedule: 09:00 and 21:00 local time, one launchd calendar slot each.
+--times HH:MM[,HH:MM...]  the slots, local time; replaces the default.
+--hour HH --minute MM     one slot, as before --times (hour 9 and minute 0
+                          when one of the two is left out). Give either
+                          --times or --hour/--minute, not both.
 The runtime carries this machine's core, bin/native/<os>-<arch>/safedeps-core,
 from this checkout: its re-check reads the approvals store with it. A checkout
 without it is refused (core-missing) before anything is built.
+
 stage builds the agent's runtime as DIR and checks that the built bin loads,
 without launchd. DIR is replaced as a whole, so it must be absent, empty or a
 runtime that stage built before, and it can not be this checkout, hold it or lie
@@ -68,7 +74,7 @@ not given keeps what is there):
 
 function parseArgs(argv) {
   const args = {
-    command: argv[0] || 'install', hour: 9, minute: 0, root: '',
+    command: argv[0] || 'install', times: [], hour: null, minute: null, schedule: null, root: '',
     populationCommand: null, populationArgs: [], populationTimeout: null, excludes: [], followups: {}, toolPath: [],
   };
   if (args.command === '-h' || args.command === '--help') {
@@ -76,7 +82,9 @@ function parseArgs(argv) {
   }
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--hour') {
+    if (arg === '--times') {
+      args.times.push(...String(argv[++i] ?? '').split(','));
+    } else if (arg === '--hour') {
       args.hour = Number(argv[++i]);
     } else if (arg === '--minute') {
       args.minute = Number(argv[++i]);
@@ -105,12 +113,7 @@ function parseArgs(argv) {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
-  if (!Number.isInteger(args.hour) || args.hour < 0 || args.hour > 23) {
-    throw new Error('--hour must be an integer from 0 to 23');
-  }
-  if (!Number.isInteger(args.minute) || args.minute < 0 || args.minute > 59) {
-    throw new Error('--minute must be an integer from 0 to 59');
-  }
+  args.schedule = parseSchedule(args);
   if (args.populationCommand !== null && !path.isAbsolute(args.populationCommand)) {
     throw new Error('--population-command must be an absolute path');
   }
@@ -128,6 +131,51 @@ function parseArgs(argv) {
   return args;
 }
 
+// The launchd calendar slots, ascending. --times gives them as HH:MM; the
+// --hour/--minute pair of earlier versions gives one; neither gives the
+// default, two slots twelve hours apart, so a slot a sleeping Mac missed is
+// followed by another the same day.
+const DEFAULT_SCHEDULE = [{ hour: 9, minute: 0 }, { hour: 21, minute: 0 }];
+
+function parseSchedule(args) {
+  const legacy = args.hour !== null || args.minute !== null;
+  if (args.times.length > 0 && legacy) {
+    throw new Error('--times and --hour/--minute both name the schedule; give one of them');
+  }
+  if (legacy) {
+    const hour = args.hour ?? 9;
+    const minute = args.minute ?? 0;
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+      throw new Error('--hour must be an integer from 0 to 23');
+    }
+    if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
+      throw new Error('--minute must be an integer from 0 to 59');
+    }
+    return [{ hour, minute }];
+  }
+  if (args.times.length === 0) {
+    return DEFAULT_SCHEDULE.map((slot) => ({ ...slot }));
+  }
+  const slots = args.times.map((text) => {
+    const match = /^([01]?[0-9]|2[0-3]):([0-5][0-9])$/.exec(text.trim());
+    if (!match) {
+      throw new Error(`--times takes HH:MM slots separated by commas, from 00:00 to 23:59: ${JSON.stringify(text)}`);
+    }
+    return { hour: Number(match[1]), minute: Number(match[2]) };
+  });
+  slots.sort((a, b) => (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute));
+  for (let i = 1; i < slots.length; i += 1) {
+    if (slots[i].hour === slots[i - 1].hour && slots[i].minute === slots[i - 1].minute) {
+      throw new Error(`--times names ${formatSlot(slots[i])} twice`);
+    }
+  }
+  return slots;
+}
+
+function formatSlot({ hour, minute }) {
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
 function xmlEscape(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -137,7 +185,13 @@ function xmlEscape(value) {
     .replaceAll("'", '&apos;');
 }
 
-function plistXml({ hour, minute }) {
+function plistXml(schedule) {
+  const slots = schedule.map(({ hour, minute }) => `    <dict>
+      <key>Hour</key>
+      <integer>${hour}</integer>
+      <key>Minute</key>
+      <integer>${minute}</integer>
+    </dict>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -149,12 +203,9 @@ function plistXml({ hour, minute }) {
     <string>${xmlEscape(installedWrapperPath)}</string>
   </array>
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>${hour}</integer>
-    <key>Minute</key>
-    <integer>${minute}</integer>
-  </dict>
+  <array>
+${slots}
+  </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SAFEDEPS_HOME</key>
@@ -590,7 +641,7 @@ function install(args) {
   fs.writeFileSync(launchdStderrPath, '');
 
   const tempPath = `${plistPath}.${process.pid}.tmp`;
-  fs.writeFileSync(tempPath, plistXml(args), { mode: 0o644 });
+  fs.writeFileSync(tempPath, plistXml(args.schedule), { mode: 0o644 });
   fs.renameSync(tempPath, plistPath);
 
   run('launchctl', ['bootout', domainTarget(), plistPath], { allowFailure: true });
@@ -604,7 +655,7 @@ function install(args) {
     agentRoot,
     program: installedWrapperPath,
     runtime: JSON.parse(fs.readFileSync(path.join(agentRoot, RUNTIME_META), 'utf8')),
-    schedule: { hour: args.hour, minute: args.minute },
+    schedule: args.schedule.map(formatSlot),
     watch: { configPath: watch.configPath, excludePath: watch.excludePath, config: watch.config, excludes: watch.excludes, toolPath: watch.toolSource },
     logs: {
       recheck: path.join(os.homedir(), '.safedeps', 'recheck.log'),
