@@ -320,6 +320,84 @@ late=$(recorded 'a line written after the next rotation')
   || fail "the record holds the first line ${seed} times and the late one ${late} times: $(archives)"
 pass "a writer that opened the log before its rename keeps a line it writes after the next rotation, though the file was last written long before"
 
+# ---- lines written while a rotation compresses -----------------------------
+# Writers do not take the lock, so a line can come at any point of a
+# rotation. After the rename and before its own line, which it writes last,
+# the rotation may gzip a quiet archive. A writer that opened the live file
+# before the rename writes into the archive then, and one that opens the
+# live path makes a new live file. A gzip first on PATH holds the rotation
+# there: it says so and waits. The row writes one line each way, lets gzip
+# run, and finds each line once. A rotation that emptied or replaced the
+# live file to write its own line would lose the second.
+fresh_home
+write_fixture
+inode_before=$(inode "${log}")
+old="${log}.20260801T000000Z"
+printf 'an old line\n' > "${old}"
+touch -t 202608010000 "${old}"
+real_gzip=$(command -v gzip) || fail "no gzip on PATH"
+gate=$(mktemp -d "${tmp_root}/gate.XXXXXX")
+cat > "${gate}/gzip" <<'SH'
+#!/bin/sh
+echo "$$" > "${SAFEDEPS_TEST_GATE}/entered.part" && mv "${SAFEDEPS_TEST_GATE}/entered.part" "${SAFEDEPS_TEST_GATE}/entered"
+# It gives up after 1200 looks, about a minute, so a battery killed with
+# SIGKILL leaves nothing waiting for long.
+i=0
+while [ ! -e "${SAFEDEPS_TEST_GATE}/release" ]; do
+  i=$((i + 1))
+  [ "${i}" -le 1200 ] || exit 1
+  sleep 0.05
+done
+exec "${SAFEDEPS_TEST_GZIP}" "$@"
+SH
+chmod 700 "${gate}/gzip"
+exec 7>>"${log}"
+# The rotation's cwd, and so gzip's, is outside the checkout, and the
+# rotation does not hold the writer's descriptor.
+(exec 7>&-; cd "${tmp_root}" && exec env PATH="${gate}:${PATH}" SAFEDEPS_TEST_GATE="${gate}" SAFEDEPS_TEST_GZIP="${real_gzip}" \
+  SAFEDEPS_HOME="${home}" SAFEDEPS_ADVISORY_LOG_MAX_BYTES=100000 SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS=3600 \
+  "${SAFEDEPS_TEST_CORE}" advisory-log rotate > "${tmp_root}/gated.out" 2>&1) &
+rotation_pid=$!
+for ((i = 0; i < 200; i++)); do
+  [[ -s "${gate}/entered" ]] && break
+  kill -0 "${rotation_pid}" 2>/dev/null || break
+  sleep 0.05
+done
+[[ -s "${gate}/entered" ]] || fail "the rotation did not reach gzip: $(cat "${tmp_root}/gated.out")"
+stall_pid=$(cat "${gate}/entered")
+made=$(archives | grep -vxF "${old##*/}" || true)
+[[ -n "${made}" && "$(inode "${home}/${made}")" == "${inode_before}" ]] \
+  || fail "gzip was held before the rename: $(cd "${home}" && printf '%s ' *)"
+[[ -f "${log}.compressing" && -f "${old}" && ! -e "${old}.gz" ]] \
+  || fail "gzip was held outside the compression of ${old##*/}: $(cd "${home}" && printf '%s ' *)"
+kill -0 "${rotation_pid}" 2>/dev/null || fail "the rotation ended while gzip was held: $(cat "${tmp_root}/gated.out")"
+[[ ! -e "${log}" ]] || fail "the live path holds a file no writer made: $(cat "${log}")"
+into_archive='a line written into the archive while the rotation compresses'
+into_live='a line written to the live path while the rotation compresses'
+printf '%s\n' "${into_archive}" >&7
+exec 7>&-
+printf '%s\n' "${into_live}" >> "${log}"
+[[ "$(cat "${log}")" == "${into_live}" ]] || fail "the new live file holds more than the line written to it: $(cat "${log}")"
+printf '# condition: gzip held after the rename to %s, inside the compression of %s, while one line went into the archive and one made a new live file\n' \
+  "${made}" "${old##*/}"
+: > "${gate}/release"
+rc=0
+wait "${rotation_pid}" || rc=$?
+rotation_pid=""
+stall_pid=""
+[[ "${rc}" == 0 ]] || fail "the rotation exited ${rc} once gzip ran: $(cat "${tmp_root}/gated.out")"
+[[ ! -e "${old}" && "$(gzip -dc "${old}.gz")" == 'an old line' && ! -e "${log}.compressing" ]] \
+  || fail "the held compression did not end whole: $(cd "${home}" && printf '%s ' *)"
+[[ "$(recorded "${into_archive}")" == 1 && "$(recorded "${into_live}")" == 1 ]] \
+  || fail "the record holds the archive's line $(recorded "${into_archive}") times and the live file's $(recorded "${into_live}") times: $(archives | tr '\n' ' ')"
+fixture_first "${home}/${made}" && [[ "$(tail -n 1 "${home}/${made}")" == "${into_archive}" ]] \
+  || fail "the archive is not the file the rotation renamed, with the line written into it last"
+[[ "$(sed -n 1p "${log}")" == "${into_live}" ]] || fail "the live file does not start with the line written to it: $(cat "${log}")"
+[[ "$(sed -n 2p "${log}")" == *"WARN advisory log rotated: ${bytes_before} bytes moved to ${made}; ${old##*/} compressed to ${old##*/}.gz" ]] \
+  || fail "the rotation's line does not follow it: $(cat "${log}")"
+[[ "$(wc -l < "${log}" | tr -d ' ')" == 2 ]] || fail "the live file holds more than those two lines: $(cat "${log}")"
+pass "two lines written while a rotation compresses, one into the archive and one that makes a new live file, are each kept once"
+
 # ---- three rotations in one second -----------------------------------------
 # Retention removes the oldest names first, so archive names must sort in the
 # order the archives were made. With KEEP=1 each rotation removes the archive
