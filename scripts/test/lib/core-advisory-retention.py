@@ -146,11 +146,15 @@ def run(batch_url):
         print("ok - native retention keeps exactly three newest archives and removes the five oldest")
 
         assert not (root / "ignored.log").exists(), "the log escaped SAFEDEPS_HOME"
-        assert b"SAFEDEPS_ADVISORY_LOG=" in after and b"ignored" in after
+        # The warning was written by an earlier call, so the rename moved it
+        # with the rest of that file. The record is the live file and the
+        # archive just made.
+        record = archive.read_bytes() + after
+        assert b"SAFEDEPS_ADVISORY_LOG=" in record and b"ignored" in record, "no line says the separate log path was ignored"
         default_env = dict(env)
         del default_env["SAFEDEPS_HOME"]
         call("pre", denied_command, default_env)
-        assert b"pre-guard DENY" in (root / "home/.safedeps/advisory.log").read_bytes()
+        assert b"pre-guard DENY" in (root / "home/.safedeps/advisory.log").read_bytes(), "the default home's log has no denial"
         assert not (root / "ignored.log").exists()
         print("ok - native logs follow SAFEDEPS_HOME and default HOME/.safedeps, ignoring a separate log path")
 
