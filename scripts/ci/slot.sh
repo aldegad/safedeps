@@ -20,9 +20,17 @@
 # read from the repository's scripts/test/lib/. A ticket or a slot is removed
 # only when its process is gone on a fact: the kernel has no such pid, it holds
 # a zombie, or it holds another start under the pid. A pid the kernel hands out
-# again after a reboot is the third fact. A record whose start cannot be read,
-# or that has none, is not known, and what is not known stays. So this run does
-# not queue when the kernel cannot name it.
+# again after a reboot is the third fact. A record with no start that can be
+# read is gone only on the first two, and what is not known stays. So this run
+# does not queue when the kernel cannot name it.
+#
+# A read a verdict rests on answers by its exit status, not by what it printed:
+# the queue's list, a record, the kernel's answer and the clock. A read that
+# fails gives nothing, even after it printed part of a record. So a ticket whose
+# start cannot be read is judged on its pid, which is its name, alone, and a
+# name that holds no pid is a ticket whose process is not known. A slot whose
+# pid cannot be read stays. A list that cannot be read leaves this run's place
+# not known, so it waits, and a run that cannot read the clock does not queue.
 B="$HOME/safedeps-runs"; Q="$B/.queue"; owner="$1"; shift
 N=$(cat "$B/.slots" 2>/dev/null); case "$N" in 1|2) ;; *) N=2 ;; esac
 SLOTS="$B/.slot"; [ "$N" = 2 ] && SLOTS="$B/.slot $B/.slot2"
@@ -43,21 +51,34 @@ else:
     print({True: "running", False: "gone", None: "unknown"}[owners.running({"pid": int(sys.argv[3]), "identity": sys.argv[4]})])' \
     "$LIB" "$@" 2>/dev/null
 }
-gone() { [ -n "$1" ] && [ "$(kernel running "$1" "$2")" = gone ]; }
-ME=$(kernel identity $$)
-[ -n "$ME" ] || {
+# gone <pid> <identity>: whether the record's process is gone on a fact. A pid
+# that is not a number names no process.
+gone() {
+  local said
+  case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
+  said=$(kernel running "$1" "$2") && [ "$said" = gone ]
+}
+ME=$(kernel identity $$) && [ -n "$ME" ] || {
   echo "slot.sh: the kernel gave no start for this run (pid $$, reader $LIB/native_budget_owners.py), so a later process under the same pid could pass for it; not queueing" >&2
   exit 2
 }
+now=$(date +%s) || now=""
+case "$now" in ''|*[!0-9]*)
+  echo "slot.sh: the clock gave no time for this run's ticket, so its place in the queue is not known; not queueing" >&2
+  exit 2 ;;
+esac
 mkdir -p "$Q"
-t="$Q/$(date +%s)-$(printf %07d $$)"
+t="$Q/$now-$(printf %07d $$)"
 printf '%s\n%s\n' "$owner" "$ME" > "$B/.ticket-$$" && mv "$B/.ticket-$$" "$t"
 my_pos() {
-  local f p i=0
-  for f in $(ls "$Q" 2>/dev/null | sort); do
+  local f p who names i=0
+  names=$(ls "$Q" 2>/dev/null) || return
+  for f in $(printf '%s\n' "$names" | sort); do
     if [ "$f" = "${t##*/}" ]; then i=$((i + 1)); echo "$i"; return; fi
-    p=$((10#${f##*-}))
-    if gone "$p" "$(sed -n 2p "$Q/$f" 2>/dev/null)"; then rm -f "$Q/$f"; else i=$((i + 1)); fi
+    case "$f" in *-*) p=${f##*-} ;; *) p="" ;; esac
+    case "$p" in ''|*[!0-9]*) i=$((i + 1)); continue ;; esac
+    who=$(sed -n 2p "$Q/$f" 2>/dev/null) || who=""
+    if gone "$((10#$p))" "$who"; then rm -f "$Q/$f"; else i=$((i + 1)); fi
   done
 }
 trap 'rm -f "$t" "$B/.ticket-$$"' EXIT
@@ -69,8 +90,9 @@ while [ -z "$MYL" ]; do
       # A slot whose process is gone is removed and taken in the same look, so
       # the runner does not report a gone holder as busy.
       if ! mkdir "$L" 2>/dev/null; then
-        p=$(cat "$L/pid" 2>/dev/null)
-        gone "$p" "$(cat "$L/identity" 2>/dev/null)" && rm -rf "$L" && mkdir "$L" 2>/dev/null || continue
+        p=$(cat "$L/pid" 2>/dev/null) || continue
+        who=$(cat "$L/identity" 2>/dev/null) || who=""
+        gone "$p" "$who" && rm -rf "$L" && mkdir "$L" 2>/dev/null || continue
       fi
       printf '%s\n' "$ME" > "$L/identity"; echo $$ > "$L/pid"; MYL="$L"; break
     done
