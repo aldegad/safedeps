@@ -66,11 +66,13 @@ while [ -z "$MYL" ]; do
   pos=$(my_pos)
   if [ -n "$pos" ] && [ "$pos" -le "$N" ]; then
     for L in $SLOTS; do
-      if mkdir "$L" 2>/dev/null; then
-        printf '%s\n' "$ME" > "$L/identity"; echo $$ > "$L/pid"; MYL="$L"; break
+      # A slot whose process is gone is removed and taken in the same look, so
+      # the runner does not report a gone holder as busy.
+      if ! mkdir "$L" 2>/dev/null; then
+        p=$(cat "$L/pid" 2>/dev/null)
+        gone "$p" "$(cat "$L/identity" 2>/dev/null)" && rm -rf "$L" && mkdir "$L" 2>/dev/null || continue
       fi
-      p=$(cat "$L/pid" 2>/dev/null)
-      if gone "$p" "$(cat "$L/identity" 2>/dev/null)"; then rm -rf "$L"; fi
+      printf '%s\n' "$ME" > "$L/identity"; echo $$ > "$L/pid"; MYL="$L"; break
     done
   fi
   [ -n "$MYL" ] && break

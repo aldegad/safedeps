@@ -90,8 +90,9 @@ slot() { # pid, then the identity it holds or nothing
 start() {
   rm -f "${tmp_root}/ran" "${tmp_root}/err"
   # Started as a host starts it, by its own #! line.
+  # The marker is an argument the suite ignores, so the sweep finds the runner.
   ( cd "${tmp_root}" && HOME="${home}" exec "${home}/safedeps-runs/slot.sh" row \
-      bash -c ': > "$1"' _ "${tmp_root}/ran" ) 2> "${tmp_root}/err" &
+      bash -c ': > "$1"' _ "${tmp_root}/ran" "${MARK}" ) 2> "${tmp_root}/err" &
   suite=$!
   children+=("${suite}")
 }
@@ -163,7 +164,7 @@ fi
 # A suite that holds the slot, and one behind it that runs once it is given back.
 fresh 1
 ( cd "${tmp_root}" && HOME="${home}" exec "${home}/safedeps-runs/slot.sh" holder \
-    bash -c 'while [ ! -e "$1" ]; do sleep 0.1; done' _ "${tmp_root}/release" ) 2> /dev/null &
+    bash -c 'while [ ! -e "$1" ]; do sleep 0.1; done' _ "${tmp_root}/release" "${MARK}" ) 2> /dev/null &
 holder=$!
 children+=("${holder}")
 for (( i = 0; i < 600; i++ )); do [[ -e "${home}/safedeps-runs/.slot/owner" ]] && break; sleep 0.1; done
@@ -194,11 +195,23 @@ mkdir -p "${bin}"
 for tool in bash cat date dirname ls mkdir mv rm sed sleep sort tr wc; do
   ln -s "$(command -v "${tool}")" "${bin}/${tool}"
 done
-set +e
-( cd "${tmp_root}" && HOME="${home}" PATH="${bin}" exec "${home}/safedeps-runs/slot.sh" row true ) \
-  > /dev/null 2> "${tmp_root}/err"
-rc=$?
-set -e
+# The runner refuses at once. One that queues instead never ends, as the copy
+# before the fix does (with no ps on PATH it drops its own ticket and waits),
+# so it is stopped after a minute and the row says so.
+( cd "${tmp_root}" && HOME="${home}" PATH="${bin}" exec "${home}/safedeps-runs/slot.sh" row true "${MARK}" ) \
+  > /dev/null 2> "${tmp_root}/err" &
+refuser=$!
+children+=("${refuser}")
+for (( i = 0; i < 600; i++ )); do kill -0 "${refuser}" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "${refuser}" 2>/dev/null; then
+  stop "${refuser}"
+  rc="none within a minute"
+else
+  set +e
+  wait "${refuser}"
+  rc=$?
+  set -e
+fi
 if [[ "${rc}" == 2 ]] && grep -q 'not queueing' "${tmp_root}/err" && [[ -z "$(ls "${home}/safedeps-runs/.queue")" ]]; then
   pass "with no reader for its own start the runner refuses, and takes no ticket"
 else
