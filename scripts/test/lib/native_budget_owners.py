@@ -10,7 +10,7 @@ A sweep ends other runs' processes, so running() is the one reader of whether a
 process is gone, and it answers that only from a fact. What it does not know
 ends nothing and removes nothing.
 """
-import json,os,re,shutil,signal,struct,subprocess,sys,tempfile,time
+import errno,json,os,re,shutil,signal,struct,subprocess,sys,tempfile,time
 from pathlib import Path
 
 MARKERS=Path('/tmp')/('sdepsBudgetLease3-'+str(os.getuid()))
@@ -20,6 +20,11 @@ IDENTITY=re.compile(r'([0-9]+)\s+(\S.*)',re.S)
 KINFO=648
 # A SIGKILL lands when the machine gets to it, so the wait for it is time, not reads.
 REAP_SECONDS=30
+# What listing a lease another sweep removed raises. EINVAL is a Windows drive's
+# answer under WSL1 while that removal is pending.
+GONE_ERRNOS=(errno.ENOENT,errno.EINVAL,errno.ENOTDIR)
+# A pending removal ends when the machine gets to it, so the wait for it is time too.
+GONE_SECONDS=30
 
 def ps(fields,pid):
     # Exit 1 is a missing pid and a failed ps alike, so an empty answer says neither.
@@ -134,11 +139,32 @@ def load(path):
     except (OSError,ValueError):return {}
     return r if isinstance(r,dict) else {}
 
+def gone(path):
+    """Whether nothing is at path: True and False are what the kernel answered.
+
+    EINVAL is the answer while a removal is pending, so the path is asked again
+    until GONE_SECONDS pass. After that, and for any other error, it is not
+    known: None.
+    """
+    until=time.monotonic()+GONE_SECONDS
+    while True:
+        try:os.lstat(path)
+        except (FileNotFoundError,NotADirectoryError):return True
+        except OSError as e:
+            if e.errno!=errno.EINVAL or time.monotonic()>=until:return None
+            time.sleep(.01);continue
+        return False
+
 def cleanup(lease):
     lease=Path(lease);rows=[];refused=[];unknown=[]
     # Suites that start together sweep the same stale leases, and one finishes first.
+    # The loser's listing raises, and the errno is no fact that the lease went: on
+    # a Windows drive under WSL1 it is EINVAL while the removal is pending. Only a
+    # lease whose path is gone is nothing to clean.
     try:paths=list(lease.glob('*.json'))
-    except FileNotFoundError:paths=[]
+    except OSError as e:
+        if e.errno not in GONE_ERRNOS or gone(lease) is not True:raise
+        paths=[]
     for path in paths:
         if path.name=='owner.json':continue
         try:r=load(path)
