@@ -20,9 +20,6 @@ IDENTITY=re.compile(r'([0-9]+)\s+(\S.*)',re.S)
 KINFO=648
 # A SIGKILL lands when the machine gets to it, so the wait for it is time, not reads.
 REAP_SECONDS=30
-# What listing a lease another sweep removed raises. EINVAL is a Windows drive's
-# answer under WSL1 while that removal is pending.
-GONE_ERRNOS=(errno.ENOENT,errno.EINVAL,errno.ENOTDIR)
 # A pending removal ends when the machine gets to it, so the wait for it is time too.
 GONE_SECONDS=30
 
@@ -139,6 +136,13 @@ def load(path):
     except (OSError,ValueError):return {}
     return r if isinstance(r,dict) else {}
 
+def gone_answer(e):
+    """Whether e is what listing a lease another sweep removed raises: ENOENT,
+    ENOTDIR, or EINVAL, a Windows drive's answer under WSL1 while that removal
+    is pending. The first two are read by class, which Python gives an error
+    raised without an errno too; EINVAL has no class of its own."""
+    return isinstance(e,(FileNotFoundError,NotADirectoryError)) or e.errno==errno.EINVAL
+
 def gone(path):
     """Whether nothing is at path: True and False are what the kernel answered.
 
@@ -163,7 +167,7 @@ def cleanup(lease):
     # lease whose path is gone is nothing to clean.
     try:paths=list(lease.glob('*.json'))
     except OSError as e:
-        if e.errno not in GONE_ERRNOS or gone(lease) is not True:raise
+        if not gone_answer(e) or gone(lease) is not True:raise
         paths=[]
     for path in paths:
         if path.name=='owner.json':continue
