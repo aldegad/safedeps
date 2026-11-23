@@ -3,11 +3,13 @@
 #
 #   scripts/test/slot-queue.sh [--script <slot.sh>]
 #
-# Each row installs the runner as a host gets it (scripts/ci/install-slot.sh)
-# into a home of its own, puts one record in the queue or in a slot, starts a
-# suite behind it and reads what the runner decided: the suite ran, the runner
-# said the slots are busy, or it refused to queue. All three are things the
-# runner does, so a row waits for one of them and needs no clock but a ceiling.
+# Each row installs the runner into a home of its own as a host gets it: the
+# installer run by its own #! line, as scripts/ci/test-hosts.example writes it,
+# and the script it prints read by bash -s. The first row is that install. A
+# row then puts one record in the queue or in a slot, starts a suite behind it
+# and reads what the runner decided: the suite ran, the runner said the slots
+# are busy, or it refused to queue. All three are things the runner does, so a
+# row waits for one of them and needs no clock but a ceiling.
 #
 # The records name a live process of this battery's own, a sleep, by its pid.
 # A record with the start the kernel holds for it is that process; one with
@@ -70,11 +72,30 @@ other_id="$(( ${witness_id%% *} + 1 )) ${witness_id#* }"
 
 row=0
 home=""
+install_rc=(none none)
+# install_runner: the runner into $home the way the documents install it on a
+# host (scripts/ci/test-hosts.example, and the usage line of the installer):
+# scripts/ci/install-slot.sh run from the repository's root by its own #! line,
+# and the script it prints read by bash -s with HOME at $home. An installer
+# that cannot run prints no script, and bash -s ends 0 on an empty one, so the
+# installer's own status is read, in install_rc with bash -s's, and both are 0.
+install_runner() {
+  set +e
+  ( cd "${ROOT_DIR}" && exec scripts/ci/install-slot.sh ) 2> "${tmp_root}/install.err" \
+    | HOME="${home}" bash -s > "${tmp_root}/install.out" 2>&1
+  install_rc=("${PIPESTATUS[@]}")
+  set -e
+  [[ "${install_rc[0]}" == 0 && "${install_rc[1]}" == 0 ]]
+}
 fresh() { # slots: a home with the runner installed and the queue empty
   row=$((row + 1))
   home="${tmp_root}/home-${row}"
   mkdir -p "${home}"
-  bash "${ROOT_DIR}/scripts/ci/install-slot.sh" | HOME="${home}" bash -s > "${tmp_root}/install.out"
+  install_runner || {
+    fail "row ${row} installs the runner (installer exit ${install_rc[0]}, bash -s exit ${install_rc[1]})"
+    printf '# %d row(s) failed; no row can install the runner\n' "${failures}"
+    exit 1
+  }
   [[ "${script}" == "${ROOT_DIR}/scripts/ci/slot.sh" ]] || cp "${script}" "${home}/safedeps-runs/slot.sh"
   printf '%s\n' "$1" > "${home}/safedeps-runs/.slots"
   mkdir -p "${home}/safedeps-runs/.queue"
@@ -248,6 +269,24 @@ refuses() {
     fail "${label} (exit ${rc}${got}, tickets: $(ls "${home}/safedeps-runs/.queue" | wc -l | tr -d ' '), before: $(printf '%s' "${before}" | grep -c . || true))"
   fi
 }
+
+# --- the runner installed the way a host installs it -------------------------------------
+# A tree whose installer is not executable fails here, and no row after it can
+# install the runner, so the battery stops.
+row=$((row + 1)); home="${tmp_root}/home-${row}"; mkdir -p "${home}"
+got=""
+if ! install_runner; then
+  got="installer exit ${install_rc[0]}, bash -s exit ${install_rc[1]}: $(head -c 200 "${tmp_root}/install.err" | tr '\n' ' ')"
+elif [[ ! -x "${home}/safedeps-runs/slot.sh" ]]; then
+  got="it left no executable ~/safedeps-runs/slot.sh"
+fi
+if [[ -z "${got}" ]]; then
+  pass "the installer runs by its own #! line as test-hosts.example writes it, and installs the runner"
+else
+  fail "the installer runs by its own #! line as test-hosts.example writes it, and installs the runner (${got})"
+  printf '# %d row(s) failed; no row can install the runner\n' "${failures}"
+  exit 1
+fi
 
 # --- a pid the kernel handed out again ----------------------------------------------
 fresh 1; ticket "${witness}" other "${other_id}"
