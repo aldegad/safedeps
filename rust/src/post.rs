@@ -18,6 +18,8 @@ pub use trace::{package_links, tree_entries};
 mod snapshot;
 pub use snapshot::{LOCKS, MANIFESTS};
 mod process;
+#[cfg(test)]
+pub(crate) use process::{holder, start, Holder};
 mod journal;
 mod mark;
 mod rollback;

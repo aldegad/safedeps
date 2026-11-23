@@ -261,11 +261,31 @@ faulted() {
   check_with "${ecosystem}" "${spec}" PATH="${stub_bin}:${PATH}" STUB_MATCH="${match}" "$@"
 }
 
-# No approval of any kind: in the report, in the ledger or in the record.
+# The core the CLI writes the approvals store with, to read the store back.
+# shellcheck source=lib/core-reader.sh
+source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
+core_reader_init "${ROOT_DIR}"
+core="${SAFEDEPS_TEST_CORE}"
+store_of() { printf '%s/approvals.jsonl' "$1"; }
+# The hashes the approvals store in HOME vouches for, one a line, or a failure
+# when the store cannot be read.
+vouched() {
+  local index
+  index=$(env SAFEDEPS_HOME="$1" "${core}" approvals index) || return 1
+  jq -r '.hashes | keys[]' <<< "${index}"
+}
+
+# No approval of any kind: in the report, in the ledger, in the record or in
+# the approvals store.
 no_approval() {
+  local hashes
   jq -e '.approved != true' <<< "${json}" >/dev/null || no "the report approves: ${json}"
   [[ -z "$(find "${home}/approved-specs" -name '*.json' -type f 2>/dev/null)" ]] || no "a ledger entry was written"
   ! grep -q 'check approve' "${home}/advisory.log" 2>/dev/null || no "advisory.log records an approval"
+  if [[ -e "$(store_of "${home}")" ]]; then
+    hashes=$(vouched "${home}") || no "the approvals store cannot be read"
+    [[ -z "${hashes}" ]] || no "the approvals store vouches for ${hashes}"
+  fi
 }
 unavailable() {
   [[ "${rc}" == 4 ]] || no "exit ${rc}, not 4: ${json}"
@@ -1069,6 +1089,1004 @@ already_approved_hint() {
 }
 row "already_approved carries the install_hint the deny message and SKILL.md send a reader to" already_approved_hint
 
+# ---- the approvals store ----------------------------------------------------
+#
+# An approval is a line in the approvals store, its `check approve(...)` line
+# in advisory.log and a ledger entry, written in that order under the store
+# lock, and the rename that puts the entry in place is the commit point
+# (`safedeps-core approvals commit`, called by sf_check_commit in bin/safedeps).
+# Before the store line the commit removes an entry at the path that the store
+# does not vouch for. A cache hit is an approval the store vouches for, read
+# from the store first and the entry after. Each fault below is put into the
+# real CLI and the real core: a store the core may not open, a store that is a
+# directory, a core killed while it waits for the store lock, before its rename
+# or after it, an entry replaced after a core died, a rename that fails, a tree
+# with no core, and commits of one spec that meet.
+#
+# Some faults no file system here can be made to show to the CLI: a store line
+# the core cannot write once it holds the lock, a sync that fails alone, a
+# store that cannot be read under the lock, an unlink that fails. rust-core
+# holds the commit's answer to each, with the failure put into the core.
+
+# The `check approve(...)` line in HOME's advisory.log, without its time.
+approve_line() { sed -n 's/^\[[^]]*\] \(check approve(.*\)$/\1/p' "$1/advisory.log"; }
+# The line number of the first line in HOME's advisory.log that holds TEXT.
+log_at() { grep -nF -- "$2" "$1/advisory.log" | head -n 1 | cut -d: -f1; }
+# The ledger entries in HOME.
+entries() { find "$1/approved-specs" -name '*.json' -type f 2>/dev/null; }
+# The store in HOME holds one line, written by check, and it is the approval
+# advisory.log records, of KIND and HASH.
+one_check_line() {
+  local home="$1" kind="$2" hash="$3" line hashes
+  line=$(approve_line "${home}")
+  [[ "$(grep -c . <<< "${line}")" == 1 && "${line}" == "check approve(${kind}) "*" hash=${hash}"* ]] \
+    || no "advisory.log's approval is not one ${kind} line of ${hash}: ${line}"
+  hashes=$(vouched "${home}") || no "the approvals store cannot be read"
+  [[ "${hashes}" == "${hash}" ]] || no "the approvals store vouches for '${hashes}', not ${hash}"
+  [[ "$(grep -c . "$(store_of "${home}")")" == 1 ]] || no "the approvals store holds $(grep -c . "$(store_of "${home}")") lines"
+  jq -e --arg line "${line}" '.via == "check" and .record == $line' "$(store_of "${home}")" >/dev/null \
+    || no "the store line is not advisory.log's approval: $(cat "$(store_of "${home}")")"
+}
+
+store_line_for_every_approval() {
+  local ecosystem spec kind hash
+  while read -r ecosystem spec kind; do
+    check_with "${ecosystem}" "${spec}" < /dev/null
+    [[ "${rc}" == 0 ]] || no "${ecosystem} ${spec}: exit ${rc}: ${json}"
+    hash=$(jq -r '.spec_hash' <<< "${json}")
+    one_check_line "${home}" "${kind}" "${hash}"
+  done <<'PATHS'
+npm fixture-clean@1.0.0 clean closure
+npm fixture-vuln@1.0.0 patched closure
+pypi fixture-clean@1.0.0 clean
+pypi fixture-vuln@1.0.0 patched
+PATHS
+}
+row "every approval a check makes, clean, patched and closure, leaves its line in the approvals store" store_line_for_every_approval
+
+vouched_entry_is_a_cache_hit() {
+  local ecosystem hash
+  for ecosystem in npm pypi; do
+    check_with "${ecosystem}" fixture-clean@1.0.0
+    [[ "${rc}" == 0 ]] || no "${ecosystem}: the first run exits ${rc}: ${json}"
+    hash=$(jq -r '.spec_hash' <<< "${json}")
+    check_in "${ecosystem}" fixture-clean@1.0.0
+    [[ "${rc}" == 0 ]] || no "${ecosystem}: the second run exits ${rc}: ${json}"
+    jq -e --arg hash "${hash}" '.result == "already_approved" and .spec_hash == $hash' <<< "${json}" >/dev/null || no "${ecosystem}: the report: ${json}"
+    grep -qF "check approve(cache) ecosystem=${ecosystem} package=fixture-clean version=1.0.0 hash=${hash}" "${home}/advisory.log" \
+      || no "${ecosystem}: advisory.log has no cache line"
+    ! grep -q 'check ledger-unvouched' "${home}/advisory.log" || no "${ecosystem}: the vouched entry was checked again"
+    [[ "$(grep -c . "$(store_of "${home}")")" == 1 ]] || no "${ecosystem}: the cache hit wrote to the approvals store"
+  done
+}
+row "an entry the approvals store vouches for is a cache hit, and the hit writes no store line" vouched_entry_is_a_cache_hit
+
+hand_written_entry_is_checked() {
+  local answer
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-unpatched 1.0.0 >/dev/null
+  answer=$(env SAFEDEPS_HOME="${home}" bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_check pypi fixture-unpatched 1.0.0') \
+    || no "control: the ledger does not read the hand-written entry as approved: ${answer}"
+  jq -e '.approved == true' <<< "${answer}" >/dev/null || no "control: the ledger's answer: ${answer}"
+  check_in pypi fixture-unpatched@1.0.0
+  [[ "${rc}" == 2 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "cve_unpatched" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -qE '^\[[^]]*\] check ledger-unvouched ecosystem=pypi package=fixture-unpatched version=1\.0\.0 hash=sha256:[0-9a-f]{64} store=not-vouched$' "${home}/advisory.log" \
+    || no "advisory.log does not say the entry was checked again"
+  ! grep -q 'check approve' "${home}/advisory.log" || no "advisory.log records an approval"
+  [[ ! -e "$(store_of "${home}")" ]] || no "the approvals store was written"
+}
+row "a hand-written entry with an honest hash is checked again, and a check that blocks blocks" hand_written_entry_is_checked
+
+copied_entry_is_checked_again() {
+  local first hash
+  check_with npm fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the approval in the first home exits ${rc}: ${json}"
+  first="${home}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  fresh_home
+  mkdir -p "${home}/approved-specs"
+  cp "$(entries "${first}")" "${home}/approved-specs/"
+  check_in npm fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.result == "clean" and .spec_hash == $hash' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -qF "check ledger-unvouched ecosystem=npm package=fixture-clean version=1.0.0 hash=${hash} store=not-vouched" "${home}/advisory.log" \
+    || no "advisory.log does not say the entry was checked again"
+  ! grep -q 'check approve(cache)' "${home}/advisory.log" || no "the copied entry was a cache hit"
+  one_check_line "${home}" "clean closure" "${hash}"
+}
+row "an entry copied whole from another home is checked again, and the store holds only the line that check made" copied_entry_is_checked_again
+
+logged_only_entry_is_checked_again() {
+  local hash
+  check_with pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  # A state from before the store: the approval is in the ledger and in
+  # advisory.log, and there is no store.
+  rm -f "$(store_of "${home}")"
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.result == "clean" and .spec_hash == $hash' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -qF "check ledger-unvouched ecosystem=pypi package=fixture-clean version=1.0.0 hash=${hash} store=not-vouched" "${home}/advisory.log" \
+    || no "advisory.log does not say the entry was checked again"
+  [[ "$(vouched "${home}")" == "${hash}" ]] || no "the new approval is not in the store"
+  [[ "$(jq -r '.via + " " + .record' "$(store_of "${home}")")" == "check check approve(clean) "* ]] || no "the store line: $(cat "$(store_of "${home}")")"
+}
+row "an entry whose approval is only in advisory.log is no cache hit, and is checked again" logged_only_entry_is_checked_again
+
+# A commit the store refused before it put anything in place: no approval, no
+# line of the commit in advisory.log or the store, and no staged entry left in
+# the ledger directory LEDGER. advisory.log holds APPROVALS approve lines, the
+# ones earlier checks made.
+refused_at_the_store() {
+  local approvals="$1" ledger_dir="$2"
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false and .error == "approvals_store_failed" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  [[ "$(grep -c 'check approve' "${home}/advisory.log")" == "${approvals}" ]] || no "advisory.log: $(cat "${home}/advisory.log")"
+  grep -qF 'check fail-closed approvals-store ecosystem=' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+  [[ -z "$(find "${ledger_dir}" -name '.*' 2>/dev/null)" ]] || no "a staged entry was left: $(ls -a "${ledger_dir}")"
+}
+# A file's inode and the digest of its bytes: the file itself, not a copy.
+identity() {
+  python3 -I -c 'import hashlib, os, sys
+p = sys.argv[1]
+print(os.lstat(p).st_ino, hashlib.sha256(open(p, "rb").read()).hexdigest())' "$1"
+}
+not_committed() {
+  grep -qF "safedeps-core approvals: not committed: $(store_of "${home}") could not be opened and locked" "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
+}
+
+store_refuses_the_commit() {
+  fresh_home
+  : > "$(store_of "${home}")"
+  chmod 400 "$(store_of "${home}")"
+  check_in npm fixture-clean@1.0.0
+  chmod 600 "$(store_of "${home}")"
+  refused_at_the_store 0 "${home}/approved-specs"
+  [[ -z "$(entries "${home}")" ]] || no "a ledger entry was written: $(entries "${home}")"
+  not_committed
+}
+row "an approval the store refuses is never put in place: no entry, no approve line, no store line" store_refuses_the_commit
+
+refused_where_the_store_vouches() {
+  local entry before
+  check_with pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  entry=$(entries "${home}")
+  jq -c '.expires_at = "2020-01-01T00:00:00Z"' "${entry}" > "${entry}.next" && mv -f "${entry}.next" "${entry}"
+  before=$(identity "${entry}")
+  chmod 400 "$(store_of "${home}")"
+  check_in pypi fixture-clean@1.0.0
+  chmod 600 "$(store_of "${home}")"
+  refused_at_the_store 1 "${home}/approved-specs"
+  [[ "$(entries "${home}")" == "${entry}" && "$(identity "${entry}")" == "${before}" ]] || no "the entry that was there changed"
+  [[ "$(grep -c . "$(store_of "${home}")")" == 1 ]] || no "the store changed"
+  not_committed
+}
+row "a commit the store refuses where it vouches for the hash approves nothing, and the entry stays as it was" refused_where_the_store_vouches
+
+store_cannot_be_read() {
+  fresh_home
+  mkdir "$(store_of "${home}")"
+  check_in npm fixture-clean@1.0.0
+  refused_at_the_store 0 "${home}/approved-specs"
+  [[ -z "$(entries "${home}")" ]] || no "a ledger entry was written"
+  not_committed
+}
+row "a store that is not a file takes no commit, and nothing is put in place" store_cannot_be_read
+
+unreadable_store_is_no_cache_hit() {
+  local hash entry before
+  check_with pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  entry=$(entries "${home}")
+  before=$(identity "${entry}")
+  rm -f "$(store_of "${home}")"
+  mkdir "$(store_of "${home}")"
+  check_in pypi fixture-clean@1.0.0
+  refused_at_the_store 1 "${home}/approved-specs"
+  grep -qF "check ledger-unvouched ecosystem=pypi package=fixture-clean version=1.0.0 hash=${hash} store=unreadable" "${home}/advisory.log" \
+    || no "advisory.log does not say the store could not be read"
+  ! grep -q 'check approve(cache)' "${home}/advisory.log" || no "the entry was a cache hit"
+  [[ "$(identity "${entry}")" == "${before}" ]] || no "the commit that could not lock the store changed the entry"
+}
+row "a store that cannot be read vouches for nothing: no cache hit, and the commit it refuses leaves the entry as it was" unreadable_store_is_no_cache_hit
+
+# The core of the command started as PID, found among its processes by what it
+# runs: `safedeps-core approvals VERB`, a commit unless VERB is given.
+core_below() {
+  local p verb="${2:-commit}"
+  for p in $(pgrep -P "$1" 2>/dev/null); do
+    if [[ "$(ps -o args= -p "${p}" 2>/dev/null)" == *"safedeps-core approvals ${verb}"* ]]; then
+      printf '%s\n' "${p}"
+      return 0
+    fi
+    core_below "${p}" "${verb}" && return 0
+  done
+  return 1
+}
+
+# HOME's check says on stderr that its core ended before it answered, its
+# staged file still there: it put no entry in place, and the core may have
+# written its store line, so it never says that nothing was written.
+staged_in_doubt() {
+  grep -qE '^safedeps: in-doubt: the commit of sha256:[0-9a-f]{64} ended before it answered\. Its staged entry is still there, so it put no entry in place\.' "$1/stderr" \
+    || no "$(basename "$1")'s stderr: $(cat "$1/stderr")"
+  ! grep -q 'nothing was written' "$1/stderr" || no "$(basename "$1")'s stderr says nothing was written: $(cat "$1/stderr")"
+}
+
+# A check whose core is killed while it waits for the store lock. A holder
+# keeps the lock, the row finds the core among the check's own processes,
+# kills it, then lets the lock go. The holder runs from the scratch root and
+# ends when the row ends. The CLI cannot tell how far a core got that died
+# before it renamed, so the check is in doubt, though here the core wrote
+# nothing.
+core_killed_while_waiting() {
+  local holder pid core_pid="" release
+  fresh_home
+  release="${home}/release"
+  ( cd "${tmp_root}" && exec python3 -I -c 'import fcntl, os, sys, time
+f = open(sys.argv[1], "ab")
+fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+end = time.monotonic() + 300
+while not os.path.exists(sys.argv[3]) and time.monotonic() < end:
+    time.sleep(0.02)' "$(store_of "${home}")" "${home}/held" "${release}" ) &
+  holder=$!
+  # The row runs in a subshell of its own, and this trap ends with it: the
+  # values are put in now, since these locals are gone by then.
+  trap ": > '${release}'; kill ${holder} 2>/dev/null || true" EXIT
+  for _ in $(seq 1 3000); do [[ -e "${home}/held" ]] && break; sleep 0.02; done
+  [[ -e "${home}/held" ]] || no "the holder did not take the lock"
+  ( exec env SAFEDEPS_HOME="${home}" ./bin/safedeps --json check npm fixture-clean@1.0.0 > "${home}/out" 2> "${home}/stderr" < /dev/null ) &
+  pid=$!
+  trap ": > '${release}'; kill ${holder} ${pid} 2>/dev/null || true" EXIT
+  while kill -0 "${pid}" 2>/dev/null; do
+    core_pid=$(core_below "${pid}") && break
+    sleep 0.02
+  done
+  [[ -n "${core_pid}" ]] || no "the check ended before its core waited for the lock: $(cat "${home}/out" "${home}/stderr")"
+  kill -KILL "${core_pid}"
+  : > "${release}"
+  wait "${holder}" || true
+  rc=0
+  wait "${pid}" || rc=$?
+  trap - EXIT
+  json=$(cat "${home}/out")
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false and .error == "approvals_store_in_doubt" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  grep -qF 'check fail-closed approvals-store-in-doubt ecosystem=' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+  ! grep -q 'check approve' "${home}/advisory.log" || no "advisory.log: $(cat "${home}/advisory.log")"
+  [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file of the check was left: $(ls -a "${home}/approved-specs")"
+  [[ -z "$(entries "${home}")" ]] || no "a ledger entry was written: $(entries "${home}")"
+  [[ ! -s "$(store_of "${home}")" ]] || no "the store holds: $(cat "$(store_of "${home}")")"
+  staged_in_doubt "${home}"
+}
+row "a check whose core is killed while it waits for the store lock puts nothing in place, and is in doubt" core_killed_while_waiting
+
+# ---- commits that overlap ---------------------------------------------------
+#
+# Two checks of one spec, A and B, whose commits meet. A commit holds the store
+# lock from before its first read to its answer, so two commits never overlap.
+# It writes its store line, then its approve line, then renames its entry into
+# place, and the first step that fails stops it. So a failed check never
+# removes or rewrites an approval another check made, leaves no entry of its
+# own, and may leave its store line. The cases: one fails and the other then
+# succeeds (sequential), both succeed while their commits meet (overlap), one
+# fails while the other commits (overlap with failure), the earlier one
+# succeeds and the later one, which looked the spec up first, fails
+# (reversed), and the same with the store refusing the later one (store
+# stage).
+#
+# A and B share the approvals store and the ledger, as two checks in one
+# SAFEDEPS_HOME do. Each has an advisory.log of its own, so a row can fail or
+# stall one of them alone. A check stops at a gate, the report an approval is
+# made with, which is the last step before its commit: both have looked the
+# spec up and found nothing by then. A check that is to stop inside its commit
+# meets an advisory.log that is a FIFO. It stops at its approve line, after its
+# store line and before its rename, or, where it removes an entry the store
+# does not vouch for, at the line that says so, before its store line. A check
+# or a revoke that is to stop at a jq call meets one that waits after the call
+# whose arguments hold PAUSE_AFTER, until PAUSE_DIR/go. The checks run from the
+# scratch root, and a row's trap ends what it started.
+
+gate_bin="${tmp_root}/gate-bin"
+mkdir -p "${gate_bin}"
+cat > "${gate_bin}/jq" <<STUB
+#!/usr/bin/env bash
+if [[ -n "\${GATE_DIR:-}" && -d "\${GATE_DIR}" && ! -e "\${GATE_DIR}/passed" && "\$*" == *'install_hint:install_hint('* ]]; then
+  : > "\${GATE_DIR}/waiting"
+  end=\$((SECONDS + 120))
+  until [[ -e "\${GATE_DIR}/go" ]]; do
+    (( SECONDS < end )) || exit 5
+    sleep 0.02
+  done
+  : > "\${GATE_DIR}/passed"
+fi
+if [[ -z "\${PAUSE_DIR:-}" || -z "\${PAUSE_AFTER:-}" || ! -d "\${PAUSE_DIR}" || -e "\${PAUSE_DIR}/passed" || "\$*" != *"\${PAUSE_AFTER}"* ]]; then
+  exec "${real_jq}" "\$@"
+fi
+"${real_jq}" "\$@"
+status=\$?
+: > "\${PAUSE_DIR}/waiting"
+end=\$((SECONDS + 120))
+until [[ -e "\${PAUSE_DIR}/go" ]]; do
+  (( SECONDS < end )) || exit 5
+  sleep 0.02
+done
+: > "\${PAUSE_DIR}/passed"
+exit "\${status}"
+STUB
+# A check whose advisory.log a row made unwritable at the gate (and marked
+# with GATE_DIR/unlogged) has it writable again at the first step after its
+# commit, the removal of its evidence file: so the approve line alone fails,
+# and the check's own fail-closed line is written.
+cat > "${gate_bin}/rm" <<STUB
+#!/usr/bin/env bash
+if [[ -n "\${GATE_DIR:-}" && -e "\${GATE_DIR}/unlogged" && "\$*" == *safedeps-evidence.* ]]; then
+  chmod 600 "\${SAFEDEPS_HOME}/advisory.log"
+  "${real_rm}" -f "\${GATE_DIR}/unlogged"
+fi
+exec "${real_rm}" "\$@"
+STUB
+chmod +x "${gate_bin}/jq" "${gate_bin}/rm"
+# HOME's approve line will fail: advisory.log unwritable until the commit is
+# done.
+unlogged() {
+  chmod 000 "$1/advisory.log"
+  : > "$1/gate/unlogged"
+}
+# The approve line of HOME's commit met the fault, and the check went on past
+# its commit.
+log_refused() {
+  [[ ! -e "$1/gate/unlogged" ]] || no "$(basename "$1") never made advisory.log writable again"
+  ! grep -q 'check approve(' "$1/advisory.log" || no "$(basename "$1")'s approve line was written: $(grep 'check approve(' "$1/advisory.log")"
+}
+
+# Waits up to a minute for the command to succeed.
+until_true() {
+  for _ in $(seq 1 3000); do
+    "$@" && return 0
+    sleep 0.02
+  done
+  return 1
+}
+# Leaves home_a, home_b and ledger, and a trap that ends what the row starts.
+pair() {
+  local root
+  root=$(mktemp -d "${tmp_root}/pair.XXXXXX")
+  home_a="${root}/a" home_b="${root}/b" ledger="${root}/approved-specs"
+  pid_a="" pid_b="" drain_pid="" revoke_pid=""
+  mkdir -p "${home_a}" "${home_b}" "${ledger}"
+  : > "${home_a}/advisory.log"
+  : > "${home_b}/advisory.log"
+  : > "$(store_of "${home_a}")"
+  ln -s "$(store_of "${home_a}")" "$(store_of "${home_b}")"
+  trap reap_pair EXIT
+}
+descendants() {
+  local p
+  for p in $(pgrep -P "$1" 2>/dev/null); do
+    printf '%s\n' "${p}"
+    descendants "${p}"
+  done
+}
+reap_pair() {
+  local gate pid
+  for gate in "${home_a}/gate" "${home_b}/gate" "${home_a}/pause" "${home_b}/pause"; do [[ ! -d "${gate}" ]] || : > "${gate}/go"; done
+  for pid in ${pid_a} ${pid_b} ${drain_pid} ${revoke_pid}; do
+    # shellcheck disable=SC2046  # one pid a word
+    kill -KILL $(descendants "${pid}") "${pid}" 2>/dev/null || true
+  done
+}
+# The check of HOME, in the background, with the further NAME=VALUE words in
+# its environment: its pid in $!.
+launch() {
+  ( cd "${tmp_root}" && exec env SAFEDEPS_HOME="$1" SAFEDEPS_LEDGER_DIR="${ledger}" GATE_DIR="$1/gate" PATH="${gate_bin}:${PATH}" "${@:2}" \
+      "${ROOT_DIR}/bin/safedeps" --json check pypi fixture-clean@1.0.0 > "$1/out" 2> "$1/stderr" < /dev/null ) &
+}
+gated() { until_true test -e "$1/gate/waiting" || no "$(basename "$1") did not reach its commit: $(cat "$1/stderr")"; }
+ledger_entries() { find "${ledger}" -name '*.json' -type f 2>/dev/null; }
+entry_in_place() { [[ -n "$(ledger_entries)" ]]; }
+store_lines() { grep -c . "$(store_of "${home_a}")"; }
+# The store holds a line, or an entry is in place.
+line_or_entry() { [[ "$(store_lines)" -gt 0 ]] || entry_in_place; }
+# The store holds a line, or the entry at the path is gone or is not the file
+# whose identity is $1.
+moved_from() { [[ "$(store_lines)" -gt 0 || -z "$(ledger_entries)" ]] || [[ "$(identity "$(ledger_entries)")" != "$1" ]]; }
+# A process other than this one holds the store lock.
+lock_held() {
+  python3 -I -c 'import fcntl, sys
+f = open(sys.argv[1], "rb")
+try:
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(0)
+sys.exit(1)' "$(store_of "${home_a}")"
+}
+# HOME's advisory.log becomes a FIFO, its lines kept aside: the next open for
+# writing waits for a reader.
+stall_log() {
+  cp -p "$1/advisory.log" "$1/advisory.kept"
+  mkfifo -m 600 "$1/advisory.fifo"
+  ln "$1/advisory.fifo" "$1/advisory.next"
+  mv -f "$1/advisory.next" "$1/advisory.log"
+}
+# The path is a file again, with the lines kept aside. The writer waiting on
+# the FIFO still waits.
+unstall_log() {
+  cp -p "$1/advisory.kept" "$1/advisory.next"
+  mv -f "$1/advisory.next" "$1/advisory.log"
+}
+# And a reader takes what the waiting writer writes into advisory.drained.
+drain_log() {
+  unstall_log "$1"
+  cat "$1/advisory.fifo" > "$1/advisory.drained" &
+  drain_pid=$!
+}
+
+# The check of HOME, which ended with RC, reported an approval, and its three
+# records stand: the entry the hook reads, the approve line in LOG, and a store
+# line holding that line.
+stands() {
+  local home="$1" rc="$2" log="${3:-$1/advisory.log}" json hash line
+  json=$(cat "${home}/out")
+  [[ "${rc}" == 0 ]] || no "$(basename "${home}") exits ${rc}: ${json} $(cat "${home}/stderr")"
+  jq -e '.approved == true and .result == "clean"' <<< "${json}" >/dev/null || no "$(basename "${home}")'s report: ${json}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  [[ -f "${ledger}/${hash/:/-}.json" ]] || no "$(basename "${home}")'s entry of ${hash} is gone: $(ls -a "${ledger}")"
+  line=$(sed -n "s/^\[[^]]*\] \(check approve(.* hash=${hash}.*\)\$/\1/p" "${log}")
+  [[ -n "${line}" && "$(grep -c . <<< "${line}")" == 1 ]] || no "$(basename "${home}")'s approve line: ${line}"
+  [[ -n "$(jq -c --arg line "${line}" --arg hash "${hash}" 'select(.via == "check" and .hash == $hash and .record == $line)' "$(store_of "${home_a}")")" ]] \
+    || no "no store line holds $(basename "${home}")'s approve line: $(cat "$(store_of "${home_a}")")"
+  vouched "${home_a}" | grep -qxF "${hash}" || no "the store does not vouch for ${hash}"
+}
+# The check of HOME, which ended with RC, approved nothing for FAILURE, and its
+# report names no entry: whatever stands at the path is not this check's.
+failed_as() {
+  local home="$1" rc="$2" failure="$3" json
+  json=$(cat "${home}/out")
+  [[ "${rc}" == 4 ]] || no "$(basename "${home}") exits ${rc}: ${json} $(cat "${home}/stderr")"
+  jq -e --arg failure "${failure}" \
+    '.approved == false and .error == $failure and (has("ledger_entry_kept") or has("ledger_entry_left") | not)' <<< "${json}" >/dev/null \
+    || no "$(basename "${home}")'s report: ${json}"
+  [[ -z "$(find "${ledger}" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${ledger}")"
+}
+
+sequential_failure() {
+  pair
+  mkdir "${home_a}/gate"
+  launch "${home_a}"
+  pid_a=$!
+  gated "${home_a}"
+  unlogged "${home_a}"
+  : > "${home_a}/gate/go"
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  chmod 600 "${home_a}/advisory.log"
+  failed_as "${home_a}" "${rc_a}" ledger_write_failed
+  log_refused "${home_a}"
+  [[ -z "$(ledger_entries)" ]] || no "A left its entry: $(ledger_entries)"
+  launch "${home_b}"
+  pid_b=$!
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  stands "${home_b}" "${rc_b}"
+  # A failed at its approve line, after its store line.
+  [[ "$(store_lines)" == 2 ]] || no "the store holds $(store_lines) lines, not A's and B's"
+}
+row "commits that meet: a check that fails, then one that succeeds, and the later one's records stand" sequential_failure
+
+# Both are let to their gates. B goes first and stops at its approve line,
+# after its store line and before its rename. A meets FAULT, then goes as far
+# as it can while B is inside its commit: to its end, or into a core that
+# waits. Two seconds is far past what a commit takes when nothing holds it.
+# Then B goes on. b_entry is the identity of the file B staged, the one its
+# rename puts in place.
+overlap() {
+  local seen=""
+  pair
+  mkdir "${home_a}/gate" "${home_b}/gate"
+  launch "${home_a}"
+  pid_a=$!
+  launch "${home_b}"
+  pid_b=$!
+  gated "${home_a}"
+  gated "${home_b}"
+  stall_log "${home_b}"
+  : > "${home_b}/gate/go"
+  until_true line_or_entry || no "B did not write its store line: $(cat "${home_b}/stderr")"
+  b_entry=$(identity "$(find "${ledger}" -name '.*' -type f ! -name '*.mine.*' | head -n 1)")
+  "$@"
+  : > "${home_a}/gate/go"
+  for _ in $(seq 1 3000); do
+    kill -0 "${pid_a}" 2>/dev/null || break
+    if [[ -z "${seen}" ]]; then
+      core_below "${pid_a}" >/dev/null && seen=${SECONDS}
+    elif (( SECONDS - seen >= 2 )); then
+      break
+    fi
+    sleep 0.02
+  done
+  kill -0 "${pid_a}" 2>/dev/null && [[ -z "${seen}" ]] && no "A neither ended nor reached its commit: $(cat "${home_a}/stderr")"
+  drain_log "${home_b}"
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  wait "${drain_pid}" || true
+  drain_pid=""
+}
+
+overlap_without_failure() {
+  overlap :
+  stands "${home_b}" "${rc_b}" "${home_b}/advisory.drained"
+  stands "${home_a}" "${rc_a}"
+  [[ "$(store_lines)" == 2 ]] || no "the store holds $(store_lines) lines"
+}
+row "commits that meet: two checks that both succeed both stand" overlap_without_failure
+
+a_cannot_log() { unlogged "${home_a}"; }
+overlap_with_failure() {
+  overlap a_cannot_log
+  chmod 600 "${home_a}/advisory.log"
+  stands "${home_b}" "${rc_b}" "${home_b}/advisory.drained"
+  [[ "$(identity "$(ledger_entries)")" == "${b_entry}" ]] || no "the entry is not the file B put in place"
+  failed_as "${home_a}" "${rc_a}" ledger_write_failed
+  # A failed at its approve line, after its store line.
+  [[ "$(store_lines)" == 2 ]] || no "the store holds $(store_lines) lines, not B's and A's"
+  log_refused "${home_a}"
+}
+row "commits that meet: a check that fails while another commits leaves the other's records whole" overlap_with_failure
+
+# B is let to its gate, having looked the spec up. A then succeeds whole. B
+# meets FAULT and goes on.
+reversed() {
+  pair
+  mkdir "${home_b}/gate"
+  launch "${home_b}"
+  pid_b=$!
+  gated "${home_b}"
+  launch "${home_a}"
+  pid_a=$!
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  stands "${home_a}" "${rc_a}"
+  a_entry=$(identity "$(ledger_entries)")
+  "$@"
+  : > "${home_b}/gate/go"
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  [[ "$(identity "$(ledger_entries)")" == "${a_entry}" ]] || no "the entry is not the file A put in place"
+  stands "${home_a}" 0
+}
+
+b_cannot_log() { unlogged "${home_b}"; }
+reversed_failure() {
+  reversed b_cannot_log
+  chmod 600 "${home_b}/advisory.log"
+  failed_as "${home_b}" "${rc_b}" ledger_write_failed
+  log_refused "${home_b}"
+  # B failed at its approve line, after its store line.
+  [[ "$(store_lines)" == 2 ]] || no "the store holds $(store_lines) lines, not A's and B's"
+}
+row "commits that meet: a check that fails after another succeeded leaves the other's records whole" reversed_failure
+
+store_read_only() { chmod 400 "$(store_of "${home_a}")"; }
+reversed_store_refuses() {
+  reversed store_read_only
+  chmod 600 "$(store_of "${home_a}")"
+  failed_as "${home_b}" "${rc_b}" approvals_store_failed
+  ! grep -q 'check approve' "${home_b}/advisory.log" || no "B's advisory.log has a line of its commit"
+  [[ "$(store_lines)" == 1 ]] || no "the store holds $(store_lines) lines, not A's alone"
+}
+row "commits that meet: a check the store refuses after another succeeded approves nothing, and the other's records stand" reversed_store_refuses
+
+# The store vouches for the spec and no entry stands: A approved it, and its
+# entry was removed by hand. B then fails at its approve line, after its store
+# line and before its rename, so no entry stands after it, though the store
+# vouches.
+vouched_without_entry() {
+  local hash
+  pair
+  launch "${home_a}"
+  pid_a=$!
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  stands "${home_a}" "${rc_a}"
+  hash=$(jq -r '.spec_hash' "${home_a}/out")
+  rm -f -- "$(ledger_entries)"
+  mkdir "${home_b}/gate"
+  launch "${home_b}"
+  pid_b=$!
+  gated "${home_b}"
+  unlogged "${home_b}"
+  : > "${home_b}/gate/go"
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  chmod 600 "${home_b}/advisory.log"
+  failed_as "${home_b}" "${rc_b}" ledger_write_failed
+  log_refused "${home_b}"
+  [[ -z "$(ledger_entries)" ]] || no "B's entry stands where nothing stood before it: $(ledger_entries)"
+  vouched "${home_a}" | grep -qxF "${hash}" || no "the store no longer vouches for ${hash}"
+}
+row "a check that fails where the store vouches for the spec and no entry stood leaves no entry" vouched_without_entry
+
+# A check whose core is killed inside its commit, before its rename: it stops
+# at its approve line, its store line written, holding the store lock. Its
+# staged file is still there, so the CLI knows the core put no entry in place,
+# and it is in doubt: the store holds its line.
+killed_before_rename() {
+  local core_pid
+  pair
+  mkdir "${home_a}/gate"
+  launch "${home_a}"
+  pid_a=$!
+  gated "${home_a}"
+  stall_log "${home_a}"
+  : > "${home_a}/gate/go"
+  until_true line_or_entry || no "the commit wrote nothing: $(cat "${home_a}/stderr")"
+  core_pid=$(core_below "${pid_a}") || no "no core holds the commit"
+  lock_held || no "the commit wrote without holding the store lock"
+  unstall_log "${home_a}"
+  kill -KILL "${core_pid}"
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  failed_as "${home_a}" "${rc_a}" approvals_store_in_doubt
+  staged_in_doubt "${home_a}"
+  [[ "$(store_lines)" == 1 ]] || no "the store holds $(store_lines) lines"
+  [[ -z "$(ledger_entries)" ]] || no "the killed commit put its entry in place: $(ledger_entries)"
+  ! grep -q 'check approve(' "${home_a}/advisory.log" || no "advisory.log has an approve line the commit never wrote"
+}
+row "a check whose core is killed after its store line and before its rename puts no entry in place, and is in doubt" killed_before_rename
+
+# An entry no check approved stands at the path: one the fixture writer put
+# there, which the store does not vouch for. A check of the spec removes it
+# before its store line, and its core is killed while it says so in
+# advisory.log. The entry is gone, the store holds no line, and the check is
+# in doubt.
+killed_after_removal() {
+  local planted core_pid
+  pair
+  SAFEDEPS_HOME="${home_a}" SAFEDEPS_LEDGER_DIR="${ledger}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  planted=$(identity "$(ledger_entries)")
+  mkdir "${home_a}/gate"
+  launch "${home_a}"
+  pid_a=$!
+  gated "${home_a}"
+  stall_log "${home_a}"
+  : > "${home_a}/gate/go"
+  until_true moved_from "${planted}" || no "the commit changed nothing: $(cat "${home_a}/stderr")"
+  core_pid=$(core_below "${pid_a}") || no "no core holds the commit"
+  lock_held || no "the commit changed the ledger without holding the store lock"
+  unstall_log "${home_a}"
+  kill -KILL "${core_pid}"
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  failed_as "${home_a}" "${rc_a}" approvals_store_in_doubt
+  staged_in_doubt "${home_a}"
+  [[ -z "$(ledger_entries)" ]] || no "an entry stands: $(ledger_entries)"
+  [[ "$(store_lines)" == 0 ]] || no "the store holds $(store_lines) lines"
+}
+row "a check that removes an entry no check approved and is killed before its store line leaves no entry and no line, and is in doubt" killed_after_removal
+
+# A tree whose CLI finds, in place of its core, a stand-in that runs BODY for a
+# commit and the real core for everything else. BODY sees the commit's
+# arguments as "$@" (the hash is $3, the staged file $4, the entry $5) and the
+# real core as ${core}. Leaves the tree's CLI in stand_in_cli.
+stand_in() {
+  local tree machine="${BASH_VERSINFO[5]:-}" os="" arch="" native
+  case "${machine}" in
+    *-darwin*) os=darwin ;;
+    *-linux*) os=linux ;;
+  esac
+  case "${machine%%-*}" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  [[ -n "${os}" && -n "${arch}" ]] || no "no core is built for ${machine}"
+  tree=$(mktemp -d "${tmp_root}/stand-in.XXXXXX")
+  native="${tree}/bin/native/${os}-${arch}"
+  mkdir -p "${native}"
+  cp bin/safedeps "${tree}/bin/safedeps"
+  cp -R lib "${tree}/lib"
+  {
+    printf '#!/usr/bin/env bash\ncore=%q\n' "${core}"
+    cat <<'HEAD'
+if [[ "$1 $2" == "approvals commit" ]]; then
+HEAD
+    printf '  %s\nfi\n' "$1"
+    cat <<'TAIL'
+exec "${core}" "$@"
+TAIL
+  } > "${native}/safedeps-core"
+  chmod +x "${native}/safedeps-core"
+  stand_in_cli="${tree}/bin/safedeps"
+}
+
+commit_without_answer_has_no_inferred_exit_cause() {
+  local body said first=""
+  for body in 'kill -KILL $$' 'exit 137'; do
+    stand_in "${body}"
+    fresh_home
+    rc=0
+    json=$(env SAFEDEPS_HOME="${home}" "${stand_in_cli}" --json check pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+    [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+    jq -e '.error == "approvals_store_in_doubt"' <<< "${json}" >/dev/null || no "${json}"
+    said=$(grep '^safedeps: in-doubt: the commit of ' "${home}/stderr")
+    [[ "${said}" == *"ended before it answered. Its staged entry is still there"* ]] || no "${said}"
+    [[ "${said}" != *signal* && "${said}" != *exit* ]] || no "an unobserved cause: ${said}"
+    if [[ -n "${first}" ]]; then [[ "${said}" == "${first}" ]] || no "the two non-answers differ"; fi
+    first="${said}"
+  done
+}
+row "a killed commit and a commit exiting 137 give the same file observation without an inferred exit cause" commit_without_answer_has_no_inferred_exit_cause
+
+# A check whose core dies after its commit is done and before it answers: the
+# stand-in runs the real commit, then kills itself. The check's file is at the
+# entry's path, so the approval stands, and the check says so.
+killed_after_commit() {
+  local hash
+  stand_in '"${core}" "$@" > /dev/null; kill -KILL $$'
+  fresh_home
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "${stand_in_cli}" --json check pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json} $(cat "${home}/stderr")"
+  jq -e '.approved == true and .result == "clean"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  hash=$(jq -r '.spec_hash' <<< "${json}")
+  one_check_line "${home}" clean "${hash}"
+  [[ "$(entries "${home}")" == "${home}/approved-specs/${hash/:/-}.json" ]] || no "the ledger holds: $(entries "${home}")"
+  [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${home}/approved-specs")"
+  grep -qxF "safedeps: the commit of ${hash} ended before it answered. Its entry is at the ledger entry's path, so the approval stands." "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+}
+row "a check whose core dies after its rename and before it answers finds its own entry in place, and the approval stands" killed_after_commit
+
+# The same, and the stand-in puts a copy of the entry in its place before it
+# dies. This check's file is in neither place, so whether its approval stands
+# is not known, and the check says only that: neither that the approval
+# stands nor that nothing is approved.
+killed_after_commit_and_replaced() {
+  local said human
+  stand_in '"${core}" "$@" > /dev/null; cp -p "$5" "$5.copy" && mv -f "$5.copy" "$5"; kill -KILL $$'
+  fresh_home
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "${stand_in_cli}" --json check pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json} $(cat "${home}/stderr")"
+  jq -e '.approved == false and .error == "approvals_store_in_doubt" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  grep -qE '^safedeps: in-doubt: the commit of sha256:[0-9a-f]{64} ended before it answered\. ' "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+  grep -qF "This check's file is neither at the staged path nor at the entry's path." "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
+  for said in "approval stands" "not approved" "nothing was written" "nothing is approved"; do
+    ! grep -qF "${said}" "${home}/stderr" || no "stderr says ${said}: $(cat "${home}/stderr")"
+  done
+  [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file of the check was left: $(ls -a "${home}/approved-specs")"
+  fresh_home
+  rc=0
+  human=$(env SAFEDEPS_HOME="${home}" "${stand_in_cli}" check pypi fixture-clean@1.0.0 2>&1) || rc=$?
+  [[ "${rc}" == 4 ]] || no "the human run exits ${rc}: ${human}"
+  [[ "${human}" == *"in doubt"* && "${human}" != *"not approved"* && "${human}" != *"nothing is approved"* ]] || no "the human run says: ${human}"
+}
+row "a check whose core dies after its rename, its entry replaced since, is in doubt and says neither that the approval stands nor that it does not" killed_after_commit_and_replaced
+
+# An entry no check approved stands at the path, and the check's rename fails:
+# the stand-in removes the staged file before the real core runs. The commit
+# removed the entry before its store line, so though the store vouches for the
+# spec, no entry stands, and advisory.log says both, in that order.
+rename_fails_over_an_entry_no_check_approved() {
+  local entry hash removed_at undone_at
+  stand_in 'rm -f -- "$4"; exec "${core}" "$@"'
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  entry=$(entries "${home}")
+  hash=$(jq -r '.hash' "${entry}")
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "${stand_in_cli}" --json check pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json} $(cat "${home}/stderr")"
+  jq -e '.approved == false and .error == "ledger_write_failed" and (has("ledger_entry_left") or has("ledger_entry_kept") | not)' <<< "${json}" >/dev/null \
+    || no "the report: ${json}"
+  vouched "${home}" | grep -qxF "${hash}" || no "control: the store does not vouch for ${hash}, so the row shows nothing"
+  [[ -z "$(entries "${home}")" ]] || no "an entry stands, and the store vouches for its hash: $(entries "${home}")"
+  removed_at=$(log_at "${home}" "check unvouched-entry-removal hash=${hash} entry=${entry} outcome=removal returned without error")
+  undone_at=$(log_at "${home}" "check approve-undone hash=${hash} outcome=the rename to ${entry} returned OS error 2")
+  [[ -n "${removed_at}" && -n "${undone_at}" && "${removed_at}" -lt "${undone_at}" ]] || no "advisory.log: $(cat "${home}/advisory.log")"
+  [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${home}/approved-specs")"
+}
+row "a check whose rename fails over an entry no check approved leaves no entry, though the store vouches for the spec" rename_fails_over_an_entry_no_check_approved
+
+# The cache lookup reads the store first and the entry after. An entry no check
+# approved stands at the path. A's lookup stops after it read the entry; then B
+# commits the spec: it removes that entry, writes its store line and puts its
+# own entry in place, a copy of the same bytes. A's lookup goes on. It read the
+# store before B's line, so the entry it read is no hit, and A checks the spec
+# again.
+cache_reads_the_store_first() {
+  local hash staged
+  pair
+  SAFEDEPS_HOME="${home_a}" SAFEDEPS_LEDGER_DIR="${ledger}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  hash=$(jq -r '.hash' "$(ledger_entries)")
+  mkdir "${home_a}/pause"
+  launch "${home_a}" PAUSE_DIR="${home_a}/pause" PAUSE_AFTER='--argjson now_epoch'
+  pid_a=$!
+  until_true test -e "${home_a}/pause/waiting" || no "A's lookup did not read the entry: $(cat "${home_a}/stderr")"
+  staged=$(mktemp "${ledger}/.staged.XXXXXX")
+  cp "$(ledger_entries)" "${staged}"
+  printf 'check approve(clean) ecosystem=pypi package=fixture-clean version=1.0.0 hash=%s\n' "${hash}" \
+    | env SAFEDEPS_HOME="${home_b}" "${core}" approvals commit "${hash}" "${staged}" "${ledger}/${hash/:/-}.json" > /dev/null \
+    || no "B's commit did not approve"
+  vouched "${home_a}" | grep -qxF "${hash}" || no "control: the store does not vouch for ${hash}"
+  : > "${home_a}/pause/go"
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  ! grep -q 'check approve(cache)' "${home_a}/advisory.log" || no "A's lookup was a hit on an entry it read before the store vouched for it"
+  grep -qF "check ledger-unvouched ecosystem=pypi package=fixture-clean version=1.0.0 hash=${hash} store=not-vouched" "${home_a}/advisory.log" \
+    || no "A's advisory.log does not say the entry was checked again: $(cat "${home_a}/advisory.log")"
+  stands "${home_a}" "${rc_a}"
+  [[ "$(store_lines)" == 2 ]] || no "the store holds $(store_lines) lines"
+}
+row "the cache lookup reads the store before the entry, so an entry read before a commit vouched for its hash is no hit" cache_reads_the_store_first
+
+# ---- a revoke that meets a commit -------------------------------------------
+#
+# A revoke rewrites an entry, so it runs under the store lock, as a commit
+# does. B looks the spec up and stops at its gate, then A approves the spec: B
+# started before A's approval, so its lookup found nothing and it goes on to
+# commit. B stops inside its commit at its approve line, after its store line
+# and before its rename, holding the lock. A revoke of the spec starts, and
+# while B holds the lock it does not end and the entry stays A's. Then B's core
+# is killed: B put no entry in place and is in doubt, and the revoke takes the
+# lock and revokes the entry A approved. That a commit waits for a revoke that
+# holds the lock is rust-core's: no step of a revoke under the lock can be
+# stopped from here.
+revoke_during_commit() {
+  local core_pid seen=""
+  pair
+  mkdir "${home_b}/gate"
+  launch "${home_b}"
+  pid_b=$!
+  gated "${home_b}"
+  launch "${home_a}"
+  pid_a=$!
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  stands "${home_a}" "${rc_a}"
+  a_entry=$(identity "$(ledger_entries)")
+  stall_log "${home_b}"
+  : > "${home_b}/gate/go"
+  until_true core_below "${pid_b}" >/dev/null || no "B did not reach its commit: $(cat "${home_b}/stderr")"
+  until_true b_moved || no "B did not write its store line: $(cat "${home_b}/stderr")"
+  core_pid=$(core_below "${pid_b}") || no "no core holds B's commit"
+  ( cd "${tmp_root}" && exec env SAFEDEPS_HOME="${home_a}" SAFEDEPS_LEDGER_DIR="${ledger}" \
+      "${ROOT_DIR}/bin/safedeps" --json revoke pypi fixture-clean@1.0.0 > "${home_a}/revoke.out" 2> "${home_a}/revoke.err" < /dev/null ) &
+  revoke_pid=$!
+  # Two seconds is far past what a revoke takes when nothing holds the lock.
+  for _ in $(seq 1 3000); do
+    kill -0 "${revoke_pid}" 2>/dev/null || break
+    if [[ -z "${seen}" ]]; then
+      core_below "${revoke_pid}" revoke >/dev/null && seen=${SECONDS}
+    elif (( SECONDS - seen >= 2 )); then
+      break
+    fi
+    sleep 0.02
+  done
+  kill -0 "${revoke_pid}" 2>/dev/null || no "the revoke ended while B held the store lock: $(cat "${home_a}/revoke.out" "${home_a}/revoke.err")"
+  [[ -n "${seen}" ]] || no "the revoke never reached its core: $(cat "${home_a}/revoke.err")"
+  entry_is_a || no "the entry changed while B held the store lock"
+  unstall_log "${home_b}"
+  kill -KILL "${core_pid}"
+  rc_b=0
+  wait "${pid_b}" || rc_b=$?
+  pid_b=""
+  rc=0
+  wait "${revoke_pid}" || rc=$?
+  revoke_pid=""
+  [[ "${rc}" == 0 ]] || no "the revoke exits ${rc}: $(cat "${home_a}/revoke.out" "${home_a}/revoke.err")"
+  jq -e '.command == "revoke" and .revoked == true' "${home_a}/revoke.out" >/dev/null || no "the revoke's report: $(cat "${home_a}/revoke.out")"
+  [[ "$(ledger_entries | grep -c .)" == 1 ]] || no "the ledger holds: $(ls -a "${ledger}")"
+  jq -e '(.revoked_at // null) != null' "$(ledger_entries)" >/dev/null || no "the entry at the end is not revoked: $(cat "$(ledger_entries)")"
+  [[ -z "$(find "${ledger}" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${ledger}")"
+  failed_as "${home_b}" "${rc_b}" approvals_store_in_doubt
+  staged_in_doubt "${home_b}"
+  [[ "$(store_lines)" == 2 ]] || no "the store holds $(store_lines) lines, not A's and B's"
+}
+# The entry at the path is the file A put in place.
+entry_is_a() { [[ -n "$(ledger_entries)" && "$(identity "$(ledger_entries)")" == "${a_entry}" ]]; }
+# B wrote its store line, or the entry at the path is no longer A's.
+b_moved() { [[ "$(store_lines)" -ge 2 ]] || ! entry_is_a; }
+row "a revoke while a commit holds the store lock waits for it, and the entry at the end is revoked" revoke_during_commit
+
+# A revoke that meets step 0 of a commit. An entry no check approved stands at
+# the path. A revoke of it reads it and stops before its core; then a check of
+# the spec removes the entry, and holds the lock while it says so in
+# advisory.log. The revoke goes on to its core, which waits; the check's core
+# is killed. The revoke's core then finds no entry where it read one, the
+# revoke reads the path again, and it says that no entry stands and revokes
+# nothing.
+revoke_meets_a_removal() {
+  local planted hash core_pid seen=""
+  pair
+  SAFEDEPS_HOME="${home_a}" SAFEDEPS_LEDGER_DIR="${ledger}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  planted=$(identity "$(ledger_entries)")
+  hash=$(jq -r '.hash' "$(ledger_entries)")
+  mkdir "${home_a}/gate" "${home_b}/pause"
+  launch "${home_a}"
+  pid_a=$!
+  gated "${home_a}"
+  ( cd "${tmp_root}" && exec env SAFEDEPS_HOME="${home_b}" SAFEDEPS_LEDGER_DIR="${ledger}" PATH="${gate_bin}:${PATH}" \
+      PAUSE_DIR="${home_b}/pause" PAUSE_AFTER='revoked_at: $revoked_at' \
+      "${ROOT_DIR}/bin/safedeps" --json revoke pypi fixture-clean@1.0.0 > "${home_b}/revoke.out" 2> "${home_b}/revoke.err" < /dev/null ) &
+  revoke_pid=$!
+  until_true test -e "${home_b}/pause/waiting" || no "the revoke did not read the entry: $(cat "${home_b}/revoke.err")"
+  stall_log "${home_a}"
+  : > "${home_a}/gate/go"
+  until_true moved_from "${planted}" || no "the check changed nothing: $(cat "${home_a}/stderr")"
+  core_pid=$(core_below "${pid_a}") || no "no core holds the check's commit"
+  : > "${home_b}/pause/go"
+  # Two seconds is far past what a revoke takes when nothing holds the lock.
+  for _ in $(seq 1 3000); do
+    kill -0 "${revoke_pid}" 2>/dev/null || break
+    if [[ -z "${seen}" ]]; then
+      core_below "${revoke_pid}" revoke >/dev/null && seen=${SECONDS}
+    elif (( SECONDS - seen >= 2 )); then
+      break
+    fi
+    sleep 0.02
+  done
+  kill -0 "${revoke_pid}" 2>/dev/null || no "the revoke ended while the check held the store lock: $(cat "${home_b}/revoke.out" "${home_b}/revoke.err")"
+  [[ -n "${seen}" ]] || no "the revoke never reached its core: $(cat "${home_b}/revoke.err")"
+  unstall_log "${home_a}"
+  kill -KILL "${core_pid}"
+  rc_a=0
+  wait "${pid_a}" || rc_a=$?
+  pid_a=""
+  rc=0
+  wait "${revoke_pid}" || rc=$?
+  revoke_pid=""
+  [[ "${rc}" == 1 ]] || no "the revoke exits ${rc}: $(cat "${home_b}/revoke.out" "${home_b}/revoke.err")"
+  grep -qxF "safedeps: no ledger entry stands at ${ledger}/${hash/:/-}.json now, so nothing was revoked." "${home_b}/revoke.err" \
+    || no "the revoke's stderr: $(cat "${home_b}/revoke.err")"
+  failed_as "${home_a}" "${rc_a}" approvals_store_in_doubt
+  [[ -z "$(ledger_entries)" ]] || no "an entry stands: $(ledger_entries)"
+  [[ "$(store_lines)" == 0 ]] || no "the store holds $(store_lines) lines"
+}
+row "a revoke that meets a check removing an entry no check approved revokes nothing, and says no entry stands" revoke_meets_a_removal
+
+core_missing() {
+  local tree
+  tree=$(mktemp -d "${tmp_root}/no-core.XXXXXX")
+  mkdir -p "${tree}/bin"
+  cp bin/safedeps "${tree}/bin/safedeps"
+  cp -R lib "${tree}/lib"
+  fresh_home
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "${tree}/bin/safedeps" --json check npm fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .approved == false and .error == "core_missing"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+  [[ ! -e "$(store_of "${home}")" ]] || no "a store was made"
+  grep -qE "^safedeps: core-missing: the safedeps-core binary is missing: ${tree}/bin/native/[a-z]+-[a-z0-9]+/safedeps-core is not an executable file\. Repair: reinstall the package\." "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+  grep -qF 'check fail-closed core-missing ecosystem=npm package=fixture-clean version=1.0.0' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+}
+row "a CLI with no core binary approves nothing and names the path it looked at" core_missing
+
 recheck_unknown_status() {
   fresh_home
   check_in pypi fixture-clean@1.0.0
@@ -1087,6 +2105,135 @@ recheck_provider_down() {
   recheck_unanswered
 }
 row "re-check with OSV down is an error of the run, not a skip" recheck_provider_down
+
+# ---- re-check provenance: the approvals store, and nothing else -------------
+#
+# re-check takes an entry's provenance from one read of the approvals store,
+# made by the core (rust/src/approvals.rs). A store line vouches for an entry
+# by the hash recomputed from the entry's own fields. advisory.log is rotated
+# and compacted, so an approve line there vouches for nothing, and an approval
+# the store vouches for stays one when that line is gone. A store that cannot be
+# read, and a CLI with no core to read it with, end the run with a named error:
+# neither is a store that vouches for nothing.
+
+# re-check in HOME, these assignments in its environment: leaves `json` and
+# `rc`, and its stderr in HOME/stderr.
+recheck_in() {
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "$@" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
+}
+# A re-check that could not read the store: exit 4, the named error and no
+# report, a fail-closed line, and the entry neither revoked nor removed.
+recheck_unproven() {
+  local error="$1" said="$2" entry
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -es --arg error "${error}" 'length == 1 and .[0] == {command: "re-check", error: $error}' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -q "re-check fail-closed ${said}\$" "${home}/advisory.log" || no "advisory.log has no fail-closed line: $(cat "${home}/advisory.log")"
+  entry=$(find "${home}/approved-specs" -name '*.json' -type f)
+  [[ -n "${entry}" ]] || no "the entry was removed"
+  jq -e '(.revoked_at // "") == ""' "${entry}" >/dev/null || no "the entry was revoked"
+}
+recheck_log_line_is_no_provenance() {
+  local hash
+  fresh_home
+  hash=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 | jq -r '.hash')
+  printf '[2026-11-20T00:00:00Z] check approve(clean) ecosystem=pypi package=fixture-clean version=1.0.0 hash=%s\n' "${hash}" >> "${home}/advisory.log"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.checked == 1 and .still_clean == 1
+    and .suspected_forgery == [{ecosystem: "pypi", package: "fixture-clean", version: "1.0.0", hash: $hash, reason: "unvouched"}]
+    and .approvals_store == {present: false, broken: 0, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "an approve line in advisory.log vouches for nothing: an entry the store has no line for is a suspected forgery" recheck_log_line_is_no_provenance
+recheck_store_outlives_the_log() {
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  rm -f "${home}/advisory.log"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 1 and .suspected_forgery == []
+    and .approvals_store == {present: true, broken: 0, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "an approval the store vouches for is no forgery when advisory.log no longer holds its approve line" recheck_store_outlives_the_log
+recheck_spec_is_no_provenance() {
+  local ctx hash
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  ctx="${home}/context.json"
+  jq -n '{type: "npm-overrides-probe", context_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    project_root: "/p", overrides_source: "package.json", overrides_sha256: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    overrides: {"fixture-clean": "1.0.0"}}' > "${ctx}"
+  hash=$(SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 1.0.0 test "" "" "" "${ctx}" | jq -r '.hash')
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e --arg hash "${hash}" '.checked == 2 and .still_clean == 2
+    and .suspected_forgery == [{ecosystem: "pypi", package: "fixture-clean", version: "1.0.0", hash: $hash, reason: "unvouched"}]
+    and .approvals_store == {present: true, broken: 0, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "an approval of a spec in one project context vouches for nothing in another" recheck_spec_is_no_provenance
+recheck_store_unreadable() {
+  local store
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  store=$(store_of "${home}")
+  chmod 000 "${store}"
+  recheck_in
+  chmod 600 "${store}"
+  recheck_unproven approvals_store_unreadable approvals-store-unreadable
+  grep -qF "safedeps-core approvals: ${store} could not be read: " "${home}/stderr" || no "stderr: $(cat "${home}/stderr")"
+}
+row "a re-check of an approvals store it may not read judged nothing and says so" recheck_store_unreadable
+recheck_core_missing() {
+  local tree
+  tree=$(mktemp -d "${tmp_root}/no-core.XXXXXX")
+  mkdir -p "${tree}/bin"
+  cp bin/safedeps "${tree}/bin/safedeps"
+  cp -R lib "${tree}/lib"
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" "${tree}/bin/safedeps" --json re-check 2>"${home}/stderr") || rc=$?
+  recheck_unproven core_missing core-missing
+  grep -qE "^safedeps: core-missing: the safedeps-core binary is missing: ${tree}/bin/native/[a-z]+-[a-z0-9]+/safedeps-core is not an executable file\. Repair: reinstall the package\. " "${home}/stderr" \
+    || no "stderr: $(cat "${home}/stderr")"
+}
+row "a re-check with no core binary judged nothing and names the path it looked at" recheck_core_missing
+recheck_broken_store_lines() {
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the check exits ${rc}: ${json}"
+  printf 'not a record\n{"at":"2026-11-20T00:00:00Z"}\n' >> "$(store_of "${home}")"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 1 and .suspected_forgery == []
+    and .approvals_store == {present: true, broken: 2, unmatched: 0}' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -q 're-check approvals-store broken-lines=2$' "${home}/advisory.log" || no "advisory.log: $(cat "${home}/advisory.log")"
+  rc=0
+  env SAFEDEPS_HOME="${home}" NO_COLOR=1 ./bin/safedeps re-check > "${home}/human" 2>&1 || rc=$?
+  [[ "${rc}" == 0 ]] || no "the human run exits ${rc}: $(cat "${home}/human")"
+  grep -q '2 lines of the approvals store vouch for nothing' "${home}/human" || no "the human run: $(cat "${home}/human")"
+}
+row "store lines that vouch for nothing are counted, said in advisory.log and shown to a person" recheck_broken_store_lines
+recheck_unmatched() {
+  local gone
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first check exits ${rc}: ${json}"
+  gone=$(jq -r '.spec_hash' <<< "${json}")
+  check_in pypi fixture-revoked@1.0.0
+  [[ "${rc}" == 0 ]] || no "the second check exits ${rc}: ${json}"
+  SAFEDEPS_HOME="${home}" ./bin/safedeps revoke pypi fixture-revoked@1.0.0 --reason test >/dev/null 2>&1 || no "the revoke failed"
+  rm -f "${home}/approved-specs/${gone/:/-}.json"
+  recheck_in
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 0 and .suspected_forgery == []
+    and .approvals_store == {present: true, broken: 0, unmatched: 1}' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "a store line no ledger entry stands for is unmatched, and a revoked entry still stands for its line" recheck_unmatched
 
 plant_entry() {
   local filter="$1" file
@@ -1481,7 +2628,6 @@ row "npm: a report jq printed and failed on writes nothing" fails_as not_written
 row "non-npm: a report jq printed and failed on writes nothing" fails_as not_written pypi fixture-clean@1.0.0 'install_hint:install_hint($version)'
 row "npm patched: a report jq printed and failed on writes nothing" fails_as not_written npm fixture-vuln@1.0.0 'install_hint:install_hint($patched)'
 row "non-npm patched: a report jq printed and failed on writes nothing" fails_as not_written pypi fixture-vuln@1.0.0 'install_hint:install_hint($patched)'
-row "an entry mv moved and then failed on is taken back" fails_as not_written npm fixture-clean@1.0.0 'approved-specs' STUB_TOOL_ONLY=mv
 # jq, and once the report has been made the record can no longer be written.
 record_stub="${tmp_root}/record-stub"
 mkdir -p "${record_stub}"
@@ -1501,10 +2647,10 @@ record_refused() {
   jq -e '.approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
   [[ -z "$(find "${home}/approved-specs" -name '*.json' -type f 2>/dev/null)" ]] || no "a ledger entry stands with no record"
 }
-row "npm: an approval the record could not take is taken back" record_refused npm fixture-clean@1.0.0
-row "non-npm: an approval the record could not take is taken back" record_refused pypi fixture-clean@1.0.0
-row "npm patched: an approval the record could not take is taken back" record_refused npm fixture-vuln@1.0.0
-row "non-npm patched: an approval the record could not take is taken back" record_refused pypi fixture-vuln@1.0.0
+row "npm: an approval the record could not take puts no entry in place" record_refused npm fixture-clean@1.0.0
+row "non-npm: an approval the record could not take puts no entry in place" record_refused pypi fixture-clean@1.0.0
+row "npm patched: an approval the record could not take puts no entry in place" record_refused npm fixture-vuln@1.0.0
+row "non-npm patched: an approval the record could not take puts no entry in place" record_refused pypi fixture-vuln@1.0.0
 
 # What the report is read from.
 row "npm: a vulnerable count jq printed and failed on is no count" fails_as unavailable npm fixture-clean@1.0.0 'select(.status == status_vulnerable)] | length'
@@ -1613,6 +2759,16 @@ ledger_listing_control() {
   jq -e '.count == 1' <<< "${json}" >/dev/null || no "the report: ${json}"
 }
 row "control: a ledger that lists is read whole" ledger_listing_control
+# The approvals store's index is read whole, or the run judged nothing: the jq
+# that holds the core's answer to the shape of an index answers by its exit
+# status, whatever it printed.
+recheck_index_unread() {
+  ledger_listed
+  recheck_in PATH="${after_path}" STUB_MATCH='approvals_index_whole' STUB_TOOL_ONLY=jq "$@"
+  recheck_unproven approvals_store_unreadable approvals-store-unreadable
+}
+row "a store index jq printed and failed on is no store" recheck_index_unread
+row "a store index jq failed on before printing is no store" recheck_index_unread STUB_BEFORE=1
 
 # What the closure is read from.
 yarn_project() {
@@ -1884,7 +3040,21 @@ revoke_faulted() {
 row "a revoked entry jq printed and failed on is not reported revoked" revoke_faulted 'revoked_reason: $reason'
 row "a revoked entry jq failed on before printing is not reported revoked" revoke_faulted 'revoked_reason: $reason' STUB_BEFORE=1
 row "a revoke with no clock is not reported revoked" revoke_faulted '%Y-%m-%dT%H:%M:%SZ' STUB_TOOL_ONLY=date
-row "a revoked entry that could not be written is not reported revoked" revoke_faulted 'approved-specs' STUB_TOOL_ONLY=mv STUB_BEFORE=1
+# A ledger the revoke cannot write in: nothing is staged, and the entry is as
+# it was.
+revoke_unwritable() {
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  chmod 500 "${home}/approved-specs"
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" ./bin/safedeps --json revoke pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  chmod 700 "${home}/approved-specs"
+  [[ "${rc}" != 0 ]] || no "the revoke exits 0: ${json}"
+  [[ -z "${json}" ]] || jq -e '.revoked != true' <<< "${json}" >/dev/null || no "the report says revoked: ${json}"
+  jq -e '(.revoked_at // null) == null' "${home}"/approved-specs/*.json >/dev/null || no "the entry was revoked"
+  [[ -z "$(find "${home}/approved-specs" -name '.*' 2>/dev/null)" ]] || no "a file was left beside the entry: $(ls -a "${home}/approved-specs")"
+}
+row "a revoked entry that could not be written is not reported revoked" revoke_unwritable
 misses_run() {
   local closure index
   closure=$(mktemp "${tmp_root}/closure.XXXXXX")

@@ -354,7 +354,7 @@ $ safedeps doctor --fix
 - **`safedeps hooks install`**는 repo 로컬 훅(`core.hooksPath = .githooks`)을 활성화합니다.
 - **pre-commit 훅은 두 가지 검사 실행**:
   - **시크릿 스캔** (`safedeps scan secrets --staged`) — 매 커밋마다 실행, **fail-closed**. 로컬 `gitleaks` 또는 Docker 스캐너가 실행 불가하면 무시하지 않고 커밋을 차단합니다.
-  - 지원 lockfile이 있는 repo에서 **매 커밋마다 의존성 감사** (`safedeps audit`)를 실행. 있는 lockfile에서 ecosystem을 자동 감지해 — npm(`package-lock.json`), pnpm(`pnpm-lock.yaml`), yarn(`yarn.lock`), bun(`bun.lock`) — 각 도구의 네이티브 audit에 위임합니다. 이는 취약한 직접 또는 전이 의존성을 잡습니다. 특히 설치 당시에는 안전했으나 나중에 CVE가 공개된 경우(“그때는 괜찮았는데 지금은 위험”)도 잡아낼 수 있습니다. lockfile 변경 시점만이 아니라 매 커밋마다 실행하는 이유가 바로 여기에 있습니다. advisory DB를 재조회해 새로 공개된 CVE를 바로 다음 커밋에서 감지합니다. 판정과 가용성 실패는 분리되어 처리되며, 실제 탐지는 **차단**하고 advisory DB가 **접근 불가**(오프라인/레지스트리 오류)인 경우에는 **경고 후 커밋 통과**합니다. 이는 가시적인 가용성 폴백이며 조용한 생략이 아닙니다. (CI와 daily watch가 오프라인 커밋에서 못 본 부분을 보완합니다.)
+  - 지원 lockfile이 있는 repo에서 **매 커밋마다 의존성 감사** (`safedeps audit`)를 실행. 있는 lockfile에서 ecosystem을 자동 감지해 — npm(`package-lock.json`), pnpm(`pnpm-lock.yaml`), yarn(`yarn.lock`), bun(`bun.lock`) — 각 도구의 네이티브 audit에 위임합니다. 이는 취약한 직접 또는 전이 의존성을 잡습니다. 특히 설치 당시에는 안전했으나 나중에 CVE가 공개된 경우(“그때는 괜찮았는데 지금은 위험”)도 잡아낼 수 있습니다. lockfile 변경 시점만이 아니라 매 커밋마다 실행하는 이유가 바로 여기에 있습니다. advisory DB를 재조회해 새로 공개된 CVE를 바로 다음 커밋에서 감지합니다. 판정과 가용성 실패는 분리되어 처리되며, 실제 탐지는 **차단**하고 advisory DB가 **접근 불가**(오프라인/레지스트리 오류)인 경우에는 **경고 후 커밋 통과**합니다. 이는 가시적인 가용성 폴백이며 조용한 생략이 아닙니다. (CI와 watch가 오프라인 커밋에서 못 본 부분을 보완합니다.)
 
   유일한 의도된 우회는 `git commit --no-verify`이며, 이는 사용자가 직접 결정합니다.
 
@@ -500,24 +500,163 @@ node scripts/install/install-safedeps-hooks.mjs
 
 에이전트 폴더 자체를 canonical 로컬 소스로 사용하려면 앞서의 GitHub 설정 방식을 사용하세요.
 
-### Daily Watch With macOS Alerts
+### Approvals Store 및 마이그레이션
 
-daily watch를 하루 한 번 실행하기 위해 사용자별 LaunchAgent를 설치합니다.
+`safedeps`는 승인 출처 기록을 `${SAFEDEPS_HOME}/approvals.jsonl`에 저장합니다(기본값 `~/.safedeps/approvals.jsonl`, 별도 환경 변수는 없습니다). 이 저장소는 추가 전용(append-only)이며, `safedeps`는 파일을 rotate, compact, truncate, rename하거나 다시 쓰지 않습니다. 새로 승인된 `clean`, `patched`, `clean closure`, `patched closure` 항목마다 `at`, `hash`, `via`, `record` 필드를 담은 JSONL 레코드가 덧붙으며, `hash`는 ecosystem, package, version, 프로젝트 컨텍스트를 포함합니다. cache hit는 유효한 ledger 항목 해시와 `approvals.jsonl`의 보증이 모두 있을 때만 인정되며, cache hit 자체는 저장소에 기록을 추가하지 않습니다. `re-check`는 출처 확인에 `approvals.jsonl`만 읽고 `advisory.log`나 아카이브로 fallback하지 않으며, 보증되지 않은 항목은 `unvouched` 사유로 보고합니다. ledger와 서명 없는 이 저장소는 같은 사용자 환경에서의 편의 캐시일 뿐, 같은 사용자 권한의 공격자를 막는 변조 방지 보안 경계는 아닙니다.
+
+업그레이드한 뒤 `approvals.jsonl`이 보증하지 않는 기존 ledger 항목은 마이그레이션하거나 다시 확인하기 전까지 항목당 한 번씩 provider 재조회를 포함해 처음부터 다시 검사합니다. provider 호출 없이 기존 감사 로그에서 검증된 승인 기록을 옮기려면 업그레이드 후 마이그레이션을 한 번 실행하세요. 마이그레이션은 항상 현재 `advisory.log`를 먼저 읽은 뒤 사용자가 지정한 아카이브 파일을 읽으며(`.gz` 파일은 `gzip -dc`로 읽음), 아카이브를 자동으로 찾지 않습니다. 필요한 기존 아카이브 경로를 지정해 실행합니다(이전 npm-reorg 상태용 `safedeps migrate`와는 다른 명령입니다).
 
 ```bash
-node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0 \
+safedeps --json approvals migrate /path/to/advisory.log.archive.gz
+```
+
+`approve_lines`가 포함된 모든 마이그레이션 보고서에는 `inserted`, `not_inserted`, `duplicates`, `unconfirmed`, `taken_back` 다섯 개 수치가 들어가며, 수치를 알 수 있을 때 이 다섯 값의 합은 `approve_lines`와 같습니다(성공 시 `not_inserted`는 `0`). `cache`, `broken`, `torn` 줄은 따로 세며 가져오지 않습니다. cache 기록만 있는 항목은 `check`를 다시 실행하세요. 확인되지 않은 해시에는 `no_entry`, `not_an_entry`, `hash_mismatch` 사유가 함께 기록되며, 마이그레이션을 다시 실행해도 멱등하게 동작해 이전에 넣은 항목은 `duplicates`로 셉니다.
+
+쓰기 전 실패(`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`)는 아무것도 쓰지 않고 끝납니다(`inserted: 0`). 쓰기 실패(`approvals_store_write_failed`)는 같은 lock 안에서 자신이 쓴 해시를 다시 읽어 `inserted`와 `not_inserted`를 계산하며, 다시 읽기에 실패하면 둘 다 `"unknown"`으로 두고 `reread_outcome`을 함께 보고합니다. 끝에 잘린 줄이 남으면 다음 쓰기 때 broken 줄로 봉인합니다. `approvals_store_unsynced`는 줄을 썼지만 sync에 실패한 상태이며 여전히 실패로 처리합니다. 마이그레이션 실패와 사용법 오류는 CLI에서 종료 코드 `4`로 끝납니다(core는 실패 시 `1`, 사용법 오류 시 `2`). 마이그레이션은 안전하게 재시도할 수 있으며, 부분 성공은 성공이 아닙니다. `re-check`에서 저장소를 읽을 수 없으면 `approvals_store_unreadable`(종료 코드 `4`, 판정 없음)을, `safedeps-core` 바이너리가 없으면 `core_missing`(종료 코드 `4`, 누락된 경로 포함)을 반환합니다. 마이그레이션 JSON의 `outcome`과 `reread_outcome` 필드는 구식 `os-error-N`/`no-os-code` 라벨 대신 `Outcome::describe` 텍스트를 담으며, 모든 상태 오류 이름과 종료 값은 변하지 않습니다.
+
+ledger 디렉터리 하나는 하나의 `SAFEDEPS_HOME` 저장소에 속합니다. 여러 home 사이에서 `SAFEDEPS_LEDGER_DIR`을 공유하는 동작은 막지 않으며 서로 다른 저장소의 lock도 직렬화되지 않으므로, 한 home의 커밋이 다른 home의 보증되지 않은 항목을 지울 수 있습니다.
+
+### Re-checking What Is Already Installed
+
+설치 시점 게이트는 패키지를 설치할 때 한 번 판정합니다. 그 뒤에 공개된 advisory는 무언가가 다시 검사해야 보입니다. `safedeps watch scan`이 그 검사입니다. 모델이 필요 없습니다. ledger를 다시 검사하고, 프로젝트의 lockfile을 읽고, OSV에 묻습니다. 하루 두 번 실행합니다. 기본값은 현지 시각 09:00과 21:00입니다. 그래서 어느 시각에 공개된 advisory든 대략 반나절 안에 보이고, 컴퓨터가 잠든 사이 놓친 시각 뒤에도 다음 시각이 옵니다.
+
+누가 실행할지는 호스트가 고릅니다.
+
+- **내 컴퓨터에서 도는 에이전트의 예약 기능**이 첫 번째입니다. 그러면 에이전트가 scan이 찾은 것을 고치기까지 할 수 있습니다. branch에서, 내 테스트와 함께 고치고, 내가 말할 때만 merge합니다. 에이전트는 [SKILL.md의 "Re-checking what is already installed"](./SKILL.md#re-checking-what-is-already-installed)를 따라 이 선택지를 제안합니다.
+- 그렇지 않으면 **운영체제의 예약 기능**입니다. macOS는 launchd, Linux는 systemd 사용자 타이머 또는 cron, Windows는 작업 스케줄러입니다. 각각의 명령은 아래에 있습니다. 이 경우 에이전트는 세션을 시작할 때 scan이 찾은 것을 읽습니다.
+- **클라우드에서 도는 예약 기능은 쓰지 않습니다.** scan은 내 컴퓨터의 lockfile을 읽고 상태도 거기에 씁니다. 클라우드 실행은 둘 다 읽지 못합니다.
+
+아래의 운영체제 예약 기능은 모두 같은 wrapper, `scripts/safedeps-recheck-alert.sh`를 실행합니다. 에이전트 루틴이 scan을 실행하든 이 예약 기능 중 하나가 실행하든, 어떤 프로젝트를 읽을지는 scan에 한 번 알려 주어야 합니다. 그렇게 하기 전까지 scan에는 프로젝트 목록이 없으며, 요약 줄은 `population missing 0`으로 표시되고 어떤 프로젝트의 lockfile도 읽지 않습니다. 아래 명령을 운영체제와 상관없이 패키지 디렉터리(또는 clone)에서 한 번 실행합니다:
+
+```bash
+cd "$(npm root -g)/@aldegad/safedeps"
+node scripts/install/install-safedeps-recheck-agent.mjs configure \
   --population-command /usr/local/bin/list-projects \
   --exclude /Volumes/share \
   --followup remote_mount=remote-mount-plan
 ```
 
-`--population-command`는 프로젝트 root 목록을 출력하는 명령의 절대 경로입니다. 이 명령은 한 줄에 `name<TAB>path` 하나를 출력합니다. `--exclude`는 scan이 절대 읽지 않는 절대 경로 prefix입니다. `--followup KIND=PLAN`은 측정되지 않은 kind를 맡는 plan을 지정합니다. `--tool-path DIR`은 node, pnpm, yarn, bun이 있는 디렉터리를 지정합니다. launchd의 PATH에는 pnpm, yarn, bun이 없으므로 installer가 이들의 디렉터리를 기록합니다. `--tool-path`가 없으면 installer 자신의 PATH에서 찾습니다. 지정하지 않은 옵션은 기존 값을 유지합니다. `configure`는 재설치 없이 watch 옵션만 기록합니다.
+`--population-command`는 프로젝트 root 목록을 출력하는 명령의 절대 경로입니다. 이 명령은 한 줄에 root 하나를 `name<TAB>path` 형식이나 절대 경로만으로 출력합니다. `--exclude`는 scan이 절대 읽지 않는 절대 경로 prefix입니다. `--followup KIND=PLAN`은 측정되지 않은 kind를 맡는 plan을 지정합니다. `--tool-path DIR`은 node, pnpm, yarn, bun이 있는 디렉터리를 지정합니다. 예약 기능의 PATH에는 pnpm, yarn, bun이 없을 수 있으므로 installer가 이들의 디렉터리를 기록합니다. `--tool-path`가 없으면 installer 자신의 PATH에서 찾습니다. 지정하지 않은 옵션은 기존 값을 유지합니다. `install`도 같은 옵션을 받습니다.
 
-agent의 wrapper는 `safedeps --json watch scan`을 실행합니다. 한 번의 실행은 세 가지 일을 순서대로 합니다.
+첫 실행 뒤에는 `safedeps watch status`로 지정한 프로젝트가 포함되었는지 확인합니다. 요약 줄에서 `population fresh <count>`와 `roots walked N/M`을 봅니다. `population fresh <count>`는 명령이 0으로 종료하고 root를 하나 이상 출력했음을 뜻합니다. `<count>`는 명령이 출력한 root 수입니다. `roots walked N/M`에서 M은 scan이 열 수 있었던 root 수이고, N은 그중 끝까지 읽은 root 수입니다. 둘 다 `<count>`보다 클 수 없습니다. root가 네트워크 마운트에 있거나, 제외한 prefix(`--exclude`) 아래에 있거나, 접근할 수 없을 때 M이 낮아집니다. root의 walk가 끝나지 않았을 때 N이 낮아집니다.
 
-1. 이전의 일일 작업이 하던 대로 ledger re-check를 실행합니다.
+#### macOS: launchd
+
+```bash
+node scripts/install/install-safedeps-recheck-agent.mjs install
+```
+
+이 명령은 09:00과 21:00에 scan을 실행하는 사용자별 LaunchAgent를 등록합니다. `--times 07:30,19:30`은 다른 시각을 지정하고, `--hour`/`--minute`은 여전히 한 시각을 지정합니다. 이것들 없이 다시 설치하면 09:00과 21:00으로 돌아가므로, 매번 같은 시각을 넘깁니다. Mac이 어떤 시각 동안 잠들어 있었다면 launchd는 깨어날 때 작업을 한 번 실행합니다(출처: `man launchd.plist`, `StartCalendarInterval`).
+
+agent는 installer가 `~/.safedeps/agent`에 만든 CLI 사본을 실행합니다. `install --runtime-only`는 그 사본을 만들고 watch 옵션을 기록하며, launchd에는 아무것도 쓰거나 load하거나 시작하지 않습니다. 예약 기능이 에이전트의 루틴이나 cron인 호스트에서 이것을 씁니다. 그러면 runtime을 새로 만들어도 launchd agent가 되살아나지 않습니다. `uninstall`은 LaunchAgent를 unload하고 plist를 지웁니다. `~/.safedeps/agent`의 runtime과 `~/.safedeps` 아래 watch의 state와 config는 남깁니다.
+
+macOS는 launchd 작업이 읽을 수 있는 것을 제한합니다. launchd는 `#!/usr/bin/env bash`로 시작하는 스크립트인 wrapper를 시작하고, macOS는 그 작업의 책임 프로세스를 `/usr/bin/env`로 잡습니다. 그 프로세스에는 전체 디스크 접근 권한이 없으므로, scan은 `~/Documents`처럼 macOS가 보호하는 폴더 아래를 읽지 못합니다. safedeps는 `/usr/bin/env`에 전체 디스크 접근 권한을 주라고 하지 않습니다. 그러면 `env`로 시작하는 모든 프로그램이 그 권한을 함께 얻기 때문입니다. scan은 읽지 못한 것을 보고합니다. 첫 실행 뒤 `safedeps watch status`는 `roots walked N/M (K incomplete)`를 보여 주며, K가 0보다 크면 프로젝트 폴더 K개를 끝까지 읽지 못했다는 뜻입니다. 프로젝트를 보호 폴더 밖에 두거나, 그 폴더를 읽도록 허락한 앱에서 에이전트의 로컬 예약 기능이 scan을 실행하게 합니다. 그런 다음 다음 실행 뒤에 `roots walked`를 다시 읽습니다.
+
+#### Linux: a systemd user timer, or cron
+
+`npm install -g @aldegad/safedeps` 뒤에 셸에서 실행합니다. 이 명령은 service 하나와 `OnCalendar=` 줄이 두 개인 timer 하나를 씁니다. `Persistent=true`는 기계가 꺼져 있던 동안 놓친 시각을 timer가 다시 시작할 때 한 번 실행합니다(출처: https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html, 2026-11-23 확인).
+
+```bash
+wrapper="$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/safedeps-watch.service <<EOF
+[Unit]
+Description=safedeps watch scan
+
+[Service]
+Type=oneshot
+ExecStart=${wrapper}
+EOF
+cat > ~/.config/systemd/user/safedeps-watch.timer <<'EOF'
+[Unit]
+Description=safedeps watch scan at 09:00 and 21:00
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+OnCalendar=*-*-* 21:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl --user daemon-reload
+systemctl --user enable --now safedeps-watch.timer
+systemctl --user list-timers safedeps-watch.timer
+```
+
+사용자 timer는 로그인해 있는 동안 돕니다. `loginctl enable-linger "$USER"`는 로그아웃한 뒤에도 사용자 manager를 계속 돌게 합니다(출처: https://www.freedesktop.org/software/systemd/man/latest/loginctl.html, 2026-11-23 확인). timer를 지우려면:
+
+```bash
+systemctl --user disable --now safedeps-watch.timer
+rm ~/.config/systemd/user/safedeps-watch.service ~/.config/systemd/user/safedeps-watch.timer
+systemctl --user daemon-reload
+```
+
+이 systemd 명령은 메인테이너가 Linux 호스트에서 실행해 보지 않았습니다. systemd 사용자 인스턴스가 없는 곳에서는 대신 crontab 두 줄을 넣습니다. cron은 기계가 잠들었거나 꺼져 있던 시각을 실행하지 않고, PATH가 짧으므로 `configure --tool-path`로 도구 디렉터리를 기록합니다.
+
+두 명령 모두 먼저 `crontab -l`로 기존 crontab을 읽습니다. 등록 명령은 `# safedeps-watch`로 끝나는 줄을 모두 빼고 나머지 줄은 유지한 뒤 09:00과 21:00 두 줄을 추가하므로, 다시 실행해도 watch 줄은 네 줄이 아니라 두 줄만 남습니다. 삭제 명령은 `# safedeps-watch`로 끝나는 줄을 모두 빼고 나머지 줄은 유지합니다. 계정에 crontab이 없어 `crontab -l`이 `no crontab for <user>`를 출력하면, 등록 명령은 빈 테이블에서 시작하고 삭제 명령은 아무것도 쓰지 않습니다. 다른 이유로 `crontab -l`이 실패하면 두 명령 모두 아무것도 쓰지 않습니다. 각각 crontab이 출력한 메시지와 `crontab -l failed; nothing was written`을 출력한 뒤 0이 아닌 코드로 종료합니다. 두 줄을 등록하려면:
+
+```bash
+wrapper="$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then tab="$d/tab"
+  elif grep -q 'no crontab for' "$d/err"; then tab=/dev/null
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$tab" > "$d/new" &&
+    printf '0 9 * * * %s # safedeps-watch\n0 21 * * * %s # safedeps-watch\n' "$wrapper" "$wrapper" >> "$d/new" &&
+    crontab - < "$d/new"
+) && crontab -l
+```
+
+두 줄을 지우려면:
+
+```bash
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then :
+  elif grep -q 'no crontab for' "$d/err"; then exit 0
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$d/tab" > "$d/new" && crontab - < "$d/new"
+)
+```
+
+`no crontab for` 문구는 macOS `crontab`, cronie, Debian의 cron이 출력하는 메시지와 일치합니다(출처: macOS 13, 26, 27의 `/usr/bin/crontab`; cronie `src/crontab.c`, `list_cmd`, https://github.com/cronie-crond/cronie/blob/master/src/crontab.c; Debian cron `crontab.c`, `list_cmd`, https://salsa.debian.org/debian/cron/-/blob/master/crontab.c; 2026-11-23 확인). 다른 줄이 남지 않으면 삭제 명령은 빈 crontab을 씁니다. 이전에 crontab이 없던 계정에는 crontab이 없는 상태가 아니라 빈 crontab이 남습니다.
+
+두 명령은 2026-11-23에 macOS 13(x86_64)과 macOS 27(arm64)에서 bash 3.2, zsh 5.9, dash로 스크립트 실행과 대화형 bash 및 zsh 붙여넣기로 시험했습니다. PATH에 crontab 프로그램이 없는 상태에서 셸 함수로 `crontab`을 대신했으므로 실제 crontab은 건드리지 않았습니다. 테이블에 관련 없는 줄이 하나 있을 때 등록을 두 번 실행하면 그 줄과 watch 두 줄이 남았습니다. 읽기가 실패한 경우(출력 없이 종료 코드 2, 또는 다른 메시지와 함께 종료 코드 1)에는 등록과 삭제 모두 아무것도 쓰지 않았고, 테이블은 바이트 단위로 그대로 남았으며 종료 코드 1로 끝났습니다. crontab이 없을 때는 등록이 두 줄을 썼고 삭제는 아무것도 쓰지 않았습니다. 예약 실행, Linux에서의 실행, 실제 crontab을 대상으로 한 실행은 측정하지 않았습니다.
+
+#### Windows: Task Scheduler
+
+safedeps는 WSL 안에서 돕니다. wrapper의 경로는 WSL 셸에서 `echo "$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"`로, 배포판 이름은 `wsl -l -v`로 찾습니다. `schtasks /Create`는 작업 하나에 일정 하나를 받으므로, 두 시각은 작업 두 개가 됩니다(출처: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create, 2026-11-23 확인). Windows 터미널에서 `<distro>`와 `<wrapper>`를 채워 실행합니다.
+
+```bat
+schtasks /Create /TN safedeps-watch-0900 /SC DAILY /ST 09:00 /TR "wsl.exe -d <distro> -- bash -lc <wrapper>"
+schtasks /Create /TN safedeps-watch-2100 /SC DAILY /ST 21:00 /TR "wsl.exe -d <distro> -- bash -lc <wrapper>"
+schtasks /Query /TN safedeps-watch-0900 /V /FO LIST
+```
+
+`/RU` 없이 이렇게 만든 작업은 내 계정으로, 내가 로그온해 있는 동안에만 돕니다. `schtasks /Query /V`는 이 작업을 `Logon Mode: Interactive only`로 읽어 오며, Microsoft 페이지는 이것을 사용자가 로그온해 있을 때만 도는 작업의 모드로 설명합니다. 로그오프한 동안에도 돌리려면 `/RU <user> /RP <password>`로 만들어 비밀번호를 작업에 저장하거나, `/RU <user> /NP`로 만들어 비밀번호를 저장하지 않고 로컬 자원만 쓰는 비대화형으로 돌립니다(출처: 위 페이지의 `/it`, `/rp`, `/np` 파라미터). 둘 다 `wsl.exe`로는 측정하지 않았습니다. 지우려면(출처: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-delete, 2026-11-23 확인):
+
+```bat
+schtasks /Delete /TN safedeps-watch-0900 /F
+schtasks /Delete /TN safedeps-watch-2100 /F
+```
+
+이 명령은 Windows 10에서 한 번 실행했습니다. 두 작업이 만들어졌고, 위의 동작으로 매일 09:00과 21:00에 도는 것으로 읽혔고, 지워졌고, 그 뒤에는 찾을 수 없었습니다. 조회 결과에는 `Power Management: Stop On Battery Mode, No Start On Batteries`도 있었으므로, 배터리로 도는 노트북에서는 그 시각에 작업이 시작되지 않습니다. `wsl.exe`를 통한 예약 실행은 측정하지 않았습니다.
+
+#### What a run does
+
+wrapper `scripts/safedeps-recheck-alert.sh`는 `safedeps --json watch scan`을 실행합니다. 한 번의 실행은 세 가지 일을 순서대로 합니다.
+
+1. ledger re-check를 실행합니다.
 2. 등록된 프로젝트 root 목록을 갱신하고, 읽을 수 있는 각 root 아래의 lockfile을 판정합니다.
 3. macOS 시스템 경로와 SDKMAN 아래에 있는 host JDK의 업데이트 상태를 보고합니다. 이것은 상태이지 advisory 판정이 아닙니다.
+
+ledger re-check는 실행할 때마다 모든 ledger 항목을 OSV에 live로 다시 묻습니다. 답은 실행 사이에 남기지 않습니다. 그래서 전체 scan의 시간은 ledger 항목 수에 비례하고, ledger가 크면 몇 시간이 걸릴 수 있습니다. GHSA는 보강이지 판정이 아닙니다. `GITHUB_TOKEN`이 없으면 GitHub의 비인증 요청 한도에 걸려 실행 도중부터 GHSA 교차 확인을 건너뜁니다. 건너뛴 요청마다 `advisory.log`에 WARN 줄이 남고, 판정은 여전히 OSV가 합니다. `GITHUB_TOKEN`을 설정하면 그 한도가 올라갑니다. scan은 실행 내내 watch lock을 쥐므로, 그동안 수동 `safedeps re-check`는 `75`(busy)로 끝납니다.
 
 scan은 root 아래의 어떤 것도 열기 전에 모든 root를 mount table과 exclude prefix에 대조해 분류합니다. 네트워크 mount와 exclude된 prefix는 절대 읽지 않습니다. scan은 이들을 세고 미측정으로 보고합니다. `Cargo.lock`이나 `go.sum`처럼 아직 resolver가 없는 lockfile 종류도 미측정 행이 됩니다. 이것은 clean이 아닙니다.
 
@@ -525,7 +664,13 @@ scan은 root 아래의 어떤 것도 열기 전에 모든 root를 mount table과
 
 모든 실행은 요약 줄 하나를 출력합니다. 이 줄은 `osv measured` 앞에 walk를 `roots walked N/M (K incomplete)` 형식으로 표시합니다. N은 walk가 끝난 `ok` 클래스의 root인 `roots_walked`입니다. K는 walk가 끝나지 않은 `ok` 클래스의 root인 `roots_walk_incomplete`입니다. M은 N + K입니다. 괄호 안 부분은 `(0 incomplete)`인 경우에도 항상 표시합니다. root를 읽지 않은 경우 `osv measured 0`은 "아무것도 찾지 못함"을 의미하지 않습니다. scan이 agent runtime이 stale인지 판단할 수 없으면 이 줄은 `; agent runtime stale unknown (<error>)`로 끝나며, 여기서 `<error>`는 `last_scan.runtime.error`입니다. `complete`는 population이 fresh이고, 측정되지 않은 항목이 없으며, 차단된 항목이 없을 때만 true입니다.
 
-scan은 결과를 `~/.safedeps/watch/state.json`에 게시합니다. 각 래퍼 실행은 `runtime_version`이 포함된 한 줄을 `~/.safedeps/recheck.log`에 기록합니다. 경고는 `~/.safedeps/recheck-alerts.jsonl`과 macOS 알림으로 전달됩니다. 래퍼는 새로운 이벤트가 있거나, population이 fresh가 아니거나, 실행에 오류가 있거나, agent runtime이 stale일 때 실행당 한 번 경고합니다. 알림에는 `<n> new, population <state>, <e> errors`라고 표시되며, 해당 값이 true일 때 `, agent runtime stale`이, `agent_runtime_stale`이 null일 때 `, agent runtime stale unknown`이 추가됩니다. 스캔에 `root_walk_incomplete` 오류가 하나라도 있으면 알림은 `K of M roots not read in full (<said>); what find could not read in them was not checked.`로 시작합니다. K는 walk가 완료되지 않은 `ok` 클래스 root의 수입니다. M은 `ok` 클래스 root의 수입니다. `<said>`는 첫 번째 해당 root에 대해 find가 출력한 첫 번째 줄입니다. find가 거기서 아무것도 출력하지 않았다면, 괄호 안에는 `exit <n>, nothing said`라고 적힙니다. `recheck-alerts.jsonl`의 `watch_attention` 레코드에는 `message`, `walk_incomplete`, `roots`, `first_walk_incomplete`가 포함됩니다. `message`는 알림의 문구입니다. `walk_incomplete`는 K이고 `roots`는 M입니다. `first_walk_incomplete`는 첫 번째 해당 root의 `{root, exit, said}`이며, 그런 root가 없으면 null입니다. busy scan은 알림 없이 `recheck-alerts.jsonl`에 기록됩니다. 래퍼는 ledger에 관한 기존 재검사 경고도 계속 발생시킵니다: 새로운 CVE 또는 KEV, 철회된 spec, 건너뛴 provider, 위조 의심 항목. 보고서에 `agent_runtime_stale: true`가 있으면 agent를 다시 설치합니다. `agent_runtime_stale`은 `last_scan.runtime`의 `stale`이 true일 때만 true입니다. source checkout을 읽을 수 없으면 scan은 runtime이 stale인지 판단할 수 없습니다. 이때 `last_scan.runtime`에는 `source_digest_now: null`, `stale: null`, `source_unreadable`과 `source checkout unreadable:`로 시작하는 `error`가 있습니다. `source_unreadable`은 실패한 단계의 이름을 알려 줍니다. 그 단계는 `find`, `sort`, `shasum`, `digest` 중 하나입니다. 이 경우 `agent_runtime_stale`은 false가 아니라 `null`입니다. `watch_attention` 레코드에는 보고서가 준 그대로 true, false 또는 null 값이 유지됩니다. 읽을 수 없는 checkout은 오류 행을 추가하지 않으며 그 자체로 경고를 발생시키지 않습니다. 래퍼가 다른 이유로 경고할 때만 알림에 `, agent runtime stale unknown`이 표시됩니다.
+scan은 결과를 `~/.safedeps/watch/state.json`에 게시합니다. 각 래퍼 실행은 `runtime_version`이 포함된 한 줄을 `~/.safedeps/recheck.log`에 기록합니다. 경고는 `~/.safedeps/recheck-alerts.jsonl`에 기록되고, macOS에서는 알림으로도 전달됩니다. Linux와 Windows에는 알림이 없고 기록만 남습니다. Linux나 Windows에서 기록을 직접 읽지 않고 finding을 들으려면, 에이전트의 로컬 루틴이 scan을 실행하게 하거나 [Telling the agent](#telling-the-agent)의 세션 시작 알림을 켭니다. 로컬 루틴은 즉시 알려 주고, 세션 시작 알림은 세션이 시작될 때 에이전트에게 알려 줍니다. 래퍼는 새로운 이벤트가 있거나, population이 fresh가 아니거나, 실행에 오류가 있거나, agent runtime이 stale일 때 실행당 한 번 경고합니다. 알림에는 `<n> new, population <state>, <e> errors`라고 표시되며, 해당 값이 true일 때 `, agent runtime stale`이, `agent_runtime_stale`이 null일 때 `, agent runtime stale unknown`이 추가됩니다. 스캔에 `root_walk_incomplete` 오류가 하나라도 있으면 알림은 `K of M roots not read in full (<said>); what find could not read in them was not checked.`로 시작합니다. K는 walk가 완료되지 않은 `ok` 클래스 root의 수입니다. M은 `ok` 클래스 root의 수입니다. `<said>`는 첫 번째 해당 root에 대해 find가 출력한 첫 번째 줄입니다. find가 거기서 아무것도 출력하지 않았다면, 괄호 안에는 `exit <n>, nothing said`라고 적힙니다. `recheck-alerts.jsonl`의 `watch_attention` 레코드에는 `message`, `walk_incomplete`, `roots`, `first_walk_incomplete`가 포함됩니다. `message`는 알림의 문구입니다. `walk_incomplete`는 K이고 `roots`는 M입니다. `first_walk_incomplete`는 첫 번째 해당 root의 `{root, exit, said}`이며, 그런 root가 없으면 null입니다. busy scan은 알림 없이 `recheck-alerts.jsonl`에 기록됩니다. 래퍼는 ledger에 관한 기존 재검사 경고도 계속 발생시킵니다: 새로운 CVE 또는 KEV, 철회된 spec, 건너뛴 provider, 위조 의심 항목. 보고서에 `agent_runtime_stale: true`가 있으면 agent를 다시 설치하거나, `install --runtime-only`로 runtime을 새로 만듭니다. `agent_runtime_stale`은 `last_scan.runtime`의 `stale`이 true일 때만 true입니다. source checkout을 읽을 수 없으면 scan은 runtime이 stale인지 판단할 수 없습니다. 이때 `last_scan.runtime`에는 `source_digest_now: null`, `stale: null`, `source_unreadable`과 `source checkout unreadable:`로 시작하는 `error`가 있습니다. `source_unreadable`은 실패한 단계의 이름을 알려 줍니다. 그 단계는 `find`, `sort`, `shasum`, `digest` 중 하나입니다. 이 경우 `agent_runtime_stale`은 false가 아니라 `null`입니다. `watch_attention` 레코드에는 보고서가 준 그대로 true, false 또는 null 값이 유지됩니다. 읽을 수 없는 checkout은 오류 행을 추가하지 않으며 그 자체로 경고를 발생시키지 않습니다. 래퍼가 다른 이유로 경고할 때만 알림에 `, agent runtime stale unknown`이 표시됩니다.
+
+`~/.safedeps/recheck-alerts.jsonl`의 `recheck_failed` 레코드에는 두 가지 형태가 있습니다. `safedeps watch scan`이 ledger re-check 실패(`ledger_stage_failed`, 예: 종료 코드 `4`와 `error: "core_missing"`)로 끝나면 `recheck_failed`에는 그 ledger re-check의 `exit_status`와 `error`가 담기며, 래퍼는 이어서 해당 실행의 `watch_attention` 경고도 올린 뒤 `1`로 종료합니다. 스캔 명령 자체가 결과를 게시하지 못하고 끝나면 `recheck_failed`에는 그 명령의 `exit_status`와 `stderr`가 담깁니다.
+
+예약 실행에서 `core_missing`이 보고되면 설치된 agent runtime에 머신용 `safedeps-core` 바이너리가 빠진 것입니다. `bin/native/<os>-<arch>/safedeps-core`가 있는 checkout에서 runtime을 새로 만드세요. 예약 기능이 LaunchAgent이면 `node scripts/install/install-safedeps-recheck-agent.mjs install`에 기존 `--times`(또는 `--hour`와 `--minute`)를 넘기고, 다른 예약 기능이면 `install --runtime-only`를 씁니다. 패키지만 다시 설치해서는 agent의 runtime이 갱신되지 않습니다.
+
+런타임 다이제스트에는 현재 머신의 코어인 `bin/native/<os>-<arch>/safedeps-core`가 포함됩니다. 소스 체크아웃에 해당 코어가 없어도 스캔은 `stale: true`를 보고하지 않으며 이 사실만으로 실패하지 않습니다. 대신 런타임 메타데이터 진단으로 `source_digest_now: null`, `stale: null`, 그리고 `step: find`, `find`의 0이 아닌 종료 코드인 `exit`, 코어 경로가 포함된 `said`를 담은 `source_unreadable`을 기록하며, `stale`이 미확정인 것만으로는 오류 행을 추가하거나 경고를 올리지 않습니다. 인스톨러 상태 확인은 설치(install) 및 스테이징(stage)과 동일한 필수 코어 검사를 수행하며, JSON 다이제스트나 stale 판정 없이 `core-missing`과 경로를 출력하고 코드 `1`로 종료합니다. 유효한 소스가 변경되어 `stale: true`가 된 경우에는 여전히 유효한 소스에서 에이전트를 재설치하는 것이 해결 방법이며, 소스 코어가 누락된 경우에는 인스톨러가 런타임을 다시 빌드하기 전에 소스를 먼저 복구해야 합니다. `safedeps_watch_core_file`이 경로를 지정할 수 없는 알 수 없는 플랫폼(OS가 `darwin`/`linux`가 아니거나 `BASH_VERSINFO[5]`의 아키텍처가 `arm64`/`aarch64`/`x86_64`/`amd64`가 아닌 경우)에서는 스캔이 미지원 플랫폼을 포괄하지 않고 기존 생략 동작을 유지하지만, 인스톨러는 `core-missing`으로 거부합니다.
 
 `safedeps watch scan`의 exit code:
 
@@ -534,7 +679,16 @@ scan은 결과를 `~/.safedeps/watch/state.json`에 게시합니다. 각 래퍼 
 - `3`: 아무것도 publish하지 않았습니다. 이전 generation이 유지됩니다.
 - `75`: busy입니다. 다른 실행이 lock을 잡고 있으며 아무것도 바뀌지 않았습니다. 나중에 다시 시도합니다.
 
-watch는 탐지하고 기록합니다. 프로젝트를 수정하거나, 무언가를 설치하거나, JDK를 업데이트하지 않습니다. safedeps 밖의 consumer가 `safedeps watch claim`과 `safedeps watch ack`로 event를 가져갑니다. 동작 방식은 [ARCHITECTURE.md의 "The daily watch"](./ARCHITECTURE.md#the-daily-watch)를 참고합니다.
+watch는 탐지하고 기록합니다. 프로젝트를 수정하거나, 무언가를 설치하거나, JDK를 업데이트하지 않습니다. safedeps 밖의 consumer가 `safedeps watch claim`과 `safedeps watch ack`로 event를 가져갑니다. 동작 방식은 [ARCHITECTURE.md의 "The watch"](./ARCHITECTURE.md#the-watch)를 참고합니다.
+
+#### Telling the agent
+
+scan은 event를 기록하고 알립니다. 에이전트가 그것을 아는 길은 둘이고, 어느 쪽인지는 설치할 때 고릅니다.
+
+- **Claude Code:** `node scripts/install/install-safedeps-hooks.mjs --watch-notice`는 세션 시작 훅 `scripts/safedeps-watch-notice.sh`를 등록합니다. 세션이 시작되거나 재개될 때 이 훅은 `safedeps watch status`를 읽고, 아무도 claim하지 않은 event, 지난 scan이 끝까지 읽지 못한 root, 아직 scan이 한 번도 돌지 않았다는 것, 또는 status를 읽지 못했다는 것을 에이전트에게 알립니다. 그 밖에는 아무 말도 하지 않습니다. 옵션 없이 다시 설치해도 유지됩니다. `--no-watch-notice`는 이 훅을 지우고 설치 시점 게이트는 남깁니다.
+- **다른 에이전트:** 그 에이전트의 지침 파일에 한 줄을 넣습니다. 그 줄은 [SKILL.md](./SKILL.md#how-the-agent-learns-of-a-finding)에 있습니다. 멈추려면 그 줄을 지웁니다.
+
+어느 쪽이든 에이전트는 행동하기 전에 event를 claim하고, 작업이 기록되면 각 event를 ack합니다. 그래서 같은 event가 두 번 알려지지 않습니다.
 
 유용한 명령:
 
@@ -649,6 +803,7 @@ safedeps/
     install/install-safedeps-recheck-agent.mjs
     install/migrate-safedeps-state.mjs
     safedeps-recheck-alert.sh
+    safedeps-watch-notice.sh   # Claude Code session-start notice of what the watch found (opt-in)
     ci/               # run the tests on our own hosts, release checks
     measure/          # measurements the docs cite
     test/

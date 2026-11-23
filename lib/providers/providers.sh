@@ -8,13 +8,14 @@ SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_CACHE_DIR="${SAFEDEPS_CACHE_DIR:-${SAFEDEPS_HOME}/cache}"
 # The advisory log is DERIVED from the state root, never taken from the
 # environment. It is not a log in the ordinary sense: it is where every bypass
-# and unavailability is recorded, and `re-check` reads it as the oracle for
-# whether a ledger approval ever happened. Letting the environment move it moved
-# that oracle too — measured, a forged ledger entry that `re-check` flags as
-# `suspected_forgery` on the default path stops being flagged when
-# SAFEDEPS_ADVISORY_LOG points at a file the caller wrote. The check and the
-# thing it checks have to live in one trust domain, and SAFEDEPS_HOME is what
-# moves them together.
+# and unavailability is recorded. `re-check` once read it as the oracle for
+# whether a ledger approval ever happened, and letting the environment move it
+# moved that oracle too — measured, a forged ledger entry that `re-check` flags
+# as `suspected_forgery` on the default path stopped being flagged when
+# SAFEDEPS_ADVISORY_LOG pointed at a file the caller wrote. That oracle is the
+# approvals store now (rust/src/approvals.rs), derived from SAFEDEPS_HOME the
+# same way. The record and the ledger it speaks of stay in one trust domain,
+# and SAFEDEPS_HOME is what moves them together.
 # A caller that already captured the environment value (bin/safedeps does, before
 # it sources this file) keeps it, so the notice quotes what the user set rather
 # than the path we derived over it.

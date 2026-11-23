@@ -4080,12 +4080,13 @@ forgery_json=$(./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery[0].package' <<< "${forgery_json}")" == "fixture-forged" ]] || fail "re-check flags expected forged package"
 pass "re-check flags ledger approval provenance mismatch"
 
-# The forgery check reads advisory.log as its oracle, so whoever can move that
-# file can hand the check its own evidence. Measured before this was closed: the
-# same forged entry stopped being flagged when SAFEDEPS_ADVISORY_LOG pointed at
-# a caller-written file saying the approval happened. The log location is
-# derived from SAFEDEPS_HOME now — the record and the ledger it vouches for move
-# together or not at all — and the ignored variable says so on both channels.
+# The forgery check once read advisory.log as its oracle, so whoever could move
+# that file could hand the check its own evidence. Measured before this was
+# closed: the same forged entry stopped being flagged when SAFEDEPS_ADVISORY_LOG
+# pointed at a caller-written file saying the approval happened. The check reads
+# the approvals store now, and no advisory.log, moved or not, vouches for an
+# entry. The log location is still derived from SAFEDEPS_HOME, and the ignored
+# variable says so on both channels.
 moved_log="${tmp_root}/attacker-authored.log"
 printf '[2026-01-01T00:00:00Z] check approve(patched closure) ecosystem=npm package=fixture-forged version=1.0.0 hash=deadbeef\n' > "${moved_log}"
 moved_err="${tmp_root}/moved-log.err"
@@ -4169,16 +4170,17 @@ pass "the moved-source notice cannot be switched off from the environment"
 # nonzero exit/abort, non-executable or missing binary, and missing platform or
 # bin/native directory all require exit 2 plus cause and recovery on stderr.
 
-# A forged ledger entry must be flagged even when advisory.log does not exist at
-# all — file absence is missing provenance, not proof of approval. (Previously
-# the [[ -f advisory.log ]] precondition silently skipped the check.)
+# A forged ledger entry must be flagged even when no approvals store exists at
+# all — a store that is not there vouches for nothing, and is no proof of
+# approval. advisory.log is gone too here. (When the log was the oracle, the
+# [[ -f advisory.log ]] precondition once silently skipped the check.)
 nolog_home="${tmp_root}/safe-nolog"
 SAFEDEPS_HOME="${nolog_home}" lib/ledger/ledger.sh approve npm fixture-forged 1.0.0 1.0.0 forged-test >/dev/null
 rm -f "${nolog_home}/advisory.log"
 nolog_json=$(SAFEDEPS_HOME="${nolog_home}" ./bin/safedeps --json re-check)
-[[ "$(jq -r '.suspected_forgery | length' <<< "${nolog_json}")" == "1" ]] || fail "re-check flags forged ledger entry when advisory.log is missing entirely"
+[[ "$(jq -r '.suspected_forgery | length' <<< "${nolog_json}")" == "1" ]] || fail "re-check flags forged ledger entry when no approvals store exists"
 [[ "$(jq -r '.suspected_forgery[0].package' <<< "${nolog_json}")" == "fixture-forged" ]] || fail "missing-log forgery flag names the forged package"
-pass "re-check flags forged entry with no advisory.log (missing log = missing provenance)"
+pass "re-check flags forged entry with no approvals store (missing store = missing provenance)"
 
 # A forged entry that copies a *valid* 64-char hash from a legitimate approval
 # must not borrow that approval's provenance: the canonical hash is recomputed
@@ -4196,8 +4198,8 @@ copyhash_json=$(SAFEDEPS_HOME="${copyhash_home}" ./bin/safedeps --json re-check)
 pass "re-check flags copied-valid-hash forgery, keeps the legit approval clean"
 
 # A forged entry whose package/version is a *prefix* of a legitimate approval
-# (fixture-copysaf vs fixture-copysafe) must not borrow its provenance line:
-# advisory.log comparison is whole-field, not substring.
+# (fixture-copysaf vs fixture-copysafe) must not borrow its provenance: a store
+# line vouches for one whole hash, never a prefix.
 SAFEDEPS_HOME="${copyhash_home}" lib/ledger/ledger.sh approve npm fixture-copysaf 1.0 1.0 prefix-forge >/dev/null
 prefix_json=$(SAFEDEPS_HOME="${copyhash_home}" ./bin/safedeps --json re-check)
 [[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-copysaf")] | length' <<< "${prefix_json}")" == "1" ]] || fail "prefix-named forged entry does not borrow provenance (whole-field match)"
@@ -4206,30 +4208,30 @@ pass "re-check flags prefix-named forged entry (whole-field provenance match)"
 
 # A forged package name carrying a backslash-octal escape (fixture-p\141d,
 # where \141 is 'a') must not normalize to a legitimate name (fixture-pad) and
-# borrow its provenance. The provenance match is pure-bash literal comparison,
-# so the escape is never interpreted. The forged entry's own hash is honest
-# (so it is not caught by hash_spec_mismatch) — only the whole-field literal
-# log match keeps it flagged.
+# borrow its provenance. The forged entry's own hash is honest (so it is not
+# caught by hash_spec_mismatch), and it is the hash of the literal spec, so the
+# escape is never interpreted: the store has no line for it, and that alone
+# keeps it flagged.
 escape_home="${tmp_root}/safe-escape"
 SAFEDEPS_HOME="${escape_home}" ./bin/safedeps --json check npm fixture-pad@1.0.0 >/dev/null
 SAFEDEPS_HOME="${escape_home}" lib/ledger/ledger.sh approve npm 'fixture-p\141d' 1.0.0 1.0.0 escape-forge >/dev/null
 escape_json=$(SAFEDEPS_HOME="${escape_home}" ./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery | length' <<< "${escape_json}")" == "1" ]] || fail "backslash-escape forged name does not borrow provenance"
 [[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-pad")] | length' <<< "${escape_json}")" == "0" ]] || fail "legit fixture-pad stays clean beside escape-named forgery"
-[[ "$(jq -r '.suspected_forgery[0].reason' <<< "${escape_json}")" == "missing_advisory_log_approval" ]] || fail "escape forgery flagged as missing provenance (honest hash, no log match)"
+[[ "$(jq -r '.suspected_forgery[0].reason' <<< "${escape_json}")" == "unvouched" ]] || fail "escape forgery flagged as unvouched (honest hash, no store line)"
 pass "re-check flags backslash-escape forged name (literal provenance match)"
 
 # The same escape hazard applies to the version field: a forged entry with
 # version 1.\060.0 (\060 is '0') must not normalize to 1.0.0 and borrow the
 # legit fixture-vpad@1.0.0 approval. Its hash is honest for the literal spec,
-# so only the literal log comparison keeps it flagged.
+# and the store has no line for it.
 verescape_home="${tmp_root}/safe-verescape"
 SAFEDEPS_HOME="${verescape_home}" ./bin/safedeps --json check npm fixture-vpad@1.0.0 >/dev/null
 SAFEDEPS_HOME="${verescape_home}" lib/ledger/ledger.sh approve npm fixture-vpad '1.\060.0' '1.\060.0' verescape-forge >/dev/null
 verescape_json=$(SAFEDEPS_HOME="${verescape_home}" ./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery | length' <<< "${verescape_json}")" == "1" ]] || fail "backslash-escape forged version does not borrow provenance"
 [[ "$(jq -r '[.suspected_forgery[] | select(.version == "1.0.0")] | length' <<< "${verescape_json}")" == "0" ]] || fail "legit fixture-vpad@1.0.0 stays clean beside escape-version forgery"
-[[ "$(jq -r '.suspected_forgery[0].reason' <<< "${verescape_json}")" == "missing_advisory_log_approval" ]] || fail "escape-version forgery flagged as missing provenance"
+[[ "$(jq -r '.suspected_forgery[0].reason' <<< "${verescape_json}")" == "unvouched" ]] || fail "escape-version forgery flagged as unvouched"
 pass "re-check flags backslash-escape forged version (literal provenance match)"
 
 # Hash-delimiter injection: the canonical hash joins fields with newlines, so a

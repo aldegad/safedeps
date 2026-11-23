@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# safedeps: the daily re-check agent's runtime, and what building it may touch.
+# safedeps: the re-check agent's runtime, the calendar slots it registers, and what
+# building it may touch.
 #
 # scripts/install/install-safedeps-recheck-agent.mjs builds a copy of the CLI
 # for launchd to run (`stage --root DIR` builds it anywhere, `install` builds it
@@ -13,6 +14,14 @@
 #   M   a file's mode came from its extension, not from the source
 #   R   "removed first, so the copy holds nothing older" had no row: the line
 #       could be deleted and the suite stayed green
+#
+# The runtime's re-check reads the approvals store with the core it finds
+# beside its own bin (sf_core in bin/safedeps), and a runtime the installer
+# built without one failed every daily re-check with core_missing. So the
+# runtime carries this machine's core, both digests count it, and a checkout
+# without it is refused by name. A fixture's core is a stand-in script: these
+# rows copy, hash and refuse it, and none of them reads a store with it
+# (scripts/test/watch.sh runs a runtime with the real core).
 #
 # Each fixture is a small checkout of its own (the installer finds its source
 # from where it lives), so a row that goes wrong damages a copy and never this
@@ -59,15 +68,71 @@ row() {
 
 new_dir() { mktemp -d "${tmp_root}/row.XXXXXX"; }
 
-# A checkout the installer can run from: it finds bin/, lib/ and the wrapper
-# beside its own scripts/install/ directory.
+# This machine's core under a checkout or a runtime, where the CLI looks for
+# its own (sf_core in bin/safedeps): bin/native/<os>-<arch>/safedeps-core, the
+# platform read from the machine bash was built for. Written here again, so the
+# rows hold the installer to the CLI's place and not to its own answer.
+core_file() {
+  local machine="${BASH_VERSINFO[5]:-}" os="" arch=""
+  case "${machine}" in
+    *-darwin*) os=darwin ;;
+    *-linux*) os=linux ;;
+  esac
+  case "${machine%%-*}" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  [[ -n "${os}" && -n "${arch}" ]] || return 1
+  printf 'bin/native/%s-%s/safedeps-core' "${os}" "${arch}"
+}
+CORE=$(core_file) || { printf 'not ok - no core is built for %s, so this battery has no core to place\n' "${BASH_VERSINFO[5]:-an unnamed machine}"; exit 1; }
+
+# A checkout the installer can run from: it finds bin/, lib/, the wrapper and
+# this machine's core beside its own scripts/install/ directory. The core is a
+# stand-in that says what it is.
 make_checkout() { # DIR
-  mkdir -p "$1/scripts/install" "$1/bin"
+  mkdir -p "$1/scripts/install" "$1/bin" "$1/$(dirname "${CORE}")"
   cp "${INSTALLER}" "$1/${INSTALLER}"
   cp bin/safedeps "$1/bin/safedeps"
   cp -R lib "$1/lib"
   cp scripts/safedeps-recheck-alert.sh "$1/scripts/safedeps-recheck-alert.sh"
+  printf '#!/bin/sh\necho "safedeps-core fixture"\n' > "$1/${CORE}"
+  chmod 755 "$1/${CORE}"
 }
+
+row_machine_core_process_results() {
+  local d co node_bin kind expected rc
+  kind="$1"
+  node_bin=$(command -v node)
+  d=$(new_dir); d=$(cd "${d}" && pwd -P); co="${d}/checkout"
+  make_checkout "${co}"
+  mkdir "${d}/commands"
+  case "${kind}" in
+    start) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\n' > "${d}/commands/bash"; chmod 644 "${d}/commands/bash"; expected='could not start bash: spawnSync error EACCES' ;;
+    overflow) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\nexec /usr/bin/head -c 2097152 /dev/zero\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='started bash: spawnSync error ENOBUFS; signal SIGTERM' ;;
+    signal) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\nkill -KILL $$\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='bash terminated by signal SIGKILL' ;;
+    exit) printf '#!/bin/sh\nprintf started > "$PROCESS_MARKER"\nexit 2\n' > "${d}/commands/bash"; chmod 755 "${d}/commands/bash"; expected='ran bash: exit 2' ;;
+  esac
+  rc=0
+  PROCESS_MARKER="${d}/started" HOME="${d}/home" PATH="${d}/commands" "${node_bin}" "${co}/${INSTALLER}" stage --root "${d}/runtime" > "${d}/out" 2> "${d}/err" || rc=$?
+  [[ "${rc}" == 1 && ! -e "${d}/runtime" && ! -s "${d}/out" ]] || no "${kind}: the failed machine reading built a runtime or returned another answer"
+  if [[ "${kind}" == start ]]; then
+    [[ ! -e "${d}/started" ]] || no "${kind}: the child started"
+  else
+    [[ "$(cat "${d}/started")" == started ]] || no "${kind}: no start marker"
+    ! grep -qF 'could not start' "${d}/err" || no "${kind}: a started child reported as not started: $(cat "${d}/err")"
+  fi
+  printf 'safedeps re-check agent: could not read which core this machine runs from %s (%s)\n' "${co}/lib/watch/scan.sh" "${expected}" > "${d}/expected"
+  cmp -s "${d}/expected" "${d}/err" || no "${kind}: $(cat "${d}/err")"
+}
+row_machine_core_start() { row_machine_core_process_results start; }
+row_machine_core_overflow() { row_machine_core_process_results overflow; }
+row_machine_core_signal() { row_machine_core_process_results signal; }
+row_machine_core_exit() { row_machine_core_process_results exit; }
+row "the machine-core reading names EACCES when bash did not start" row_machine_core_start
+row "the machine-core reading names ENOBUFS and SIGTERM after bash started" row_machine_core_overflow
+row "the machine-core reading names the signal that ended bash" row_machine_core_signal
+row "the machine-core reading names bash exit 2" row_machine_core_exit
 
 home="${tmp_root}/home"
 mkdir -p "${home}"
@@ -277,6 +342,52 @@ row_current() {
 }
 row "a second build holds what the checkout holds and nothing older, and a third changes nothing" row_current
 
+# ---- the core: this machine's, beside the runtime's own bin ---------------------------------
+# The runtime's CLI looks for its core beside itself and nowhere else, so the
+# runtime carries this machine's core from its checkout, as the checkout has
+# it, and no other platform's.
+row_core() {
+  local d co root
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  mkdir -p "${co}/bin/native/plan9-mips"
+  printf '#!/bin/sh\necho other\n' > "${co}/bin/native/plan9-mips/safedeps-core"
+  chmod 755 "${co}/bin/native/plan9-mips/safedeps-core"
+  root="${d}/out/agent"
+  stage_ok "${co}" "${root}" || return 1
+  [[ -f "${root}/${CORE}" && ! -L "${root}/${CORE}" && -x "${root}/${CORE}" ]] || no "the runtime has no executable ${CORE}"
+  cmp -s "${co}/${CORE}" "${root}/${CORE}" || no "the runtime's ${CORE} is not the checkout's"
+  [[ "$("${root}/${CORE}")" == "safedeps-core fixture" ]] || no "the runtime's core does not run"
+  [[ "$(find "${root}/bin/native" -type f | wc -l | tr -d ' ')" == 1 ]] || no "bin/native holds: $(find "${root}/bin/native" | tr '\n' ' ')"
+  parent_holds_only "${root}" || return 1
+}
+row "a runtime carries this machine's core from its checkout, beside its bin, and no other platform's" row_core
+
+# ---- a checkout with no core is refused by name ---------------------------------------------
+# No core, a core that cannot run, and a link to one: none is a core the
+# runtime can carry (the digests count regular files, and a link is none).
+# Each is refused by name before anything is built, and a runtime already in
+# place stays as it was.
+row_no_core() {
+  local d co
+  d=$(new_dir)
+  co="${d}/none"; make_checkout "${co}"; rm -rf "${co}/bin/native"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  grep -qF "${CORE}" "${tmp_root}/last.err" || no "the refusal does not name ${CORE}: $(head -c 300 "${tmp_root}/last.err")"
+  co="${d}/noexec"; make_checkout "${co}"; chmod 644 "${co}/${CORE}"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  co="${d}/link"; make_checkout "${co}"
+  mv "${co}/${CORE}" "${co}/${CORE}.real"; ln -s safedeps-core.real "${co}/${CORE}"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  co="${d}/gone"; make_checkout "${co}"
+  stage_ok "${co}" "${d}/out/agent" || return 1
+  mv "${co}/${CORE}" "${d}/kept-core"
+  stage_refused "${co}" "${d}/out/agent" "core-missing: " "${d}"
+  runtime_loads "${d}/out/agent" || return 1
+  cmp -s "${d}/kept-core" "${d}/out/agent/${CORE}" || no "the runtime in place lost its core"
+  no_scraps "${d}/out/agent" || return 1
+}
+row "stage refuses a checkout with no core for this machine by name, and touches nothing" row_no_core
+
 # ---- what the runtime says it is ---------------------------------------------------------------
 # The installer writes .safedeps-runtime.json; the scan (safedeps_watch_runtime_info
 # in lib/watch/scan.sh) reads it, hashes the source checkout by the same rule
@@ -305,6 +416,32 @@ row_runtime_meta() {
   jq -e '.stale == true' <<< "${info}" > /dev/null || no "a runtime whose checkout moved on: ${info}"
 }
 row "the runtime records its version and the digest of its checkout, and reads stale once the checkout moves on" row_runtime_meta
+
+# ---- the two digests count the core alike ----------------------------------------------------
+# The installer records the digest of what it built from (runtimeDigest) and
+# the scan hashes the checkout again (safedeps_watch_tree_digest): two
+# implementations of one rule. They are held side by side on one checkout
+# before and after its core changes, and nothing else: each pair agrees, the
+# pairs differ, and the runtime built first then reads stale.
+scan_digest() { ( source "$1/lib/watch/scan.sh"; safedeps_watch_tree_digest "$1" "$(mktemp "${tmp_root}/step.XXXXXX")" ); }
+row_core_digest() {
+  local d co first second d1 d2 info
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  first="${d}/out/first"; second="${d}/out/second"
+  stage_ok "${co}" "${first}" || return 1
+  d1=$(jq -r '.digest' "${first}/.safedeps-runtime.json")
+  [[ "${d1}" == "$(scan_digest "${co}")" ]] || no "one core: the installer recorded ${d1}, the scan hashes $(scan_digest "${co}")"
+  printf '# built again\n' >> "${co}/${CORE}"
+  stage_ok "${co}" "${second}" || return 1
+  d2=$(jq -r '.digest' "${second}/.safedeps-runtime.json")
+  [[ "${d2}" == "$(scan_digest "${co}")" ]] || no "another core: the installer recorded ${d2}, the scan hashes $(scan_digest "${co}")"
+  [[ "${d2}" != "${d1}" ]] || no "the installer recorded one digest for two cores"
+  info=$(runtime_info "${first}")
+  jq -e '.stale == true' <<< "${info}" > /dev/null || no "the runtime built before the core changed: ${info}"
+  info=$(runtime_info "${second}")
+  jq -e '.stale == false' <<< "${info}" > /dev/null || no "the runtime built after the core changed: ${info}"
+}
+row "the installer and the scan count the core alike: two cores, two digests, each the scan's, and the older runtime reads stale" row_core_digest
 
 # A checkout the digest cannot read has no digest: a file shasum cannot read
 # and a directory find cannot read each leave stale null, with the first line
@@ -445,13 +582,46 @@ printf '#!/bin/sh\necho "$@" >> "${LC_LOG:?}"\nexit 0\n' > "${lc_shim}/launchctl
 chmod 755 "${lc_shim}/launchctl"
 
 LC_LOG=""
-# install CHECKOUT HOME: the checkout's installer registers the agent in HOME.
+# install CHECKOUT HOME [ARG...]: the checkout's installer registers the agent
+# in HOME, with the schedule ARGs given.
 install_in() {
   LAST_RC=0
-  mkdir -p "$2"
-  HOME="$2" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "$1/${INSTALLER}" install > "${tmp_root}/last.out" 2> "${tmp_root}/last.err" || LAST_RC=$?
+  local co="$1" h="$2"
+  shift 2
+  mkdir -p "${h}"
+  HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" install "$@" > "${tmp_root}/last.out" 2> "${tmp_root}/last.err" || LAST_RC=$?
 }
 plist_of() { printf '%s/Library/LaunchAgents/com.aldegad.safedeps.recheck.plist' "$1"; }
+
+# ---- a missing checkout core is an unreadable source, never stale -----------------------------
+# The scan keeps find's failure; status uses the installer's named refusal.
+# launchctl only prints here, so the shim serves on every platform.
+row_status_core_gone() {
+  local d co h out info rc
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; mkdir -p "${h}"; LC_LOG="${d}/lc.log"
+  HOME="${h}" node "${co}/${INSTALLER}" stage --root "${h}/.safedeps/agent" > /dev/null 2> "${tmp_root}/last.err" \
+    || no "stage exited $?: $(head -c 300 "${tmp_root}/last.err")"
+  status_json() {
+    HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" status 2> "${tmp_root}/last.err" \
+      || no "status exited $?: $(head -c 300 "${tmp_root}/last.err")"
+  }
+  out=$(status_json)
+  jq -e '.agent_runtime_stale == false' <<< "${out}" > /dev/null || no "status of a fresh runtime: $(jq -c '{runtime, agent_runtime_stale}' <<< "${out}")"
+  info=$(runtime_info "${h}/.safedeps/agent")
+  jq -e '.stale == false' <<< "${info}" > /dev/null || no "the scan of a fresh runtime: ${info}"
+  rm -rf "${co}/bin/native"
+  rc=0
+  out=$(HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" status 2> "${tmp_root}/last.err") || rc=$?
+  [[ "${rc}" == 1 && -z "${out}" ]] || no "status without its source core: exit ${rc}, stdout ${out}"
+  grep -qF 'core-missing: ' "${tmp_root}/last.err" || no "status did not name its missing core"
+  grep -qF "$(cd -P "${co}" && pwd)/${CORE}" "${tmp_root}/last.err" || no "status did not name the source core path"
+  info=$(runtime_info "${h}/.safedeps/agent")
+  jq -e --arg core "${CORE}" '.stale == null and .source_digest_now == null
+      and (.source_unreadable | .step == "find" and .exit > 0 and any(.said[]; contains($core)))' <<< "${info}" > /dev/null \
+    || no "the scan without its source core: ${info}"
+}
+row "a missing checkout core: status refuses core-missing by path, and the scan keeps find failure with stale null" row_status_core_gone
 
 row_install() {
   local d co h
@@ -504,14 +674,174 @@ row_install_fails() {
   runtime_loads "${agent}" || return 1
   no_scraps "${agent}" || return 1
 }
+# A checkout with no core is refused before install writes anything: no
+# directory, no plist, no watch config, no launchctl call.
+row_install_no_core() {
+  local d co h before
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  rm -rf "${co}/bin/native"
+  h="${d}/home"; mkdir -p "${h}"; LC_LOG="${d}/lc.log"
+  before=$(digest "${d}")
+  install_in "${co}" "${h}"
+  (( LAST_RC != 0 )) || no "install exited 0 with no core"
+  grep -qF "core-missing: " "${tmp_root}/last.err" || no "install did not refuse by name: $(head -c 300 "${tmp_root}/last.err")"
+  [[ "$(digest "${d}")" == "${before}" ]] || no "a refused install changed what is under ${d}"
+}
+
+# ---- the schedule: launchd calendar slots ------------------------------------------
+# What launchd reads is the plist, so the rows read the plist back with plutil,
+# as launchd's own format, and not the installer's text. A slot is
+# {"Hour":H,"Minute":M}; StartCalendarInterval is an array of them.
+slots_of() { # HOME: the plist's StartCalendarInterval as compact JSON
+  plutil -extract StartCalendarInterval json -o - "$(plist_of "$1")" | jq -c .
+}
+# install_schedule HOME EXPECT ARG...: install with ARGs, then the plist holds
+# the slots EXPECT (compact JSON), passes plutil -lint, and the installer's own
+# report names the same slots as HH:MM.
+install_schedule() {
+  local d co h want report
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; LC_LOG="${d}/lc.log"; want="$1"; report="$2"
+  shift 2
+  install_in "${co}" "${h}" "$@"
+  (( LAST_RC == 0 )) || no "install $* exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  plutil -lint -s "$(plist_of "${h}")" || no "plutil -lint refused the plist"
+  [[ "$(slots_of "${h}")" == "${want}" ]] || no "install $*: the plist holds $(slots_of "${h}"), not ${want}"
+  jq -e --argjson r "${report}" '.schedule == $r' "${tmp_root}/last.out" > /dev/null \
+    || no "install $*: the report says $(jq -c .schedule "${tmp_root}/last.out"), not ${report}"
+}
+row_schedule_default() {
+  install_schedule '[{"Hour":9,"Minute":0},{"Hour":21,"Minute":0}]' '["09:00","21:00"]'
+}
+row_schedule_times() {
+  # Given out of order, written in order.
+  install_schedule '[{"Hour":7,"Minute":30},{"Hour":19,"Minute":45}]' '["07:30","19:45"]' --times 19:45,07:30
+  install_schedule '[{"Hour":6,"Minute":0},{"Hour":12,"Minute":0},{"Hour":18,"Minute":5}]' '["06:00","12:00","18:05"]' --times 6:00,12:00 --times 18:05
+}
+row_schedule_legacy() {
+  install_schedule '[{"Hour":6,"Minute":15}]' '["06:15"]' --hour 6 --minute 15
+  install_schedule '[{"Hour":6,"Minute":0}]' '["06:00"]' --hour 6
+  install_schedule '[{"Hour":9,"Minute":30}]' '["09:30"]' --minute 30
+}
+# A schedule the installer refuses is refused before anything is built or
+# registered: no runtime, no plist, no watch config and no launchctl call.
+row_schedule_refused() {
+  local d co h args said
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  while IFS='|' read -r args said; do
+    h=$(mktemp -d "${d}/home.XXXXXX"); LC_LOG="${d}/lc.log"; rm -f "${LC_LOG}"
+    # shellcheck disable=SC2086 # ARGS is a list of words by construction
+    install_in "${co}" "${h}" ${args}
+    (( LAST_RC != 0 )) || no "install ${args} exited 0"
+    grep -qF -- "${said}" "${tmp_root}/last.err" || no "install ${args} did not say '${said}': $(head -c 300 "${tmp_root}/last.err")"
+    [[ ! -e "$(plist_of "${h}")" ]] || no "install ${args} wrote a plist"
+    [[ ! -e "${h}/.safedeps" ]] || no "install ${args} wrote under ~/.safedeps"
+    [[ ! -e "${LC_LOG}" ]] || no "install ${args} called launchctl"
+  done <<'ROWS'
+--times 25:00|--times takes HH:MM slots
+--times 9:5|--times takes HH:MM slots
+--times 09:00,|--times takes HH:MM slots
+--times|--times takes HH:MM slots
+--times 09:00,21:00,9:00|--times names 09:00 twice
+--times 09:00 --hour 9|--times and --hour/--minute both name the schedule
+--hour 24|--hour must be an integer from 0 to 23
+--minute 60|--minute must be an integer from 0 to 59
+--runtime-only --times 09:00|--runtime-only registers no schedule
+--runtime-only --hour 9|--runtime-only registers no schedule
+ROWS
+}
+
+# ---- install --runtime-only: the runtime, and nothing of launchd ------------------------
+# A host whose scheduler is not launchd refreshes the runtime it runs without a
+# launchd agent coming back: no plist written, no launchctl call.
+row_runtime_only_fresh() {
+  local d co h agent
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; agent="${h}/.safedeps/agent"; LC_LOG="${d}/lc.log"
+  install_in "${co}" "${h}" --runtime-only --exclude /fixture/forbidden
+  (( LAST_RC == 0 )) || no "install --runtime-only exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  [[ ! -e "${LC_LOG}" ]] || no "install --runtime-only called launchctl: $(cat "${LC_LOG}")"
+  [[ ! -e "$(plist_of "${h}")" ]] || no "install --runtime-only wrote a plist"
+  diff -r "${co}/lib" "${agent}/lib" > /dev/null || no "the agent's lib/ is not the checkout's lib/"
+  cmp -s "${co}/${CORE}" "${agent}/${CORE}" || no "the agent does not carry the checkout's ${CORE}"
+  [[ -f "${agent}/.safedeps-recheck-runtime" ]] || no "the agent has no marker"
+  runtime_loads "${agent}" || return 1
+  [[ "$(cat "${h}/.safedeps/watch/exclude")" == /fixture/forbidden ]] || no "the watch options were not written"
+  jq -e '.runtime_only == true and .launchd.touched == false and .launchd.plist_present == false' "${tmp_root}/last.out" > /dev/null \
+    || no "the report: $(jq -c '{runtime_only, launchd}' "${tmp_root}/last.out")"
+}
+row_runtime_only_keeps_launchd() {
+  local d co h agent plist before_plist calls
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; agent="${h}/.safedeps/agent"; LC_LOG="${d}/lc.log"
+  install_in "${co}" "${h}" --times 06:00
+  (( LAST_RC == 0 )) || no "the first install exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  plist=$(plist_of "${h}"); before_plist=$(cksum < "${plist}"); calls=$(wc -l < "${LC_LOG}" | tr -d ' ')
+  printf '# a change the next runtime must carry\n' >> "${co}/lib/watch/state.jq"
+  install_in "${co}" "${h}" --runtime-only
+  (( LAST_RC == 0 )) || no "install --runtime-only exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  [[ "$(cksum < "${plist}")" == "${before_plist}" ]] || no "install --runtime-only changed the plist"
+  [[ "$(wc -l < "${LC_LOG}" | tr -d ' ')" == "${calls}" ]] || no "install --runtime-only called launchctl"
+  diff -r "${co}/lib" "${agent}/lib" > /dev/null || no "the runtime does not carry the checkout's change"
+  runtime_loads "${agent}" || return 1
+  no_scraps "${agent}" || return 1
+  jq -e '.launchd.plist_present == true' "${tmp_root}/last.out" > /dev/null || no "the report did not say a plist is there"
+}
+# --runtime-only builds a runtime too, so a checkout with no core is refused the
+# same way, before anything is written.
+row_runtime_only_no_core() {
+  local d co h before
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  rm -rf "${co}/bin/native"
+  h="${d}/home"; mkdir -p "${h}"; LC_LOG="${d}/lc.log"
+  before=$(digest "${d}")
+  install_in "${co}" "${h}" --runtime-only
+  (( LAST_RC != 0 )) || no "install --runtime-only exited 0 with no core"
+  grep -qF "core-missing: " "${tmp_root}/last.err" || no "install --runtime-only did not refuse by name: $(head -c 300 "${tmp_root}/last.err")"
+  [[ "$(digest "${d}")" == "${before}" ]] || no "a refused install --runtime-only changed what is under ${d}"
+}
+# uninstall takes the plist and launchd's registration, and keeps the runtime.
+row_uninstall_keeps_runtime() {
+  local d co h agent before
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; agent="${h}/.safedeps/agent"; LC_LOG="${d}/lc.log"
+  install_in "${co}" "${h}"
+  (( LAST_RC == 0 )) || no "install exited ${LAST_RC}"
+  before=$(digest "${agent}")
+  HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" uninstall > "${tmp_root}/last.out" 2> "${tmp_root}/last.err" \
+    || no "uninstall exited $?: $(head -c 300 "${tmp_root}/last.err")"
+  [[ ! -e "$(plist_of "${h}")" ]] || no "uninstall left the plist"
+  grep -q '^bootout ' <(tail -n 1 "${LC_LOG}") || no "uninstall did not boot the agent out"
+  [[ "$(digest "${agent}")" == "${before}" ]] || no "uninstall changed the runtime"
+  jq -e '.runtime_kept == true' "${tmp_root}/last.out" > /dev/null || no "the report did not say the runtime stays"
+}
+
 if [[ "$(uname -s)" == Darwin ]]; then
   row "install registers an agent whose runtime was built whole" row_install
   row "install replaces an agent an earlier version built, which has no marker" row_install_legacy
   row "a failed install leaves the registered agent, its plist and launchd as they were" row_install_fails
+  row "install refuses a checkout with no core for this machine by name before it writes anything" row_install_no_core
+  row "install with no schedule writes two calendar slots, 09:00 and 21:00" row_schedule_default
+  row "install --times writes each slot it names, in order" row_schedule_times
+  row "install --hour/--minute, the arguments of earlier versions, writes one slot" row_schedule_legacy
+  row "a schedule the installer refuses leaves no runtime, plist or launchd call" row_schedule_refused
+  row "install --runtime-only builds the runtime and the watch options, with no plist and no launchctl call" row_runtime_only_fresh
+  row "install --runtime-only over a launchd agent replaces the runtime and leaves the plist and launchd as they were" row_runtime_only_keeps_launchd
+  row "install --runtime-only refuses a checkout with no core for this machine by name before it writes anything" row_runtime_only_no_core
+  row "uninstall removes the plist and boots the agent out, and keeps the runtime" row_uninstall_keeps_runtime
 else
   skip "install registers an agent whose runtime was built whole" "${installed_skip}"
   skip "install replaces an agent an earlier version built, which has no marker" "${installed_skip}"
   skip "a failed install leaves the registered agent, its plist and launchd as they were" "${installed_skip}"
+  skip "install refuses a checkout with no core for this machine by name before it writes anything" "${installed_skip}"
+  skip "install with no schedule writes two calendar slots, 09:00 and 21:00" "${installed_skip}"
+  skip "install --times writes each slot it names, in order" "${installed_skip}"
+  skip "install --hour/--minute, the arguments of earlier versions, writes one slot" "${installed_skip}"
+  skip "a schedule the installer refuses leaves no runtime, plist or launchd call" "${installed_skip}"
+  skip "install --runtime-only builds the runtime and the watch options, with no plist and no launchctl call" "${installed_skip}"
+  skip "install --runtime-only over a launchd agent replaces the runtime and leaves the plist and launchd as they were" "${installed_skip}"
+  skip "install --runtime-only refuses a checkout with no core for this machine by name before it writes anything" "${installed_skip}"
+  skip "uninstall removes the plist and boots the agent out, and keeps the runtime" "${installed_skip}"
 fi
 
 if (( failures > 0 )); then

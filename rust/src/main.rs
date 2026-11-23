@@ -63,6 +63,18 @@
 //!       Known answers from the modules the hooks share (the digests, the
 //!       JSON writer, how a file's times and inodes are spelled).
 //!
+//! The CLI's one entry, which is on no hook's path either:
+//!
+//!   safedeps-core approvals commit <hash> <staged> <entry> | revoke <hash> <staged> <entry> <seen> | index | migrate [--json] [--] [<archive>...]
+//!       The approvals store `re-check` reads for provenance
+//!       (approvals.rs): `commit` writes one approval's three records under
+//!       the store lock, its record on stdin; `revoke` puts a revoked entry in
+//!       place under the same lock; `index` prints the hashes the store
+//!       vouches for; `migrate` moves in, under the same lock and through the
+//!       same write as a commit's store line, the approve lines of
+//!       advisory.log and its archives that their ledger entries confirm.
+//!       `commit` and `migrate` are the two that write a store line.
+//!
 //! `pre-probe`, `post-probe`, `ask-probe`, `ledger`, `state-rotate` and
 //! `json-stream` are measurement entries: each takes data on stdin and calls
 //! the operation a hook calls, and none takes a shell program.
@@ -70,9 +82,12 @@
 // The modules marked `dead_code` carry items the hooks do not all call. The
 // mark dates from when the callers were being moved in, and it has not been
 // revisited.
+mod approvals;
 #[allow(dead_code)]
 mod ask;
 mod callid;
+#[cfg(test)]
+mod children;
 #[cfg(test)]
 mod cli_text;
 mod core;
@@ -503,6 +518,9 @@ fn main() {
             }
             None => 2,
         },
+        // The CLI's approvals store. It writes and reads SAFEDEPS_HOME, and
+        // no hook runs it.
+        Some("approvals") => approvals::cli(&args[2..]),
         // Read-only queries: none is on a hook's path, and none takes an
         // argument or an environment variable that changes an answer.
         Some("budget-config") => {
@@ -524,7 +542,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | kat [<path>] | stamp [--check] | version");
+            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals commit <hash> <staged> <entry> | approvals revoke <hash> <staged> <entry> <seen> | approvals index | approvals migrate [--json] [--] [<archive>...] | kat [<path>] | stamp [--check] | version");
             2
         }
     };

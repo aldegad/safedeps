@@ -354,7 +354,7 @@ What the lane is made of:
 - **`safedeps hooks install`** activates the repo-local hooks (`core.hooksPath = .githooks`).
 - The **pre-commit hook runs two checks**:
   - **Secret scan** (`safedeps scan secrets --staged`) on every commit, **fail-closed**. If the scanner (local `gitleaks` or Docker) cannot run, it blocks the commit instead of skipping silently.
-  - **Dependency audit** (`safedeps audit`) on **every commit** in a repo that has a supported lockfile. It auto-detects the ecosystem from the lockfile(s) present — npm (`package-lock.json`), pnpm (`pnpm-lock.yaml`), yarn (`yarn.lock`), or bun (`bun.lock`) — and delegates to that tool's native audit. This catches a vulnerable direct *or transitive* dependency — including a CVE that was published *after* you installed the package ("looked safe then, flagged now"), the kind of thing a human never reviews by hand. Running it every commit (not only when the lockfile changes) is the point: it re-queries the advisory DB so a newly-disclosed CVE on an already-installed dependency surfaces at the very next commit. The verdict and an availability failure are kept apart: a real finding **blocks** (fail-closed), but if the advisory DB is **unreachable** (offline / registry error) the hook **warns and lets the commit through** — an observable availability failover, never a silent skip. (CI and the daily watch then re-cover what the offline commit could not verify.)
+  - **Dependency audit** (`safedeps audit`) on **every commit** in a repo that has a supported lockfile. It auto-detects the ecosystem from the lockfile(s) present — npm (`package-lock.json`), pnpm (`pnpm-lock.yaml`), yarn (`yarn.lock`), or bun (`bun.lock`) — and delegates to that tool's native audit. This catches a vulnerable direct *or transitive* dependency — including a CVE that was published *after* you installed the package ("looked safe then, flagged now"), the kind of thing a human never reviews by hand. Running it every commit (not only when the lockfile changes) is the point: it re-queries the advisory DB so a newly-disclosed CVE on an already-installed dependency surfaces at the very next commit. The verdict and an availability failure are kept apart: a real finding **blocks** (fail-closed), but if the advisory DB is **unreachable** (offline / registry error) the hook **warns and lets the commit through** — an observable availability failover, never a silent skip. (CI and the watch then re-cover what the offline commit could not verify.)
 
   The only intentional bypass is `git commit --no-verify`, which the human owns.
 
@@ -500,24 +500,163 @@ The installer is idempotent and only adds symlinks/hook entries. The `--link-bin
 
 If you want the skill folder itself to be the canonical local source, prefer the GitHub setup above.
 
-### Daily Watch With macOS Alerts
+### Approvals Store and Migration
 
-Install a per-user LaunchAgent to run the daily watch once per day:
+`safedeps` records approval provenance in `${SAFEDEPS_HOME}/approvals.jsonl` (default `~/.safedeps/approvals.jsonl`, with no separate environment variable). The store is append-only: `safedeps` never rotates, compacts, truncates, renames, or rewrites it. Each fresh `clean`, `patched`, `clean closure`, or `patched closure` approval appends a JSONL record (`at`, `hash`, `via`, `record`) whose `hash` covers the ecosystem, package, version, and project context. A cache hit requires both a valid ledger entry hash and a vouch from `approvals.jsonl`, and cache hits do not append. `re-check` reads only `approvals.jsonl` as provenance, never falling back to `advisory.log` or archives, and reports unvouched entries with reason `unvouched`. The ledger and this unsigned store remain a same-user convenience cache, not a tamper-resistant security boundary against a same-user attacker.
+
+After upgrading, any existing ledger entry that `approvals.jsonl` does not vouch for is checked again from the start, including a provider requery, once per entry until it is migrated or rechecked. To import verified approvals from your existing audit logs without provider calls, run migration once after upgrading. Migration always reads the live `advisory.log` first and then any archive files you name (`.gz` archives are read via `gzip -dc`); it never auto-discovers archives. Pass existing archive paths as needed (distinct from the legacy `safedeps migrate` command for npm-reorg state):
 
 ```bash
-node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0 \
+safedeps --json approvals migrate /path/to/advisory.log.archive.gz
+```
+
+Every migration report carrying `approve_lines` reports five counts—`inserted`, `not_inserted`, `duplicates`, `unconfirmed`, and `taken_back`—which sum to `approve_lines` when counts are known (`not_inserted` is `0` on success). `cache`, `broken`, and `torn` lines are counted separately and never imported; re-run `check` for cache-only entries. Unconfirmed hashes include per-hash reasons (`no_entry`, `not_an_entry`, or `hash_mismatch`), and re-running migration is idempotent, counting prior inserts as `duplicates`.
+
+Pre-write migration failures (`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`) write nothing (`inserted: 0`). A write failure (`approvals_store_write_failed`) rereads its own hashes under the same lock to report `inserted` and `not_inserted`, or `"unknown"` for both with `reread_outcome` if the reread fails; any partial trailing line is sealed as broken on the next write. `approvals_store_unsynced` means lines were written but sync failed and is still a failure. Migration failures and usage errors exit `4` in the CLI (core exits `1` on failure and `2` on usage); retrying migration is safe, and a partial outcome is not a success. In `re-check`, an unreadable store returns `approvals_store_unreadable` (exit `4`, no judgments), and a missing `safedeps-core` binary returns `core_missing` (exit `4`, naming the missing path). Migration JSON `outcome` and `reread_outcome` fields carry `Outcome::describe` text rather than legacy `os-error-N`/`no-os-code` labels, while all status error names and exit values remain unchanged.
+
+One ledger directory belongs to one `SAFEDEPS_HOME` store. Sharing `SAFEDEPS_LEDGER_DIR` across multiple homes is not prevented and locks do not serialize across different stores, so one home's commit can remove another home's unvouched entry.
+
+### Re-checking What Is Already Installed
+
+The install-time gate judges a package once, when it is installed. An advisory published later is seen only when something checks again. `safedeps watch scan` is that check. It needs no model: it re-checks the ledger, reads the lockfiles of your projects and asks OSV. Run it twice a day. 09:00 and 21:00 local time is the default, so an advisory published at any hour is seen within about half a day, and a slot missed while the computer slept is followed by another.
+
+Who runs it is the host's choice:
+
+- **An agent's scheduler that runs on your computer** comes first. The agent can then also fix what the scan finds: on a branch, with your tests, and merged only when you say so. [SKILL.md, "Re-checking what is already installed"](./SKILL.md#re-checking-what-is-already-installed) is what the agent follows to offer this.
+- **The operating system's scheduler** otherwise: launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler on Windows. Commands for each follow. The agent then reads what the scan found when a session starts.
+- **Not a scheduler that runs in the cloud.** The scan reads the lockfiles on your computer and writes its state there, and a cloud run can read neither.
+
+The operating system schedulers below all run the same wrapper, `scripts/safedeps-recheck-alert.sh`. Whether an agent's routine or one of those schedulers runs the scan, tell the scan once which projects to read. Until you do, a scan has no project list, its summary line reads `population missing 0`, and no project's lockfile is read. Run this once, on any operating system, from the package directory (or your clone):
+
+```bash
+cd "$(npm root -g)/@aldegad/safedeps"
+node scripts/install/install-safedeps-recheck-agent.mjs configure \
   --population-command /usr/local/bin/list-projects \
   --exclude /Volumes/share \
   --followup remote_mount=remote-mount-plan
 ```
 
-`--population-command` is the absolute path of the command that lists your project roots. It prints one `name<TAB>path` a line. `--exclude` is an absolute prefix the scan never reads. `--followup KIND=PLAN` names the plan that owns an unmeasured kind. `--tool-path DIR` names a directory for node, pnpm, yarn or bun. launchd's PATH has no pnpm, yarn or bun, so the installer records their directories. Without `--tool-path` it searches its own PATH. An option not given keeps what is there. `configure` writes only the watch options, without reinstalling.
+`--population-command` is the absolute path of the command that lists your project roots. It prints one root per line, either `name<TAB>path` or an absolute path alone. `--exclude` is an absolute prefix the scan never reads. `--followup KIND=PLAN` names the plan that owns an unmeasured kind. `--tool-path DIR` names a directory for node, pnpm, yarn or bun. A scheduler's PATH may have no pnpm, yarn or bun, so the installer records their directories. Without `--tool-path` it searches its own PATH. An option not given keeps what is there. `install` takes the same options.
 
-The agent's wrapper runs `safedeps --json watch scan`. One run does three things in order:
+After the first run, check `safedeps watch status` to confirm that the projects you listed are included. Look for `population fresh <count>` and `roots walked N/M` in the summary line. `population fresh <count>` means the command exited 0 and printed at least one root. `<count>` is the number of roots it printed. In `roots walked N/M`, M is the number of those roots the scan could open, and N is the number it read in full. Neither is above `<count>`. M is lower when a root is on a network mount, under an excluded prefix (`--exclude`), or could not be reached. N is lower when the walk of a root did not finish.
 
-1. It runs the ledger re-check, as the daily job did before.
+#### macOS: launchd
+
+```bash
+node scripts/install/install-safedeps-recheck-agent.mjs install
+```
+
+This registers a per-user LaunchAgent that runs the scan at 09:00 and 21:00. `--times 07:30,19:30` names other slots, and `--hour`/`--minute` still set one slot. A reinstall without them sets 09:00 and 21:00 again, so pass the same slots each time. When the Mac sleeps through a slot, launchd runs the job once when it wakes (source: `man launchd.plist`, `StartCalendarInterval`).
+
+The agent runs a copy of the CLI that the installer builds in `~/.safedeps/agent`. `install --runtime-only` builds that copy and writes the watch options, and writes, loads and starts nothing of launchd. Use it on a host whose scheduler is an agent's routine or cron, so that refreshing the runtime does not bring a launchd agent back. `uninstall` unloads the LaunchAgent and removes its plist. It leaves the runtime in `~/.safedeps/agent` and the watch's state and config under `~/.safedeps`.
+
+macOS limits what a launchd job may read. launchd starts the wrapper, a script that begins `#!/usr/bin/env bash`, and macOS holds `/usr/bin/env` responsible for the job. That process has no Full Disk Access, so the scan cannot read under the folders macOS protects, such as `~/Documents`. safedeps does not ask you to give `/usr/bin/env` Full Disk Access, because every program started through `env` would get it too. The scan reports what it could not read: after the first run, `safedeps watch status` shows `roots walked N/M (K incomplete)`, and K above 0 means K project folders were not read in full. Keep the projects outside the protected folders, or let an agent's local scheduler run the scan from an app you have allowed to read them. Then read `roots walked` again after its next run.
+
+#### Linux: a systemd user timer, or cron
+
+Run these in your shell after `npm install -g @aldegad/safedeps`. They write a service and a timer with two `OnCalendar=` lines. `Persistent=true` runs a slot missed while the machine was off once, when the timer starts again (source: https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html, verified 2026-11-23).
+
+```bash
+wrapper="$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/safedeps-watch.service <<EOF
+[Unit]
+Description=safedeps watch scan
+
+[Service]
+Type=oneshot
+ExecStart=${wrapper}
+EOF
+cat > ~/.config/systemd/user/safedeps-watch.timer <<'EOF'
+[Unit]
+Description=safedeps watch scan at 09:00 and 21:00
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+OnCalendar=*-*-* 21:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl --user daemon-reload
+systemctl --user enable --now safedeps-watch.timer
+systemctl --user list-timers safedeps-watch.timer
+```
+
+A user timer runs while you are logged in. `loginctl enable-linger "$USER"` keeps your user manager running after you log out (source: https://www.freedesktop.org/software/systemd/man/latest/loginctl.html, verified 2026-11-23). To remove the timer:
+
+```bash
+systemctl --user disable --now safedeps-watch.timer
+rm ~/.config/systemd/user/safedeps-watch.service ~/.config/systemd/user/safedeps-watch.timer
+systemctl --user daemon-reload
+```
+
+These systemd commands have not been run by the maintainers on a Linux host. Where there is no systemd user instance, add two crontab lines instead. cron does not run a slot the machine slept or was off through, and its PATH is short, so record tool directories with `configure --tool-path`.
+
+Both commands read the existing crontab first with `crontab -l`. Registration drops any line ending in `# safedeps-watch`, keeps every other line, and adds the two lines for 09:00 and 21:00, so running it again still leaves two watch lines, not four. Removal drops any line ending in `# safedeps-watch` and keeps every other line. When the account has no crontab and `crontab -l` prints `no crontab for <user>`, registration starts from an empty table and removal writes nothing. If `crontab -l` fails for any other reason, neither command writes anything. Each prints crontab's message and `crontab -l failed; nothing was written`, then exits non-zero. To add the two lines:
+
+```bash
+wrapper="$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then tab="$d/tab"
+  elif grep -q 'no crontab for' "$d/err"; then tab=/dev/null
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$tab" > "$d/new" &&
+    printf '0 9 * * * %s # safedeps-watch\n0 21 * * * %s # safedeps-watch\n' "$wrapper" "$wrapper" >> "$d/new" &&
+    crontab - < "$d/new"
+) && crontab -l
+```
+
+To remove the lines:
+
+```bash
+(
+  d=$(mktemp -d) || exit 1
+  trap 'rm -rf "$d"' EXIT
+  if LC_ALL=C crontab -l > "$d/tab" 2> "$d/err"; then :
+  elif grep -q 'no crontab for' "$d/err"; then exit 0
+  else cat "$d/err" >&2; echo 'crontab -l failed; nothing was written' >&2; exit 1
+  fi
+  awk '!/# safedeps-watch$/' "$d/tab" > "$d/new" && crontab - < "$d/new"
+)
+```
+
+The `no crontab for` text matches the message printed by macOS `crontab`, cronie and Debian's cron (sources: `/usr/bin/crontab` on macOS 13, 26 and 27; cronie `src/crontab.c`, `list_cmd`, https://github.com/cronie-crond/cronie/blob/master/src/crontab.c; Debian cron `crontab.c`, `list_cmd`, https://salsa.debian.org/debian/cron/-/blob/master/crontab.c; verified 2026-11-23). When no other lines remain, removal writes an empty crontab. An account that had no crontab before is left with an empty one, not with none.
+
+Both commands were tested on 2026-11-23 on macOS 13 (x86_64) and macOS 27 (arm64), in bash 3.2, zsh 5.9 and dash, both as scripts and pasted into interactive bash and zsh. A shell function stood in for `crontab` with no crontab program on PATH, so no real crontab was touched. With one unrelated line in the table, registering twice left that line and two watch lines. A failed read (exit 2 with no output, or exit 1 with another message) wrote nothing, left the table byte for byte unchanged, and exited 1 for both registration and removal. With no crontab, registration wrote the two lines and removal wrote nothing. A scheduled run, any run on Linux, and any run against a real crontab were not measured.
+
+#### Windows: Task Scheduler
+
+safedeps runs inside WSL. Find the wrapper's path in your WSL shell with `echo "$(npm root -g)/@aldegad/safedeps/scripts/safedeps-recheck-alert.sh"`, and the distribution's name with `wsl -l -v`. `schtasks /Create` takes one schedule per task, so the two slots are two tasks (source: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create, verified 2026-11-23). In a Windows terminal, with `<distro>` and `<wrapper>` filled in:
+
+```bat
+schtasks /Create /TN safedeps-watch-0900 /SC DAILY /ST 09:00 /TR "wsl.exe -d <distro> -- bash -lc <wrapper>"
+schtasks /Create /TN safedeps-watch-2100 /SC DAILY /ST 21:00 /TR "wsl.exe -d <distro> -- bash -lc <wrapper>"
+schtasks /Query /TN safedeps-watch-0900 /V /FO LIST
+```
+
+Created this way, without `/RU`, a task runs as you and only while you are logged on: `schtasks /Query /V` reads it back with `Logon Mode: Interactive only`, the mode Microsoft's page gives for a task that runs only when its user is logged on. To run it while you are logged off, create it with `/RU <user> /RP <password>`, which stores the password with the task, or with `/RU <user> /NP`, which stores none and runs the task non-interactively with only local resources available (source: the `/it`, `/rp` and `/np` parameters on the page above). Neither was measured with `wsl.exe`. To remove them (source: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-delete, verified 2026-11-23):
+
+```bat
+schtasks /Delete /TN safedeps-watch-0900 /F
+schtasks /Delete /TN safedeps-watch-2100 /F
+```
+
+These commands were run once on Windows 10: both tasks were created, read back as daily at 09:00 and 21:00 with the action above, deleted, and then not found. The query also read `Power Management: Stop On Battery Mode, No Start On Batteries`, so on a laptop running on battery a slot does not start. A scheduled run of the action through `wsl.exe` was not measured.
+
+#### What a run does
+
+The wrapper, `scripts/safedeps-recheck-alert.sh`, runs `safedeps --json watch scan`. One run does three things in order:
+
+1. It runs the ledger re-check.
 2. It refreshes the list of registered project roots and judges the lockfiles under each readable root.
 3. It reports the update status of the host's JDKs under the macOS system path and under SDKMAN. That is a status, not an advisory verdict.
+
+The ledger re-check asks OSV again, live, for every ledger entry on every run. No answer is kept between runs. So a full scan takes time in proportion to the number of ledger entries, and a large ledger can take hours. GHSA is enrichment, not the verdict. Without `GITHUB_TOKEN`, GitHub's limit for unauthenticated requests stops the GHSA cross-check partway through the run. Each skipped request is a WARN line in `advisory.log`, and OSV still decides. Set `GITHUB_TOKEN` to raise that limit. The scan holds the watch lock for its whole run, so a manual `safedeps re-check` during it exits `75` (busy).
 
 The scan classifies every root against the mount table and the exclude prefixes before it opens anything under it. It never reads a network mount or an excluded prefix. It counts them and reports them as unmeasured. A lockfile kind with no resolver yet, such as `Cargo.lock` or `go.sum`, is also an unmeasured row. It is not clean.
 
@@ -525,7 +664,13 @@ There is no `clean` state. A finding closes only on evidence: a lockfile measure
 
 Every run prints one summary line. The line names the walk before `osv measured`, as `roots walked N/M (K incomplete)`. N is `roots_walked`, the roots of class `ok` whose walk finished. K is `roots_walk_incomplete`, the roots of class `ok` whose walk did not finish. M is N + K. The part in parentheses is always shown, also as `(0 incomplete)`. An `osv measured 0` does not mean "nothing found" when the roots were not read. When the scan cannot tell whether the agent runtime is stale, the line ends with `; agent runtime stale unknown (<error>)`, where `<error>` is `last_scan.runtime.error`. `complete` is true only when the population is fresh, nothing is unmeasured and nothing is blocked.
 
-The scan publishes its result to `~/.safedeps/watch/state.json`. Each wrapper run writes a line with `runtime_version` to `~/.safedeps/recheck.log`. Alerts go to `~/.safedeps/recheck-alerts.jsonl` and a macOS notification. The wrapper alerts once per run when there are new events, the population is not fresh, the run has errors, or the agent runtime is stale. The notification says `<n> new, population <state>, <e> errors`, plus `, agent runtime stale` when that is true, and `, agent runtime stale unknown` when `agent_runtime_stale` is null. When the scan has any `root_walk_incomplete` error, the notification starts with `K of M roots not read in full (<said>); what find could not read in them was not checked.` K is the roots of class `ok` whose walk did not finish. M is the roots of class `ok`. `<said>` is the first line find said about the first such root. If find said nothing there, the parenthesis reads `exit <n>, nothing said`. The `watch_attention` record in `recheck-alerts.jsonl` carries `message`, `walk_incomplete`, `roots` and `first_walk_incomplete`. `message` is the notification's text. `walk_incomplete` is K and `roots` is M. `first_walk_incomplete` is `{root, exit, said}` of the first such root, and null when there is none. A busy scan is recorded in `recheck-alerts.jsonl` without a notification. The wrapper keeps the old re-check alerts on the ledger part: a new CVE or KEV, a revoked spec, a skipped provider, a suspected forgery. If the report carries `agent_runtime_stale: true`, reinstall the agent. `agent_runtime_stale` is true only when `stale` in `last_scan.runtime` is true. When the source checkout cannot be read, the scan cannot tell whether the runtime is stale. `last_scan.runtime` then has `source_digest_now: null`, `stale: null`, `source_unreadable` and an `error` that starts with `source checkout unreadable:`. `source_unreadable` names the step that failed. The step is `find`, `sort`, `shasum` or `digest`. In that case `agent_runtime_stale` is `null`, not `false`. The `watch_attention` record keeps the value as the report gave it: true, false or null. An unreadable checkout adds no error row and raises no alert of its own. The notification says `, agent runtime stale unknown` only when the wrapper alerts for another reason.
+The scan publishes its result to `~/.safedeps/watch/state.json`. Each wrapper run writes a line with `runtime_version` to `~/.safedeps/recheck.log`. Alerts go to `~/.safedeps/recheck-alerts.jsonl`, and on macOS to a notification. On Linux and Windows there is no notification, only the record. To hear of a finding on Linux or Windows without reading the record, let an agent's local routine run the scan, or turn on the session-start notice in [Telling the agent](#telling-the-agent). The local routine tells you at once, and the session-start notice tells the agent when a session starts. The wrapper alerts once per run when there are new events, the population is not fresh, the run has errors, or the agent runtime is stale. The notification says `<n> new, population <state>, <e> errors`, plus `, agent runtime stale` when that is true, and `, agent runtime stale unknown` when `agent_runtime_stale` is null. When the scan has any `root_walk_incomplete` error, the notification starts with `K of M roots not read in full (<said>); what find could not read in them was not checked.` K is the roots of class `ok` whose walk did not finish. M is the roots of class `ok`. `<said>` is the first line find said about the first such root. If find said nothing there, the parenthesis reads `exit <n>, nothing said`. The `watch_attention` record in `recheck-alerts.jsonl` carries `message`, `walk_incomplete`, `roots` and `first_walk_incomplete`. `message` is the notification's text. `walk_incomplete` is K and `roots` is M. `first_walk_incomplete` is `{root, exit, said}` of the first such root, and null when there is none. A busy scan is recorded in `recheck-alerts.jsonl` without a notification. The wrapper keeps the old re-check alerts on the ledger part: a new CVE or KEV, a revoked spec, a skipped provider, a suspected forgery. If the report carries `agent_runtime_stale: true`, reinstall the agent, or refresh its runtime with `install --runtime-only`. `agent_runtime_stale` is true only when `stale` in `last_scan.runtime` is true. When the source checkout cannot be read, the scan cannot tell whether the runtime is stale. `last_scan.runtime` then has `source_digest_now: null`, `stale: null`, `source_unreadable` and an `error` that starts with `source checkout unreadable:`. `source_unreadable` names the step that failed. The step is `find`, `sort`, `shasum` or `digest`. In that case `agent_runtime_stale` is `null`, not `false`. The `watch_attention` record keeps the value as the report gave it: true, false or null. An unreadable checkout adds no error row and raises no alert of its own. The notification says `, agent runtime stale unknown` only when the wrapper alerts for another reason.
+
+A `recheck_failed` record in `~/.safedeps/recheck-alerts.jsonl` has two shapes. When `safedeps watch scan` finishes with a ledger re-check failure (`ledger_stage_failed`, such as exit `4` with `error: "core_missing"`), `recheck_failed` carries the ledger re-check's `exit_status` and `error`; the wrapper still raises the subsequent `watch_attention` alert for that run and exits `1`. When the scan command itself ends without publishing a scan, `recheck_failed` carries that command's `exit_status` and `stderr`.
+
+If a scheduled run reports `core_missing`, the installed agent runtime is missing its machine `safedeps-core` binary. Refresh the runtime from a checkout that contains `bin/native/<os>-<arch>/safedeps-core`: `node scripts/install/install-safedeps-recheck-agent.mjs install` with your `--times` (or `--hour` and `--minute`) where the scheduler is the LaunchAgent, or `install --runtime-only` where it is something else. Reinstalling only the package does not update the agent's runtime.
+
+The runtime digest includes this machine's core at `bin/native/<os>-<arch>/safedeps-core`. When that core is missing from the source checkout, scan does not report `stale: true` and does not fail on that fact alone; it records runtime metadata diagnostics with `source_digest_now: null`, `stale: null`, and `source_unreadable` (`step: find`, `find`'s nonzero `exit`, and `said` containing the core path), without adding an error row or raising an alert by itself. Installer status runs the same required-core check as install and stage, exiting `1` with `core-missing` and the path without emitting a JSON digest or stale judgment. Reinstalling the agent from a valid source remains the remedy when `stale: true` reflects a valid source change, while a missing source core must be repaired before the installer can rebuild the runtime. On an unknown platform where `safedeps_watch_core_file` cannot name a path (OS other than `darwin`/`linux`, or architecture other than `arm64`/`aarch64`/`x86_64`/`amd64` from `BASH_VERSINFO[5]`), scan preserves its existing omission rather than covering unsupported platforms, while the installer refuses with `core-missing`.
 
 Exit codes of `safedeps watch scan`:
 
@@ -534,7 +679,16 @@ Exit codes of `safedeps watch scan`:
 - `3`: nothing published. The previous generation stands.
 - `75`: busy. Another run holds the lock and nothing changed. Retry later.
 
-The watch detects and records. It never edits a project, installs anything or updates a JDK. A consumer outside safedeps takes the events with `safedeps watch claim` and `safedeps watch ack`. For how it works, see ["The daily watch" in ARCHITECTURE.md](./ARCHITECTURE.md#the-daily-watch).
+The watch detects and records. It never edits a project, installs anything or updates a JDK. A consumer outside safedeps takes the events with `safedeps watch claim` and `safedeps watch ack`. For how it works, see ["The watch" in ARCHITECTURE.md](./ARCHITECTURE.md#the-watch).
+
+#### Telling the agent
+
+The scan records and raises events. An agent learns of them in one of two ways, and you choose which when you install:
+
+- **Claude Code:** `node scripts/install/install-safedeps-hooks.mjs --watch-notice` registers a session-start hook, `scripts/safedeps-watch-notice.sh`. When a session starts or resumes, it reads `safedeps watch status` and tells the agent the events nobody has claimed, the roots the last scan could not read in full, that no scan has run yet, or that the status could not be read. Otherwise it says nothing. A plain reinstall keeps it. `--no-watch-notice` removes it and keeps the install-time gate.
+- **Another agent:** one line in its instruction file, given in [SKILL.md](./SKILL.md#how-the-agent-learns-of-a-finding). Delete the line to stop.
+
+Either way the agent claims the events before it acts and acks each one when the work is recorded, so the same event is not raised twice.
 
 Useful commands:
 
@@ -649,6 +803,7 @@ safedeps/
     install/install-safedeps-recheck-agent.mjs
     install/migrate-safedeps-state.mjs
     safedeps-recheck-alert.sh
+    safedeps-watch-notice.sh   # Claude Code session-start notice of what the watch found (opt-in)
     ci/               # run the tests on our own hosts, release checks
     measure/          # measurements the docs cite
     test/

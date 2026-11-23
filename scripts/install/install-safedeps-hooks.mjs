@@ -11,6 +11,8 @@
 //   node scripts/install/install-safedeps-hooks.mjs
 //   node scripts/install/install-safedeps-hooks.mjs --uninstall
 //   node scripts/install/install-safedeps-hooks.mjs --link-bin   (optional ~/.local/bin/safedeps)
+//   node scripts/install/install-safedeps-hooks.mjs --watch-notice      (Claude Code: tell a new session what the watch found)
+//   node scripts/install/install-safedeps-hooks.mjs --no-watch-notice   (remove that notice, keep the gate)
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, copyFileSync, mkdirSync, symlinkSync, unlinkSync, readlinkSync, renameSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -51,9 +53,26 @@ const POST_EVENTS_BY_ENGINE = {
 // legacy cleanup reach all of them on either engine.
 const ALL_POST_EVENTS = ["PostToolUse", "PostToolUseFailure"];
 
+// The watch's session-start notice, registered only when asked. Claude Code
+// runs SessionStart hooks when a session starts or resumes and adds their
+// plain stdout to the session's context; the matcher filters on how the
+// session started (`startup`, `resume`, `clear`, `compact`, `fork`) and takes
+// a `|` list (source: https://code.claude.com/docs/en/hooks, "SessionStart"
+// and "Matcher patterns", verified 2026-11-23). It is a notice, not a gate: it
+// reads `safedeps watch status` and blocks nothing. Other engines get one line
+// in their instruction file instead, which SKILL.md gives; the installer
+// writes no instruction file.
+const NOTICE_HOOK_NAME = "safedeps-watch-notice.sh";
+const NOTICE_EVENT = "SessionStart";
+const NOTICE_MATCHER = "startup|resume";
+const NOTICE_TIMEOUT_SECONDS = 10;
+
 const args = new Set(process.argv.slice(2));
+const KNOWN_ARGS = new Set(["--uninstall", "--link-bin", "--watch-notice", "--no-watch-notice"]);
 const UNINSTALL = args.has("--uninstall");
 const LINK_BIN = args.has("--link-bin");
+const WATCH_NOTICE = args.has("--watch-notice");
+const NO_WATCH_NOTICE = args.has("--no-watch-notice");
 
 function log(...parts) { console.log(`[safedeps-install]`, ...parts); }
 function warn(...parts) { console.warn(`[safedeps-install]`, ...parts); }
@@ -191,6 +210,58 @@ function pruneAllSafedepsHooks(config, eventName, hookName) {
   return changed;
 }
 
+function noticeCommand(engineRoot) {
+  const engineName = basename(engineRoot).replace(/^\./u, "");
+  return `~/.${engineName}/skills/${SKILL_ID}/scripts/${NOTICE_HOOK_NAME}`;
+}
+
+function isSafedepsNoticeCommand(command) {
+  if (typeof command !== "string") return false;
+  const normalized = command.replace(/\\/gu, "/");
+  return normalized.includes("/safedeps/") && normalized.endsWith(`/scripts/${NOTICE_HOOK_NAME}`);
+}
+
+// Removes every safedeps notice from SessionStart, and a group it leaves
+// empty, and the event when nothing is left under it.
+function removeNotice(config) {
+  const buckets = config?.hooks?.[NOTICE_EVENT];
+  if (!Array.isArray(buckets)) return false;
+  let changed = false;
+  const kept = [];
+  for (const bucket of buckets) {
+    if (!bucket || !Array.isArray(bucket.hooks)) { kept.push(bucket); continue; }
+    const before = bucket.hooks.length;
+    bucket.hooks = bucket.hooks.filter((h) => !isSafedepsNoticeCommand(h?.command));
+    if (bucket.hooks.length !== before) {
+      changed = true;
+      if (bucket.hooks.length === 0) continue;
+    }
+    kept.push(bucket);
+  }
+  if (!changed) return false;
+  if (kept.length === 0) delete config.hooks[NOTICE_EVENT];
+  else config.hooks[NOTICE_EVENT] = kept;
+  return true;
+}
+
+// One notice, in a group of its own with the canonical matcher and timeout.
+// A notice anywhere else (another group, an older path) is removed first.
+function ensureNotice(config, command) {
+  const buckets = config?.hooks?.[NOTICE_EVENT];
+  if (Array.isArray(buckets)) {
+    const canonical = buckets.filter((b) => b && b.matcher === NOTICE_MATCHER && Array.isArray(b.hooks)
+      && b.hooks.length === 1 && b.hooks[0]?.type === "command" && b.hooks[0].command === command
+      && b.hooks[0].timeout === NOTICE_TIMEOUT_SECONDS);
+    const all = buckets.flatMap((b) => (Array.isArray(b?.hooks) ? b.hooks : [])).filter((h) => isSafedepsNoticeCommand(h?.command));
+    if (canonical.length === 1 && all.length === 1) return false;
+  }
+  removeNotice(config);
+  config.hooks = config.hooks ?? {};
+  config.hooks[NOTICE_EVENT] = config.hooks[NOTICE_EVENT] ?? [];
+  config.hooks[NOTICE_EVENT].push({ matcher: NOTICE_MATCHER, hooks: [{ type: "command", command, timeout: NOTICE_TIMEOUT_SECONDS }] });
+  return true;
+}
+
 function installInEngine({ engineRoot, configPath, label, engine }) {
   if (!existsSync(engineRoot)) {
     warn(`skip ${label} (${engineRoot} not present)`);
@@ -210,7 +281,8 @@ function installInEngine({ engineRoot, configPath, label, engine }) {
       for (const event of ALL_POST_EVENTS) {
         post = (removeHook(cfg, event, postCommand) || pruneAllSafedepsHooks(cfg, event, POST_HOOK_NAME)) || post;
       }
-      if (pre || post) {
+      const notice = removeNotice(cfg);
+      if (pre || post || notice) {
         writeJsonWithBackup(configPath, cfg);
         log(`patched ${configPath} (removed safedeps hooks)`);
       } else {
@@ -239,11 +311,24 @@ function installInEngine({ engineRoot, configPath, label, engine }) {
   for (const event of postEvents) {
     postAdded = ensureHook(cfg, event, postCommand, POST_HOOK_TIMEOUT_SECONDS) || postAdded;
   }
-  if (legacyPreRemoved || legacyPostRemoved || preAdded || postAdded) {
+  // The notice changes only when asked: a run without either flag keeps what
+  // is there, so reinstalling the gate does not drop a notice the user chose.
+  let notice = "kept";
+  let noticeChanged = false;
+  if (NO_WATCH_NOTICE) {
+    noticeChanged = removeNotice(cfg);
+    notice = noticeChanged ? "removed" : "none";
+  } else if (WATCH_NOTICE && engine === "claude") {
+    noticeChanged = ensureNotice(cfg, noticeCommand(engineRoot));
+    notice = noticeChanged ? "added" : "ok";
+  } else if (WATCH_NOTICE) {
+    log(`${label}: no session-start notice is registered here; add the instruction line from SKILL.md ("Re-checking what is already installed") to this engine's instruction file instead`);
+  }
+  if (legacyPreRemoved || legacyPostRemoved || preAdded || postAdded || noticeChanged) {
     writeJsonWithBackup(configPath, cfg);
-    log(`patched ${configPath} (pre=${preAdded ? "added" : "ok"}, post=${postAdded ? "added" : "ok"}, legacy=${legacyPreRemoved || legacyPostRemoved ? "removed" : "ok"})`);
+    log(`patched ${configPath} (pre=${preAdded ? "added" : "ok"}, post=${postAdded ? "added" : "ok"}, legacy=${legacyPreRemoved || legacyPostRemoved ? "removed" : "ok"}, watch notice=${notice})`);
   } else {
-    log(`config ok   ${configPath} (hooks already registered)`);
+    log(`config ok   ${configPath} (hooks already registered, watch notice=${notice})`);
   }
 }
 
@@ -302,6 +387,12 @@ function printRecommendedSetup() {
   out.push("       → full-repo sweep for CI / pre-release: scans the whole tree (not just");
   out.push("         the staged diff) and verifies the hooks themselves are installed.");
   out.push("");
+  out.push("  5. Re-check what is already installed  ...  recommended");
+  out.push("       An advisory can come out after an install. Schedule");
+  out.push("       `safedeps watch scan` twice a day (09:00 and 21:00 by default):");
+  out.push("       SKILL.md / README → \"Re-checking what is already installed\".");
+  out.push("       --watch-notice (Claude Code) tells each new session what it found.");
+  out.push("");
   out.push("  Docs: README → \"Two Lanes\"");
   if (!safedepsOnPath()) {
     out.push("");
@@ -352,6 +443,12 @@ function prepareCore() {
 }
 
 function main() {
+  for (const arg of args) {
+    if (!KNOWN_ARGS.has(arg)) throw new Error(`unknown argument: ${arg}. Nothing was registered.`);
+  }
+  if (WATCH_NOTICE && (NO_WATCH_NOTICE || UNINSTALL)) {
+    throw new Error("--watch-notice adds the notice and --no-watch-notice or --uninstall removes it; give one. Nothing was registered.");
+  }
   if (!UNINSTALL) prepareCore();
 
   installInEngine({

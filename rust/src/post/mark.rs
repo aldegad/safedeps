@@ -77,7 +77,7 @@ impl Mark {
         match state::write_state_file(&path, &jv::dump(&value)) {
             Ok(()) => Self(State::Written(path)),
             Err(error) => {
-                let unwritable = cat(&[b"this run wrote no judgment mark: ", &Outcome::Io(Err(error)).describe(Action::Write(path.as_path()), Form::Action)]);
+                let unwritable = cat(&[b"this run wrote no judgment mark: ", &Outcome::Io(Err(error)).describe(Action::WriteOf(path.as_path()), Form::Action)]);
                 let logged = state::log_advisory(home, &cat(&[b"post-verify: ", &unwritable, b". Command: ", command]));
                 Self::not_written(home, &unwritable, logged, command, project)
             }
@@ -95,7 +95,7 @@ impl Mark {
     /// the end of `Call::take`; the confirmed record is not read.
     fn not_written(home: &Path, fact: &[u8], logged: Outcome, command: &[u8], project: &Path) -> Self {
         if logged.success() { return Self(State::Logged(cat(&[b"safedeps: ", fact, b". ", UNMARKED]))) }
-        let unlogged = logged.describe(Action::Write(state::advisory_path(home).as_path()), Form::Action);
+        let unlogged = logged.describe(Action::WriteOf(state::advisory_path(home).as_path()), Form::Action);
         let mut said = fact.to_vec();
         if let Some(first) = said.first_mut() { *first = first.to_ascii_uppercase(); }
         Self(State::Unrecorded(cat(&[UNJUDGED, b"\n\n", &said, b".\nIt wrote no line to advisory.log either: ", &unlogged, b".\n",
@@ -136,7 +136,7 @@ impl Mark {
         if let Err(error) = std::fs::remove_file(&path) {
             let added = add_record(&path, Added::Returned);
             let unadded = if added.success() { Vec::new() }
-                else { cat(&[b". The record that it returned was not added to it either: ", &added.describe(Action::Write(&path), Form::Action)]) };
+                else { cat(&[b". The record that it returned was not added to it either: ", &added.describe(Action::WriteOf(&path), Form::Action)]) };
             state::log_advisory(home, &cat(&[b"post-verify: the judgment of this call returned, and its judgment mark ", sh::bytes(&path),
                 b" was not removed: ", &Outcome::Io(Err(error)).describe(Action::Removal, Form::Action), &unadded, b". Command: ", command]));
         }
@@ -357,7 +357,7 @@ fn claim(home: &Path, from: &Path, owner: (u32, u64), fact: &[u8], (me, my_start
         Err(error) => {
             // No run can claim it, so the lock alone keeps it said once. A run
             // that could not take the lock either says so in the line.
-            let unclaimed = cat(&[b" This run could not claim the mark: ", &Outcome::Io(Err(error)).describe(Action::Rename(from), Form::Action),
+            let unclaimed = cat(&[b" This run could not claim the mark: ", &Outcome::Io(Err(error)).describe(Action::RenameOf(from), Form::Action),
                 b".", &unlocked]);
             let Some(line) = said(read, &mark, owner, fact, &unclaimed) else { return };
             // The file stays where it is, so the record that it was said goes
@@ -381,7 +381,7 @@ fn add_said(home: &Path, path: &Path) {
     let added = add_record(path, Added::Said);
     if added.success() { return }
     state::log_advisory(home, &cat(&[b"post-verify: the judgment mark ", sh::bytes(path), b" was said, and the record that it was said was not added to it: ",
-        &added.describe(Action::Write(path), Form::Action), b". A later run says it again."]));
+        &added.describe(Action::WriteOf(path), Form::Action), b". A later run says it again."]));
 }
 
 /// Removes this run's claim, once its line is written (`said`) or once it
@@ -394,7 +394,7 @@ fn retire(home: &Path, held: &Path, said: bool) {
     let Err(error) = std::fs::remove_file(held) else { return };
     let added = if said { add_record(held, Added::Said) } else { Outcome::Io(Ok(())) };
     let unadded = if added.success() { Vec::new() }
-        else { cat(&[b". The record that it was said was not added to it either: ", &added.describe(Action::Write(held), Form::Action)]) };
+        else { cat(&[b". The record that it was said was not added to it either: ", &added.describe(Action::WriteOf(held), Form::Action)]) };
     state::log_advisory(home, &cat(&[b"post-verify: the claimed judgment mark ", sh::bytes(held), b" was not removed: ",
         &Outcome::Io(Err(error)).describe(Action::Removal, Form::Action), &unadded]));
 }

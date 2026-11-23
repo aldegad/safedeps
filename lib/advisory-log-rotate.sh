@@ -9,10 +9,10 @@
 #
 # THE FILE IS TWO CHANNELS MIXED, AND THAT DECIDES THE DESIGN:
 #   - EVIDENCE  — `check approve/block/warn`, `re-check revoke`, WARN, ERROR.
-#     `sf_ledger_has_approval_provenance` READS these: it is the oracle that
-#     tells a real ledger approval from a forged one. Losing a line here
-#     silently converts a legitimate approval into a suspected forgery. Tiny,
-#     and it grows only when a decision is made.
+#     The record that makes every decision, bypass and failure observable.
+#     It is not where an approval's provenance lives: `re-check` reads that
+#     from the approvals store (rust/src/approvals.rs), which no rotation
+#     touches. Tiny, and it grows only when a decision is made.
 #   - TRACE     — `INFO` lines, overwhelmingly per-package cache-hit notices.
 #     Nothing reads them once the run is over, and they are essentially all of
 #     the volume: the file grows in proportion to packages inspected, not to
@@ -20,8 +20,8 @@
 #
 # So rotation here is COMPACTION, not truncation: the whole file is archived
 # (gzip, because this content is extremely repetitive), and the live file is
-# rewritten with every non-INFO line kept. The oracle keeps its complete
-# evidence set, the trace that nobody reads stops accumulating, and the full
+# rewritten with every non-INFO line kept. The live file keeps every
+# evidence line, the trace that nobody reads stops accumulating, and the full
 # history including that trace is still in the archives.
 #
 # COPY -> GZIP -> REWRITE IN PLACE, never rename. Appenders hold the file by
@@ -55,8 +55,8 @@ SAFEDEPS_ADVISORY_LOG_LOCK_STALE_SECONDS="${SAFEDEPS_ADVISORY_LOG_LOCK_STALE_SEC
 # writers emit (`[<ts>] INFO <message>`), so it drops the trace channel and
 # nothing else. Deliberately expressed as "drop INFO" rather than "keep the
 # known evidence verbs": a verb added later is kept by default, and the failure
-# direction of a mistake here is a slightly larger file rather than a missing
-# approval.
+# direction of a mistake here is a slightly larger file rather than a lost
+# evidence line.
 SAFEDEPS_ADVISORY_LOG_TRACE_RE='^\[[^]]*\] INFO '
 
 safedeps_advisory_log_size() {

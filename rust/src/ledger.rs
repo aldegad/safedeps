@@ -80,16 +80,29 @@ pub fn hash(ecosystem: &str, package: &str, version: &str, context: &str) -> Str
     format!("sha256:{}", sha256::hex(text.as_bytes()))
 }
 
-fn filename(key: &str) -> String { format!("{}.json", key.replacen(':', "-", 1)) }
+pub(crate) fn filename(key: &str) -> String { format!("{}.json", key.replacen(':', "-", 1)) }
 
 const DIRECTORY_ENV: &str = "SAFEDEPS_LEDGER_DIR";
 const DIRECTORY_NAME: &str = "approved-specs";
 
-pub fn directory() -> PathBuf {
+pub fn directory() -> PathBuf { directory_in(&state::guard_dir()) }
+/// The ledger directory of the home `home`: SAFEDEPS_LEDGER_DIR, or
+/// `approved-specs` in `home`, as the CLI derives it.
+pub fn directory_in(home: &Path) -> PathBuf {
     match std::env::var_os(DIRECTORY_ENV) {
         Some(p) if !p.is_empty() => p.into(),
-        _ => state::guard_dir().join(DIRECTORY_NAME),
+        _ => home.join(DIRECTORY_NAME),
     }
+}
+
+/// The hash an entry's own fields give, for an entry `valid` reads as one:
+/// its ecosystem, package and version, and its project context's hash where
+/// it has one. re-check recomputes the same hash from the same fields
+/// (`sf_recheck_stage` in bin/safedeps, step 2).
+pub fn recomputed(v: &Value) -> Option<String> {
+    if !valid(v) { return None; }
+    let context = defaulted(v.get("project_context")).and_then(|c| string(c, "context_hash")).unwrap_or("");
+    Some(hash(string(v, "ecosystem")?, string(v, "package")?, string(v, "version")?, context))
 }
 fn init(dir: &Path) -> io::Result<()> { std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir) }
 

@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.24.0"
+SAFEDEPS_VERSION="2.25.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -38,9 +38,9 @@ source "${SAFEDEPS_REPO_DIR}/lib/ledger/recheck-report.sh"
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR:-${SAFEDEPS_HOME}/approved-specs}"
 # Derived, never taken from the environment — see lib/providers/providers.sh for
-# why: this file is also the oracle `re-check` reads to tell a real approval
-# from a forged one. providers.sh is sourced above and captured the environment
-# value before overwriting it, so the notice below quotes what the user set.
+# why: this file is where every bypass is recorded. providers.sh is sourced
+# above and captured the environment value before overwriting it, so the notice
+# below quotes what the user set.
 SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_HOME}/advisory.log"
 
 # ---- output mode -------------------------------------------------------------
@@ -242,44 +242,6 @@ sf_ledger_unlisted() {
   fi
 }
 
-sf_ledger_has_approval_provenance() {
-  local hash="$1"
-  local ecosystem="$2"
-  local package_name="$3"
-  local version="$4"
-
-  # A missing advisory.log is missing provenance, not proof of approval: every
-  # legitimate approval writes the log, so entries without it are suspect.
-  [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] || return 1
-  # Whole-field comparison in pure bash. Two properties matter and both are
-  # attacker-relevant because the ledger fields are attacker-controlled:
-  #   - never substring: grep -F "hash=${hash}" matched a *prefix* of a
-  #     legitimate hash (and an empty hash matched every approve line).
-  #   - never escape-interpreting: awk -v processes backslash escapes in the
-  #     value, so a package field like `left-p\141d` normalized to `left-pad`
-  #     and borrowed another entry's approval. bash `==` compares literally.
-  local want_hash="hash=${hash}"
-  local want_eco="ecosystem=${ecosystem}"
-  local want_pkg="package=${package_name}"
-  local want_ver="version=${version}"
-  local line tok has_hash has_eco has_pkg has_ver
-  local -a toks
-  while IFS= read -r line; do
-    [[ "${line}" == *"check approve"* ]] || continue
-    IFS=$' \t' read -ra toks <<< "${line}"
-    has_hash=0 has_eco=0 has_pkg=0 has_ver=0
-    for tok in "${toks[@]}"; do
-      [[ -n "${hash}" && "${tok}" == "${want_hash}" ]] && has_hash=1
-      [[ "${tok}" == "${want_eco}" ]] && has_eco=1
-      [[ "${tok}" == "${want_pkg}" ]] && has_pkg=1
-      [[ "${tok}" == "${want_ver}" ]] && has_ver=1
-    done
-    [[ -n "${hash}" && "${has_hash}" -eq 1 ]] && return 0
-    [[ "${has_eco}" -eq 1 && "${has_pkg}" -eq 1 && "${has_ver}" -eq 1 ]] && return 0
-  done < "${SAFEDEPS_ADVISORY_LOG}"
-  return 1
-}
-
 # The results `safedeps check` reports, declared once. SKILL.md's table under
 # "Then act on `result`" lists these and no other (smoke.sh holds the two to
 # each other).
@@ -366,35 +328,204 @@ sf_check_unavailable() {
   fi
 }
 
-# The same for an approval the ledger would not take: every approval a report
-# states is one the hook will find. The caller removes its files and returns 4.
+# The same for an approval that could not be written (sf_check_commit names
+# why): every approval a report states is one this check committed, the hook
+# will find, and the approvals store vouches for. A report never states one
+# another check made. An approval in doubt is neither stated nor said to be
+# absent. The caller removes its files and returns 4.
 sf_check_not_written() {
   local ecosystem="$1" package="$2" range="$3" version="$4"
+  local failure="${SF_CHECK_COMMIT_ERROR:-ledger_write_failed}" kind why tail=" — not approved"
 
-  sf_err "${package}@${version} cleared, but the ledger could not be written — not approved"
-  sf_advisory_log "check fail-closed ledger-write ecosystem=${ecosystem} package=${package} version=${version}"
+  case "${failure}" in
+    core_missing) kind=core-missing why="an approval is written with the safedeps-core binary, which is missing" ;;
+    approvals_store_failed) kind=approvals-store why="the approvals store did not take the approval" ;;
+    approvals_store_in_doubt)
+      kind=approvals-store-in-doubt
+      why="the approvals store may hold its line, and nothing confirms that its ledger entry stands"
+      tail=" — in doubt"
+      ;;
+    *) kind=ledger-write why="the ledger entry or its advisory.log line could not be written" ;;
+  esac
+  sf_err "${package}@${version} cleared, but ${why}${tail}"
+  sf_advisory_log "check fail-closed ${kind} ecosystem=${ecosystem} package=${package} version=${version}"
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
     sf_check_json "${SAFEDEPS_CHECK_ERROR}" "${ecosystem}" "${package}" "${range}" '{}' '{resolved_version:$version}' \
-      '{approved:false, error:"ledger_write_failed"}' \
-      -n --arg version "${version}"
+      '{approved:false, error:$error}' \
+      -n --arg version "${version}" --arg error "${failure}"
   fi
 }
 
-# An approval is three things that must agree: the ledger entry the hook reads,
-# the `check approve` line re-check reads, and the report. A caller makes all
-# three, then calls this, then only prints: a failure anywhere leaves none of
-# them, and from here on nothing can fail.
+# ---- the core and the approvals store ----------------------------------------
+
+# The core binary beside this CLI, bin/native/<os>-<arch>/safedeps-core, into
+# SF_CORE. The platform is read from bash the way the hook entry reads it
+# (scripts/safedeps-hook-entry.sh), and nothing in the environment chooses the
+# binary. The approvals store is the core's (rust/src/approvals.rs), so an
+# approval is written with it and a cache hit is read with it, each time in the
+# SAFEDEPS_HOME this CLI writes the ledger and advisory.log in. Where it is not
+# there, SF_CORE_MISSING says where it was looked for.
+SF_CORE=""
+SF_CORE_MISSING=""
+sf_core() {
+  local machine="${BASH_VERSINFO[5]:-}" native="${SAFEDEPS_REPO_DIR}/bin/native" os="" arch="" repair
+
+  if [[ -d "${SAFEDEPS_REPO_DIR}/rust" ]]; then
+    repair="build it from this checkout with ${SAFEDEPS_REPO_DIR}/scripts/build-core.sh"
+  else
+    repair="reinstall the package"
+  fi
+  case "${machine}" in
+    *-darwin*) os=darwin ;;
+    *-linux*) os=linux ;;
+  esac
+  case "${machine%%-*}" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  if [[ -z "${os}" || -z "${arch}" ]]; then
+    SF_CORE_MISSING="no safedeps-core binary is built for this machine (bash was built for ${machine:-an unnamed machine}), so none was found under ${native}"
+    return 1
+  fi
+  SF_CORE="${native}/${os}-${arch}/safedeps-core"
+  if [[ ! -f "${SF_CORE}" || ! -x "${SF_CORE}" ]]; then
+    SF_CORE_MISSING="the safedeps-core binary is missing: ${SF_CORE} is not an executable file. Repair: ${repair}"
+    return 1
+  fi
+}
+
+# What `safedeps-core approvals index` prints, as jq: an object whose `present`
+# is a boolean, `hashes` an object keyed by hash and `broken` a number
+# (index_json in rust/src/approvals.rs). Anything else is no index, and no
+# reader takes it for a store that vouches for nothing.
+SF_APPROVALS_INDEX_JQ='def approvals_index_whole:
+  type == "object" and (.present | type) == "boolean" and (.hashes | type) == "object" and (.broken | type) == "number";'
+
+# Whether the approvals store vouches for HASH, from one read of the store:
+# 0 it does, 1 it does not, 2 it could not be read (no core, a store the core
+# could not read, or an answer that is no index).
+sf_store_vouches() {
+  local hash="$1" index answer
+
+  sf_core || return 2
+  index=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals index) || return 2
+  answer=$(jq -r --arg hash "${hash}" "${SF_APPROVALS_INDEX_JQ}"'
+    if approvals_index_whole
+    then (if .hashes[$hash] == true then "vouched" else "not vouched" end)
+    else error("not an approvals index") end' <<< "${index}") || return 2
+  case "${answer}" in
+    vouched) return 0 ;;
+    "not vouched") return 1 ;;
+  esac
+  return 2
+}
+
+# An approval is three records and a report. The ledger entry is what the hook
+# reads, the `check approve(...)` line in advisory.log is the record a person
+# reads, and the line in the approvals store is the record re-check and the
+# cache lookup read. This CLI makes the entry and validates it in a staged file
+# beside the entry's path (safedeps_ledger_stage). The core commits it
+# (`safedeps-core approvals commit`, rust/src/approvals.rs), all under the
+# store lock and in this order: it removes an entry at the path that the store
+# does not vouch for, writes the store line and syncs it, writes the approve
+# line, then renames the staged file into place. The rename is the commit
+# point, and the first step that fails stops the commit. So a failed check
+# leaves no entry of its own, and at most a store line with no entry. The core
+# never removes the staged file: this function does. The binary is found
+# before anything is staged, so a missing one leaves nothing (core-missing).
+# The caller makes the report first, calls this, and only prints after it.
+#
+# The commit answers `approved`, or `not-approved <failure> <entry>`: the
+# failure for the report, and whether the commit removed an entry the store
+# did not vouch for. What the core cannot rule out it names on stderr and in
+# advisory.log: unsynced (rust/src/approvals.rs). A commit that answered
+# neither ended before it answered. MINE, a second name for the staged file
+# made before the commit starts, says where the commit left this check's file:
+#   - at the staged path: the commit put no entry in place, and the store may
+#     hold its line, so the check is in doubt;
+#   - at the entry's path: the commit renamed it into place, its commit point,
+#     so the approval stands;
+#   - at neither: nothing says more, so the check is in doubt and says only
+#     that.
+# MINE is removed on every path. Rotation of advisory.log is not work for the
+# store lock, so it runs before the commit.
+# SF_CHECK_COMMIT_ERROR names a failure for the report. A report names no
+# entry: whatever stands at the path after a failed check is not its own.
 #   sf_check_commit HASH ENTRY RECORD
+SF_CHECK_COMMIT_ERROR=""
 sf_check_commit() {
   local hash="$1" entry="$2" record="$3"
-  local ledger_file
+  local ledger_file staged mine="" answer rc=0
 
+  SF_CHECK_COMMIT_ERROR="ledger_write_failed"
+  if ! sf_core; then
+    SF_CHECK_COMMIT_ERROR="core_missing"
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. An approval is written with it, so nothing is approved."
+    return 1
+  fi
   ledger_file=$(safedeps_ledger_path_for_hash "${hash}") || return 1
-  if safedeps_ledger_atomic_write "${ledger_file}" <<< "${entry}" && sf_advisory_log "${record}"; then
+  staged=$(safedeps_ledger_stage "${ledger_file}" <<< "${entry}") || return 1
+  if ! mine=$(mktemp "${ledger_file%/*}/.${ledger_file##*/}.mine.XXXXXX") || ! ln -f -- "${staged}" "${mine}" 2>/dev/null; then
+    rm -f -- "${staged}" ${mine:+"${mine}"} || true
+    sf_eprintf "safedeps: not committed: the staged entry of ${hash} could not be given a second name, so the commit was not started."
+    return 1
+  fi
+  safedeps_advisory_log_rotate_once
+  answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals commit "${hash}" "${staged}" "${ledger_file}" <<< "${record}") || rc=$?
+  if [[ "${rc}" -eq 0 && "${answer}" == approved ]]; then
+    rm -f -- "${mine}" || true
     return 0
   fi
-  rm -f "${ledger_file}"
+  if [[ "${rc}" -eq 1 ]] && sf_check_commit_answer "${answer}"; then
+    sf_check_commit_drop "${staged}" "${mine}"
+    return 1
+  fi
+  if [[ "${staged}" -ef "${mine}" ]]; then
+    sf_check_commit_drop "${staged}" "${mine}"
+    SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
+    sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended before it answered. Its staged entry is still there, so it put no entry in place. The approvals store may hold its line, and advisory.log its approve line."
+    return 1
+  fi
+  if [[ "${ledger_file}" -ef "${mine}" ]]; then
+    rm -f -- "${mine}" || true
+    sf_eprintf "safedeps: the commit of ${hash} ended before it answered. Its entry is at the ledger entry's path, so the approval stands."
+    return 0
+  fi
+  rm -f -- "${mine}" || true
+  SF_CHECK_COMMIT_ERROR="approvals_store_in_doubt"
+  sf_eprintf "safedeps: in-doubt: the commit of ${hash} ended before it answered. This check's file is neither at the staged path nor at the entry's path."
   return 1
+}
+
+# A commit's files once it answered: the staged file, where it is still this
+# check's (MINE), then MINE.
+sf_check_commit_drop() {
+  local staged="$1" mine="$2"
+
+  if [[ "${staged}" -ef "${mine}" ]]; then
+    rm -f -- "${staged}" || true
+  fi
+  rm -f -- "${mine}" || true
+}
+
+# A commit's `not-approved <failure> <entry>`, read into SF_CHECK_COMMIT_ERROR.
+# Anything else is no answer, and nothing is read.
+sf_check_commit_answer() {
+  local failure entry
+
+  [[ "$1" == "not-approved "* ]] || return 1
+  failure=${1#not-approved }
+  entry=${failure#* }
+  failure=${failure%% *}
+  case "${failure}" in
+    ledger_write_failed|approvals_store_failed|approvals_store_in_doubt) ;;
+    *) return 1 ;;
+  esac
+  case "${entry}" in
+    untouched|removed) ;;
+    *) return 1 ;;
+  esac
+  SF_CHECK_COMMIT_ERROR="${failure}"
 }
 
 # The closure source as an approval's project context, or nothing when the
@@ -814,29 +945,52 @@ cmd_check() {
       fi
     fi
   fi
-  if [[ "${ledger_context_status}" -ne 2 ]] && ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}" 2>/dev/null); then
-    if jq -e '.approved == true' <<< "${ledger_check}" >/dev/null 2>&1 && { [[ "${ecosystem}" != "npm" ]] || sf_ledger_hit_has_npm_closure "${ledger_check}"; }; then
-      local hash approved_at expires_at project_context resolved_closure
-      hash=$(jq -r '.hash' <<< "${ledger_check}")
-      approved_at=$(jq -r '.spec.approved_at // "n/a"' <<< "${ledger_check}")
-      expires_at=$(jq -r '.spec.expires_at // "n/a"' <<< "${ledger_check}")
-      project_context=$(jq -c '.spec.project_context // null' <<< "${ledger_check}")
-      resolved_closure=$(jq -c '.spec.evidence.closure // []' <<< "${ledger_check}")
-      sf_ok "${pkg}@${version} already approved (until ${expires_at})"
-      sf_info "ledger: ${hash}"
-      sf_advisory_log "check approve(cache) ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash}"
-      if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-        sf_check_json "${SAFEDEPS_CHECK_ALREADY_APPROVED}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
-          '{approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at, closure_source:$project_context, resolved_closure:$resolved_closure, install_hint:install_hint($version)}' \
-          -n --arg version "${version}" \
-          --arg hash "${hash}" \
-          --arg approved_at "${approved_at}" \
-          --arg expires_at "${expires_at}" \
-          --argjson project_context "${project_context}" \
-          --argjson resolved_closure "${resolved_closure}"
+  # A cache hit is an approval the approvals store vouches for: a ledger entry
+  # whose hash matches its fields is not enough on its own. The store is read
+  # first and the entry after. A commit writes its store line only after it
+  # removed an entry the store did not vouch for, so an entry read after the
+  # store vouched for its hash is one the store vouched for then, or the
+  # commit's own. In the other order the lookup could take for a hit an entry
+  # a commit then removes, matched with the line of a commit that fails. Where
+  # no file stands at the entry's path there is nothing to look up, and the
+  # store is not read. An entry the store does not vouch for, or a store that
+  # cannot be read, is checked again from the start, and a check that clears
+  # it writes a new approval.
+  local hash="" vouched=0 unvouched approved_at expires_at project_context resolved_closure
+  if [[ "${ledger_context_status}" -ne 2 ]] \
+    && hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}") \
+    && [[ -f "$(safedeps_ledger_path_for_hash "${hash}")" ]]; then
+    sf_store_vouches "${hash}" || vouched=$?
+    if ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}" 2>/dev/null) \
+      && [[ "$(jq -r '.hash' <<< "${ledger_check}" 2>/dev/null)" == "${hash}" ]] \
+      && jq -e '.approved == true' <<< "${ledger_check}" >/dev/null 2>&1 \
+      && { [[ "${ecosystem}" != "npm" ]] || sf_ledger_hit_has_npm_closure "${ledger_check}"; }; then
+      if [[ "${vouched}" -ne 0 ]]; then
+        unvouched="not-vouched"
+        [[ "${vouched}" -eq 1 ]] || unvouched="unreadable"
+        sf_warn "${pkg}@${version} is in the ledger, but the approvals store does not vouch for it (${unvouched}) — checking it again"
+        sf_advisory_log "check ledger-unvouched ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash} store=${unvouched}"
+      else
+        approved_at=$(jq -r '.spec.approved_at // "n/a"' <<< "${ledger_check}")
+        expires_at=$(jq -r '.spec.expires_at // "n/a"' <<< "${ledger_check}")
+        project_context=$(jq -c '.spec.project_context // null' <<< "${ledger_check}")
+        resolved_closure=$(jq -c '.spec.evidence.closure // []' <<< "${ledger_check}")
+        sf_ok "${pkg}@${version} already approved (until ${expires_at})"
+        sf_info "ledger: ${hash}"
+        sf_advisory_log "check approve(cache) ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash}"
+        if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+          sf_check_json "${SAFEDEPS_CHECK_ALREADY_APPROVED}" "${ecosystem}" "${pkg}" "${range}" '{}' '{resolved_version:$version}' \
+            '{approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at, closure_source:$project_context, resolved_closure:$resolved_closure, install_hint:install_hint($version)}' \
+            -n --arg version "${version}" \
+            --arg hash "${hash}" \
+            --arg approved_at "${approved_at}" \
+            --arg expires_at "${expires_at}" \
+            --argjson project_context "${project_context}" \
+            --argjson resolved_closure "${resolved_closure}"
+        fi
+        rm -f "${ledger_context_file}" || true
+        return 0
       fi
-      rm -f "${ledger_context_file}" || true
-      return 0
     fi
   fi
   rm -f "${ledger_context_file}"
@@ -1069,6 +1223,57 @@ cmd_ledger() {
 
 # ---- revoke ------------------------------------------------------------------
 
+# A revoke rewrites a ledger entry, so it runs under the approvals store lock,
+# as a commit does. The ledger's format keeps one writer, this CLI, so the CLI
+# makes the revoked entry and the core puts it in place, as with a commit. The
+# CLI takes a second name for the entry at the path and reads that file once:
+# what it validates is what it revokes. It stages the revoked entry beside the
+# path. The core (`safedeps-core approvals revoke`, rust/src/approvals.rs)
+# takes the lock and renames the staged entry into place only where the entry
+# at the path is still the file the CLI read. Otherwise a commit replaced or
+# removed the entry between the read and the lock: the core answers
+# `changed`, and the revoke reads the entry again. Where no entry stands then,
+# nothing is revoked, and the revoke says so. An entry that changes three
+# times running is an error, and nothing is revoked. Prints the revoked entry.
+#   sf_ledger_revoke ECOSYSTEM PACKAGE VERSION REASON CONTEXT_HASH
+SF_REVOKE_READS=3
+sf_ledger_revoke() {
+  local ecosystem="$1" package="$2" version="$3" reason="$4" context_hash="$5"
+  local ledger_file hash seen valid staged entry answer rc attempt
+
+  if ! sf_core; then
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. A revoke is written with it, so nothing is revoked."
+    return 1
+  fi
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package}" "${version}" "${context_hash}") || return 1
+  hash=$(safedeps_ledger_hash "${ecosystem}" "${package}" "${version}" "${context_hash}") || return 1
+  for (( attempt = 1; attempt <= SF_REVOKE_READS; attempt++ )); do
+    if [[ ! -f "${ledger_file}" ]]; then
+      sf_eprintf "safedeps: no ledger entry stands at ${ledger_file} now, so nothing was revoked."
+      return 1
+    fi
+    seen=$(mktemp "${ledger_file%/*}/.${ledger_file##*/}.seen.XXXXXX") || return 1
+    if ! ln -f "${ledger_file}" "${seen}" 2>/dev/null \
+      || ! valid=$(safedeps_ledger_valid_entry "${seen}") \
+      || ! entry=$(safedeps_ledger_render_revoked "${reason}" <<< "${valid}") \
+      || ! staged=$(safedeps_ledger_stage "${ledger_file}" <<< "${entry}"); then
+      rm -f -- "${seen}" || true
+      return 1
+    fi
+    rc=0
+    answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals revoke "${hash}" "${staged}" "${ledger_file}" "${seen}") || rc=$?
+    rm -f -- "${seen}" || true
+    if [[ "${rc}" -eq 0 && "${answer}" == revoked ]]; then
+      printf '%s\n' "${entry}"
+      return 0
+    fi
+    rm -f -- "${staged}" || true
+    [[ "${rc}" -eq 1 && "${answer}" == changed ]] || return 1
+  done
+  sf_eprintf "safedeps: the ledger entry ${ledger_file} changed ${SF_REVOKE_READS} times while revoke read it, so nothing was revoked."
+  return 1
+}
+
 cmd_revoke() {
   local arg1="" arg2="" reason=""
   while [[ $# -gt 0 ]]; do
@@ -1161,7 +1366,7 @@ cmd_revoke() {
   context_hash=$(jq -r "${SAFEDEPS_LEDGER_JQ_PREDICATE} ledger_context_hash" "${target_file}")
 
   local revoked_json
-  revoked_json=$(safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" "${context_hash}")
+  revoked_json=$(sf_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" "${context_hash}")
   sf_advisory_log "revoke ecosystem=${ecosystem} package=${pkg} version=${version} reason=${reason}"
   sf_ok "revoked: ${ecosystem} ${pkg}@${version}"
   sf_info "reason: ${reason}"
@@ -1188,41 +1393,48 @@ cmd_watch() {
 
 # ---- re-check ----------------------------------------------------------------
 
-# The approve lines of advisory.log, read once into an index the whole run looks
-# entries up in: {present, hashes:{"hash=<h>":true}, specs:{"<eco>\0<pkg>\0<ver>":true}}.
-# The rule is the one the per-entry scan had, and both properties it named
-# still hold: a token is compared whole (`hash=<h>` equals the token, never a
-# prefix of it), and nothing is escape-interpreted (jq -R reads the bytes as
-# written, and keys are compared as strings). A line vouches for an entry by
-# its hash token, or by an ecosystem, a package and a version token of the same
-# line. Read once, the log costs one grep a run, not one pass an entry.
+# The provenance of a re-check: one read of the approvals store, made by the
+# core (`safedeps-core approvals index`, rust/src/approvals.rs), into OUT:
+# {present, hashes:{"sha256:<hex>":true}, broken}. A store line vouches for an
+# entry by its hash alone, the hash recomputed from the entry's own fields: an
+# ecosystem, a package and a version would vouch for an entry of another
+# project context. advisory.log is not read. It is rotated and compacted, so
+# what it holds is no record of which approvals were made. A store that is not
+# there is an answer, `present: false`, and vouches for nothing.
+# Returns 0, or 1 with SF_RECHECK_FAILURE naming what could not be read:
+# core_missing (no core to read the store with; SF_CORE_MISSING says where it
+# was looked for), or approvals_store_unreadable (a store the core could not
+# read, or an answer that is no index). Neither is a store that vouches for
+# nothing, or for everything.
+SF_RECHECK_FAILURE=""
 sf_recheck_provenance_index() {
-  local out="$1" lines rc=0
+  local out="$1"
 
-  if [[ ! -f "${SAFEDEPS_ADVISORY_LOG}" ]]; then
-    printf '{"present":false,"hashes":{},"specs":{}}\n' > "${out}"
-    return 0
+  SF_RECHECK_FAILURE="core_missing"
+  sf_core || return 1
+  SF_RECHECK_FAILURE="approvals_store_unreadable"
+  SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" approvals index > "${out}" || return 1
+  jq -se "${SF_APPROVALS_INDEX_JQ}"'length == 1 and (.[0] | approvals_index_whole)' "${out}" > /dev/null || return 1
+  SF_RECHECK_FAILURE=""
+}
+
+# A re-check that could not read the approvals store judged no entry, and says
+# which read failed: on stderr, as a fail-closed line in advisory.log, and in
+# --json as `{command, error}` with no report. Exit 4, as for a ledger that
+# could not be listed.
+sf_recheck_unproven() {
+  local failure="${SF_RECHECK_FAILURE}"
+
+  if [[ "${failure}" == core_missing ]]; then
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. re-check reads the approvals store with it, so no entry was judged."
+  else
+    failure="approvals_store_unreadable"
+    sf_eprintf "safedeps: approvals-store-unreadable: the approvals store in ${SAFEDEPS_HOME} could not be read, so no entry was judged."
   fi
-  lines=$(sf_mktemp_evidence) || return 1
-  LC_ALL=C grep -aF 'check approve' "${SAFEDEPS_ADVISORY_LOG}" > "${lines}" || rc=$?
-  if [[ "${rc}" -gt 1 ]]; then
-    rm -f "${lines}"
-    return 1
+  sf_advisory_log "re-check fail-closed ${failure//_/-}" || true
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    jq -nc --arg error "${failure}" '{command:"re-check", error:$error}'
   fi
-  rc=0
-  jq -R -s -c '
-    split("\n")
-    | map(select(contains("check approve")) | [splits("[ \t]+")] | map(select(length > 0)))
-    | {present: true,
-       hashes: ([.[][] | select(startswith("hash="))] | map({key: ., value: true}) | from_entries),
-       specs: ([.[]
-                | [.[] | select(startswith("ecosystem=")) | .[10:]] as $e
-                | [.[] | select(startswith("package=")) | .[8:]] as $p
-                | [.[] | select(startswith("version=")) | .[8:]] as $v
-                | $e[] as $ee | $p[] as $pp | $v[] as $vv | [$ee, $pp, $vv] | join("\u0000")]
-               | map({key: ., value: true}) | from_entries)}' "${lines}" > "${out}" || rc=1
-  rm -f "${lines}"
-  return "${rc}"
 }
 
 # The ledger stage of a re-check: every live ledger entry asked of the
@@ -1245,7 +1457,7 @@ sf_recheck_provenance_index() {
 # each of its entries; the counts stay per entry.
 SF_RECHECK_REPORT=""
 sf_recheck_stage() {
-  local work entries fields expected index groups f n=0 rc=0
+  local work entries fields expected index listed groups f n=0 rc=0
   local errors_arr='[]'
 
   SF_RECHECK_REPORT=""
@@ -1258,6 +1470,7 @@ sf_recheck_stage() {
   fields="${work}/fields.bin"
   expected="${work}/expected.jsonl"
   index="${work}/provenance.json"
+  listed="${work}/listed.txt"
   groups="${work}/groups.bin"
   : > "${entries}"
   : > "${expected}"
@@ -1293,26 +1506,48 @@ sf_recheck_stage() {
     printf '{"i":%s,"expected":"%s"}\n' "${i}" "${h}" >> "${expected}"
   done < "${fields}"
 
-  # 3. Provenance for all of them from one read of the log, and the entries
-  #    grouped by spec for the providers.
+  # 3. Provenance for all of them from one read of the approvals store, made
+  #    after the entries were read. A committed entry's store line is written
+  #    before the entry is put in place, so an entry read first is never one
+  #    whose line is still to come (rust/src/approvals.rs, "The readers"). A
+  #    store that could not be read ends the run (5, SF_RECHECK_FAILURE).
+  #    Then what the store says of itself: lines that vouch for nothing
+  #    (broken), and hashes it vouches for where the listing has no file at
+  #    the hash's path (unmatched: an approval whose commit did not finish, or
+  #    one committed after the listing). A revoked entry still stands at its
+  #    path. And the entries grouped by spec for the providers.
   if ! sf_recheck_provenance_index "${index}"; then
+    rm -rf "${work}"
+    return 5
+  fi
+  local base ledger_name_re='^sha256-[0-9a-f]{64}\.json$'
+  if ! : > "${listed}"; then
     rm -rf "${work}"
     return 1
   fi
-  local suspected_forgery_arr checked
+  for f in "${SF_LEDGER_FILES[@]+${SF_LEDGER_FILES[@]}}"; do
+    base="${f##*/}"
+    if [[ "${base}" =~ ${ledger_name_re} ]] && ! printf '%s\n' "${base}" >> "${listed}"; then
+      rm -rf "${work}"
+      return 1
+    fi
+  done
+  local suspected_forgery_arr checked store_json store_counts
   if ! suspected_forgery_arr=$(jq -s -c --slurpfile expected "${expected}" --slurpfile index "${index}" '
         ($expected | map({key: (.i | tostring), value: .expected}) | from_entries) as $want
-        | ($index[0]) as $log
+        | ($index[0].hashes) as $vouched
         | [.[] | select(.revoked_at == "")
-           | . as $e
            | (if .malformed then "malformed_spec"
               elif .hash != $want[(.i | tostring)] then "hash_spec_mismatch"
-              elif ($log.present | not) then "missing_advisory_log_approval"
-              elif $log.hashes["hash=" + $want[(.i | tostring)]] == true then null
-              elif $log.specs[[.ecosystem, .package, .version] | join("\u0000")] == true then null
-              else "missing_advisory_log_approval" end) as $reason
+              elif $vouched[$want[(.i | tostring)]] == true then null
+              else "unvouched" end) as $reason
            | select($reason != null)
            | {ecosystem, package, version, hash, reason: $reason}]' "${entries}") \
+    || ! store_json=$(jq -c --rawfile listed "${listed}" '
+        ($listed | split("\n") | map(select(length > 0) | {key: ., value: true}) | from_entries) as $files
+        | {present, broken,
+           unmatched: ([.hashes | keys[] | select($files["sha256-" + ltrimstr("sha256:") + ".json"] != true)] | length)}' "${index}") \
+    || ! store_counts=$(jq -r '"\(.present) \(.broken) \(.unmatched)"' <<< "${store_json}") \
     || ! checked=$(jq -s '[.[] | select(.revoked_at == "")] | length' "${entries}") \
     || ! jq -s -j '[.[] | select(.revoked_at == "")]
         | group_by([.ecosystem, .package, .version])[]
@@ -1321,7 +1556,22 @@ sf_recheck_stage() {
     rm -rf "${work}"
     return 1
   fi
-  local fg_count
+  local fg_count store_present store_broken store_unmatched
+  read -r store_present store_broken store_unmatched <<< "${store_counts}"
+  if [[ "${store_present}" != true && "${checked}" -gt 0 ]]; then
+    sf_warn "  no approvals store in ${SAFEDEPS_HOME}: it vouches for no ledger entry"
+  fi
+  if [[ "${store_broken}" -gt 0 ]]; then
+    if [[ "${store_broken}" -eq 1 ]]; then
+      sf_warn "  1 line of the approvals store vouches for nothing (broken)"
+    else
+      sf_warn "  ${store_broken} lines of the approvals store vouch for nothing (broken)"
+    fi
+    sf_advisory_log "re-check approvals-store broken-lines=${store_broken}"
+  fi
+  if [[ "${store_unmatched}" -gt 0 ]]; then
+    sf_info "  ${store_unmatched} approvals in the store have no ledger entry (unmatched)"
+  fi
   fg_count=$(jq 'length' <<< "${suspected_forgery_arr}")
   if [[ "${fg_count}" -gt 0 ]]; then
     sf_warn "  ${fg_count} ledger entries have no provenance — flagged as suspected forgery (not revoked)"
@@ -1345,7 +1595,7 @@ sf_recheck_stage() {
       "${SAFEDEPS_STATUS_VULNERABLE}"|"${SAFEDEPS_STATUS_HARD_BLOCK}")
         reason="re-check ${s}"
         while IFS=$'\x1f' read -r ctx_hash file; do
-          if ! safedeps_ledger_revoke "${eco}" "${pkg}" "${ver}" "${reason}" "${ctx_hash}" >/dev/null 2>&1; then
+          if ! sf_ledger_revoke "${eco}" "${pkg}" "${ver}" "${reason}" "${ctx_hash}" >/dev/null 2>&1; then
             sf_err "  revoke failed: ${eco} ${pkg}@${ver} (${file})"
             errors_arr=$(jq -c --arg ecosystem "${eco}" --arg package "${pkg}" --arg version "${ver}" --arg file "${file}" \
               '. + [{kind:"revoke_failed", ecosystem:$ecosystem, package:$package, version:$version, file:$file}]' <<< "${errors_arr}")
@@ -1385,7 +1635,8 @@ sf_recheck_stage() {
     --argjson errors "${errors_arr}" \
     --argjson checked "${checked}" \
     --argjson still_clean "${still_clean}" \
-    "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors)') || return 1
+    --argjson approvals_store "${store_json}" \
+    "${SAFEDEPS_RECHECK_REPORT_JQ}"'recheck_report($checked; $still_clean; $newly_vulnerable; $kev_hit; $revoked; $suspected_forgery; $errors; $approvals_store)') || return 1
   [[ "$(jq 'length' <<< "${errors_arr}")" -eq 0 ]] || rc=1
   return "${rc}"
 }
@@ -1413,6 +1664,10 @@ cmd_recheck() {
   sf_recheck_stage || rc=$?
   if [[ "${rc}" -eq 4 ]]; then
     sf_ledger_unlisted "re-check"
+    return 4
+  fi
+  if [[ "${rc}" -eq 5 ]]; then
+    sf_recheck_unproven
     return 4
   fi
   if [[ -z "${SF_RECHECK_REPORT}" ]]; then
@@ -1498,6 +1753,36 @@ cmd_hooks() {
 cmd_doctor() {
   exec env SAFEDEPS_JSON_MODE="${SAFEDEPS_JSON_MODE}" \
     bash "${SAFEDEPS_REPO_DIR}/lib/gates/doctor.sh" "$@"
+}
+
+# ---- approvals ---------------------------------------------------------------
+
+# `safedeps approvals migrate [<archive>...]`: the approvals checks made before
+# the approvals store, moved into it from advisory.log and the archives named.
+# The migration is the core's (`safedeps-core approvals migrate`,
+# rust/src/approvals/migrate.rs): it reads the inputs, judges each line and
+# writes the store lines, under the store lock a commit holds and through a
+# commit's write. This only calls it, in the SAFEDEPS_HOME and the ledger
+# directory this CLI uses. It writes no advisory.log line, so it does not
+# rotate advisory.log either.
+cmd_approvals() {
+  local core_args=()
+  case "${1:-}" in
+    migrate) shift ;;
+    -h|--help) cmd_help approvals; return 0 ;;
+    *) sf_eprintf "safedeps: approvals takes one subcommand, migrate [<archive>...]. Try 'safedeps help approvals'."; return 4 ;;
+  esac
+  if ! sf_core; then
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. The migration is the core's, so nothing was migrated."
+    return 4
+  fi
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    core_args+=(--json)
+  fi
+  if ! SAFEDEPS_HOME="${SAFEDEPS_HOME}" SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR}" \
+    "${SF_CORE}" approvals migrate "${core_args[@]+"${core_args[@]}"}" "$@"; then
+    return 4
+  fi
 }
 
 # ---- help / version ----------------------------------------------------------
@@ -1609,6 +1894,30 @@ safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]
   reported as unmeasured.
 EOF
       ;;
+    approvals)
+      cat <<'EOF'
+safedeps approvals migrate [<archive>...] [--json]
+
+  Move into the approvals store the approvals that checks made before it.
+  The migration reads the approve lines of ~/.safedeps/advisory.log and of
+  each archive named: a rotated advisory.log.<stamp>.gz, or a plain file. For
+  each hash a ledger entry confirms, it writes one store line. An entry
+  confirms a hash when it stands at the hash's path and its own fields give
+  that hash again.
+
+  Not moved, and counted: a line whose hash no entry confirms (each hash is
+  named with why), a line that an approve-undone or approve-in-doubt line of
+  its hash takes back, a cache hit, a broken line and an input's torn last
+  line. A line whose hash the store vouches for already is a duplicate, so a
+  second run inserts nothing. An input or a ledger entry that cannot be read
+  stops the run before anything is written. A write that fails partway leaves
+  the lines before the failure in the store: the run says how many of its
+  lines are in the store and how many are not, and exits 4. Run it again to
+  insert the rest.
+
+  exit codes: 0 migrated · 4 an input, an entry or the store could not be read or written, or an argument that is not one
+EOF
+      ;;
     migrate)
       cat <<'EOF'
 safedeps migrate [--keep-legacy]
@@ -1658,6 +1967,7 @@ COMMANDS
   re-check                                  Re-query providers for all approved specs.
   watch <scan|status|claim|ack|...>          Daily scan of projects and runtimes.
   migrate                                  Migrate legacy npm-reorg-guard state.
+  approvals migrate [<archive>...]          Move pre-store approvals into the approvals store.
   gates [run]                               Release-time repo gates: secret scan, dep audit, hook/CI check.
   scan secrets [--repo|--worktree|--staged] Run gitleaks secret scan (repo profile aware).
   audit [npm|pnpm|yarn|bun]                 Audit dependency lockfiles (auto-detects ecosystem).
@@ -1679,7 +1989,8 @@ EXIT CODES
 
 ENV
   SAFEDEPS_HOME           default ~/.safedeps
-  SAFEDEPS_LEDGER_DIR     default \$SAFEDEPS_HOME/approved-specs
+  SAFEDEPS_LEDGER_DIR     default \$SAFEDEPS_HOME/approved-specs. One ledger
+                          directory belongs to one SAFEDEPS_HOME.
   GITHUB_TOKEN            optional, used for GHSA enrichment
 EOF
       ;;
@@ -1719,7 +2030,7 @@ main() {
   # Said here rather than from providers, because the provider query paths run
   # with their stderr redirected and the notice would be swallowed there.
   if [[ -n "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED:-}" ]]; then
-    printf 'safedeps: SAFEDEPS_ADVISORY_LOG=%s is ignored. The advisory log is where every bypass is recorded AND the oracle re-check uses to tell a real approval from a forged one, so it cannot be moved on its own — a caller that moves it moves the evidence out from under the check. Move SAFEDEPS_HOME to relocate the state root.\n' \
+    printf 'safedeps: SAFEDEPS_ADVISORY_LOG=%s is ignored. The advisory log is where every bypass is recorded, so it cannot be moved on its own — a caller that moves it moves that record out from under whoever reads it. Move SAFEDEPS_HOME to relocate the state root.\n' \
       "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" >&2
   fi
 
@@ -1738,6 +2049,7 @@ main() {
     re-check|recheck) cmd_recheck "$@" ;;
     watch)    cmd_watch    "$@" ;;
     migrate)  cmd_migrate  "$@" ;;
+    approvals) cmd_approvals "$@" ;;
     gates)    cmd_gates    "$@" ;;
     scan)     cmd_scan     "$@" ;;
     audit)    cmd_audit    "$@" ;;

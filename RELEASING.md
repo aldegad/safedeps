@@ -101,14 +101,28 @@ intent to finish it, and do not report one finished while any step is open.
    and one install through `scripts/safedeps-hook-entry.sh pre` and read both
    answers before going on.
 
-   On every host where the daily watch agent is installed, run
-   `node scripts/install/install-safedeps-recheck-agent.mjs install` from
-   the main checkout. The install keeps the watch config. It does not keep
-   the schedule, so pass the same `--hour` and `--minute` the host was
-   installed with, or the schedule becomes 09:00. Then run the installer's
-   `status` and read `agent_runtime_stale: false` and a runtime version
-   equal to the one in `package.json`. Until then that host's agent runs
-   the old copy, and its scan says so with `agent_runtime_stale: true`.
+   On every host that runs the watch from the runtime the installer builds
+   (`~/.safedeps/agent`), refresh that runtime from the main checkout, which
+   holds this machine's core (`bin/native/<os>-<arch>/safedeps-core`). The
+   installer copies the core alongside `bin/safedeps`, `lib/` and the
+   wrapper, includes it in the runtime digest, and refuses with
+   `core-missing` before replacing the runtime if the core is missing,
+   unusable or a symlink. Each host chose its scheduler, so refresh it the
+   way that host schedules: where the scheduler is the LaunchAgent, run
+   `node scripts/install/install-safedeps-recheck-agent.mjs install` with
+   the same `--times` (or `--hour` and `--minute`) the host was installed
+   with, because a reinstall without them sets 09:00 and 21:00; where the
+   scheduler is something else (an agent's routine, cron), run
+   `install --runtime-only`, which builds the runtime the same way and
+   loads, starts and writes nothing of launchd. Both keep the watch config.
+   Then run the installer's `status` and confirm `agent_runtime_stale:
+   false`, a runtime version equal to the one in `package.json` and the
+   recorded digest (on a host with no LaunchAgent, `status` exits 1 for
+   `loaded: false`; read the runtime fields), and verify that the installed
+   runtime's `re-check` reads the approvals store cleanly without
+   `core_missing`. Until then that host runs the old copy (using the old log
+   logic), and its scan says so with `agent_runtime_stale: true`.
+
 8. **Tag the release locally.** An annotated tag `vX.Y.Z` on the main
    checkout's head after step 7: `git tag -a vX.Y.Z -m "safedeps X.Y.Z"`.
    Do not push it. Nothing has left the machine yet, and nothing does until
