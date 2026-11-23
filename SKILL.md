@@ -13,7 +13,7 @@ You (the agent) are the primary user — drive all three:
 
 - **Install-time gate** — clear every dependency install through an OSV-backed advisory check before it runs.
 - **Secret-leak gate** — stop a secret or a real `.env` from being committed (per-repo, local by default).
-- **Daily watch** — re-check the ledger and measure the lockfiles and JDKs of registered projects each day, and report what was not measured.
+- **Watch** — re-check the ledger and measure the lockfiles and JDKs of registered projects on a schedule, twice a day by default, and report what was not measured. Set it up with the user: [Re-checking what is already installed](#re-checking-what-is-already-installed).
 
 ---
 
@@ -103,16 +103,16 @@ Every migration report carrying `approve_lines` reports five counts—`inserted`
 
 Pre-write failures (`input_unreadable`, `ledger_entry_unreadable`, `approvals_store_failed`) write nothing. `approvals_store_write_failed` rereads its own hashes under the lock or reports `"unknown"` for `inserted` and `not_inserted` with `reread_outcome`; `approvals_store_unsynced` means written lines were not synced; `core_missing` names the missing `safedeps-core` path. CLI failures and usage errors exit `4`. Retrying migration is safe, and a partial outcome is not a success. Migration JSON `outcome` and `reread_outcome` fields carry `Outcome::describe` text rather than legacy `os-error-N`/`no-os-code` labels, with all status error names and exit values unchanged.
 
-After upgrading, reinstall the daily watch LaunchAgent from a checkout containing `bin/native/<os>-<arch>/safedeps-core` (`node scripts/install/install-safedeps-recheck-agent.mjs install` with the host's `--hour` and `--minute`); otherwise scheduled runs stay on the old runtime (`agent_runtime_stale: true`) or fail with `core_missing`.
+After upgrading, refresh the watch's runtime from a checkout containing `bin/native/<os>-<arch>/safedeps-core`: `node scripts/install/install-safedeps-recheck-agent.mjs install` with the host's `--times` (or `--hour` and `--minute`) where the scheduler is the LaunchAgent, or `install --runtime-only` where it is something else. Otherwise scheduled runs stay on the old runtime (`agent_runtime_stale: true`) or fail with `core_missing`.
 
-## Daily watch
+## Watch
 
 `safedeps watch` re-checks the ledger, measures the lockfiles and JDKs of registered projects, and publishes one state file, `~/.safedeps/watch/state.json`. It detects and records. It never edits a project, installs anything or updates a JDK.
 
 Entry points:
 
 - `safedeps watch status [--json]`: read the last published state without taking the lock. Use it to see the age of the last scan, the last full scan (`last_full_scan`, which a root scan does not replace) and the last success, and `awaiting_owner`: the live findings that wait for the owner's judgment and the locally closed findings whose deployment wait (`awaiting_deploy`) the owner has not resolved, each with why, `closed_reason` (null while the finding is live) and its `report_fact`.
-- `safedeps watch scan [--json]`: run a full scan under the lock. The installed LaunchAgent runs the same scan once a day.
+- `safedeps watch scan [--json]`: run a full scan under the lock. The scheduler the host chose runs the same scan, twice a day by default: see [Re-checking what is already installed](#re-checking-what-is-already-installed).
 - `safedeps watch scan --root DIR`: measure one root again. Every other root's state and every undelivered event are kept. Run it before and after a repair.
 
 Reading a report:
@@ -146,10 +146,106 @@ When you are handed a watch finding to repair:
 - Run the project's tests and `safedeps watch scan --root <root>` before and after.
 - Pass: merge locally only. Push and deploy follow that project's existing authority. Record a local merge as `awaiting_deploy`, always, even when a scan has already closed the finding. Do not record it as `fixed_pending_rescan`. Give the linked task/plan in `--task`. In `--detail` and the linked task/plan, record the deployment owner, authority and next action; say explicitly which are unknown. This nonfailure row remains in `awaiting_owner` for the owner to resolve, without automatic assignment or deployment. It stays after a scan closes the finding locally, with the `closed_reason`, after the closure event is acked, and through later scans. A local closure is not a deployment. Only the owner's `deploy_resolved` ends the wait, and you never record it.
 - Fail: keep the branch and the logs, leave main untouched, record `fix_failed`.
-- No fixed version: the finding is `no_fix_available` and is looked at again every day. Never use a made-up version or an arbitrary downgrade. `SAFEDEPS_ACCEPT_RISK` is a person's decision and is not a repair.
+- No fixed version: the finding is `no_fix_available` and is looked at again on every scan. Never use a made-up version or an arbitrary downgrade. `SAFEDEPS_ACCEPT_RISK` is a person's decision and is not a repair.
 - Record progress with `safedeps watch remediation --finding KEY --state S [--detail TEXT] [--task T]`, where S is `dispatched`, `blocked`, `fix_failed`, `awaiting_deploy` or `fixed_pending_rescan`. It does not close the finding. The next scan that sees the fixed version does. The record captures `scan_generation` under the lock. A later actual measurement of this finding advances its `last_seen_scan_generation` and puts it back in `awaiting_owner` as `rescan_still_live`. Wall time, unrelated roots and unmeasured scopes do not establish this order. A legacy record without the boundary appears as `rescan_order_unknown`; check the evidence, record the boundary again and request a new scan. That scan order is the meaning of `fixed_pending_rescan`, and it is unchanged for an actual runtime fix; a local merge is `awaiting_deploy` instead. On a closed finding whose remediation is `awaiting_deploy`, only `awaiting_deploy` can be recorded again; `dispatched`, `blocked`, `fix_failed` and `fixed_pending_rescan` are refused. `report_acknowledged` and `deploy_resolved` are the owner's, not yours.
 
-Options: `safedeps help watch`. How it works: [ARCHITECTURE.md, The daily watch](./ARCHITECTURE.md#the-daily-watch). Installing the agent: [`README.md`](./README.md#daily-watch-with-macos-alerts).
+Options: `safedeps help watch`. How it works: [ARCHITECTURE.md, The watch](./ARCHITECTURE.md#the-watch). The commands that schedule the scan on each operating system: [`README.md`](./README.md#re-checking-what-is-already-installed).
+
+---
+
+## Re-checking what is already installed
+
+The install-time gate judges a package once, when it is installed. An advisory published later is not seen until something checks again. `safedeps watch scan` is that check. It needs no model: it reads lockfiles and asks OSV. Finding is a scheduler's job, and fixing is an agent's.
+
+When you install safedeps for a user, or when they ask about new advisories, set this up with them, in this order:
+
+1. Ask first: "Does an agent run on this computer with a scheduled routine or automation, one that runs here and not in the cloud?"
+2. Offer the path that fits the answer: Path 1 if yes, Path 2 if no. Recommend twice a day, 09:00 and 21:00 local time. An advisory can be published at any hour, and a slot missed while the computer slept is followed by another twelve hours later. Let the user pick other times.
+3. On either path, ask which project folders the scan should read and record them before the first scan: [Choose the projects](#choose-the-projects).
+4. Ask how you, the agent, should learn what a scan found: [How the agent learns of a finding](#how-the-agent-learns-of-a-finding).
+5. After the first scan, check that the folders the user chose were read: [Choose the projects](#choose-the-projects). On macOS, also check [macOS: check what the scan could read](#macos-check-what-the-scan-could-read).
+
+### Choose the projects
+
+Both paths need this step before the first scan. Without it, a scan has no project list, its summary line reads `population missing 0`, and no project's lockfile is read.
+
+1. Ask the user which project folders to watch.
+2. Write a small executable script that prints those folders, one per line, either `name<TAB>path` or an absolute path alone. On macOS, put the script outside protected folders such as `~/Documents`, because a launchd job cannot read under them.
+3. Record the script once, from the package directory, with `node scripts/install/install-safedeps-recheck-agent.mjs configure --population-command <the script's absolute path>`. Other options, such as `--exclude` and `--tool-path`, are in [`README.md`](./README.md#re-checking-what-is-already-installed).
+
+After the first scan, check `safedeps watch status`. `population fresh <count>` should equal the number of folders the script prints, and `roots walked N/M` should show that same number for both N and M. A lower M means some folders were not opened, such as a network mount, an excluded prefix or a path the scan could not reach. A lower N means some folders were not read in full. Tell the user which number fell short. Do not call the folders that were not read clean.
+
+### Path 1: an agent that runs on this computer (first choice)
+
+If the agent the user runs has a scheduler that runs on the user's own computer, use it. Its routine, twice a day:
+
+1. runs `safedeps --json watch scan`;
+2. when `summary.pending_events` is above 0, tells the user at once, on the channel they use;
+3. claims the events with `safedeps watch claim --consumer <a name for this routine>`;
+4. fixes each finding on a branch, as [When you are handed a watch finding to repair](#watch) says: `safedeps check` the fixed version first, then raise it through the normal install gates, and run the project's tests and `safedeps watch scan --root <root>` before and after;
+5. asks the user before merging, and never merges by itself;
+6. acks each event with `safedeps watch ack --event <id> --consumer <the same name> --task <where the work is recorded>`.
+
+Use the scheduler of the agent the user has. These are examples, each from the vendor's own documentation:
+
+- Claude Code Desktop: a local scheduled task, with **Only on this computer** turned on. It runs on the user's machine while the app is open and the computer is awake. When the computer wakes, it runs once for the most recent slot it missed. Its **Custom** schedule takes a cron expression in local time. (source: https://code.claude.com/docs/en/desktop-scheduled-tasks, verified 2026-11-23)
+- ChatGPT desktop app (Codex): a scheduled task on a local project. The computer has to be on and the app running. A scheduled task runs with the default sandbox settings, and the scan asks OSV over the network, so the task needs network access. Codex CLI and the IDE extension do not provide the Scheduled interface; tasks are made in the ChatGPT app. (source: https://learn.chatgpt.com/docs/automations?surface=app, verified 2026-11-23)
+
+A scheduler that lives inside one open session is not one, because it stops when the session ends. Claude Code's `/loop` is an example: its tasks are session-scoped. (source: https://code.claude.com/docs/en/scheduled-tasks, verified 2026-11-23) If the user's agent has no scheduler that runs on their computer, use Path 2.
+
+### Path 2: no agent runs on this computer
+
+The operating system's scheduler runs the scan, and the agent reads the result when a session starts.
+
+- The scheduler runs the scan twice a day. On macOS it is the LaunchAgent that `node scripts/install/install-safedeps-recheck-agent.mjs install` registers, at 09:00 and 21:00 unless `--times` names other slots. On Linux it is a systemd user timer, or two crontab lines where there is no systemd user instance. On Windows it is Task Scheduler. The commands for each are in [`README.md`, Re-checking What Is Already Installed](./README.md#re-checking-what-is-already-installed).
+- On Windows the tasks the README creates run only while the user is logged on (`schtasks /Query /V` reads them back as `Logon Mode: Interactive only`). Running while logged off takes `/RU <user>` with `/RP <password>`, which stores the password, or `/RU <user> /NP`, which stores none and gives the task only local resources (source: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create, `/it`, `/rp` and `/np`, verified 2026-11-23). Tell the user this before they rely on a slot while logged off.
+- On macOS a run that needs attention shows a notification. On Linux and Windows the run writes the same alert to `~/.safedeps/recheck-alerts.jsonl` and shows no notification. To hear of a finding on Linux or Windows without reading that file, use Path 1, whose routine tells the user at once, or the session-start notice in [How the agent learns of a finding](#how-the-agent-learns-of-a-finding), which tells you when a session starts.
+- When a session starts, read `safedeps watch status`, or let the session-start notice read it ([How the agent learns of a finding](#how-the-agent-learns-of-a-finding)). When `summary.pending_events` is above 0, tell the user, and offer the fix in the order of Path 1: claim, branch, tests, ask before merging, ack.
+
+### Not a cloud scheduler
+
+Do not offer a scheduler that runs in the cloud, such as Claude Code's cloud scheduled tasks or a scheduled task on ChatGPT on the web. The scan reads the lockfiles on the user's computer and writes its state there, in `~/.safedeps/watch/`. A cloud run cannot read either. A Claude Code cloud task starts from a fresh clone and has no access to local files, and a ChatGPT web task cannot work in a folder on the user's computer. (sources: https://code.claude.com/docs/en/desktop-scheduled-tasks, the table "Compare scheduling options"; https://learn.chatgpt.com/docs/automations?surface=app; verified 2026-11-23)
+
+### How the agent learns of a finding
+
+Ask the user which of these they want, and set it up.
+
+- **Claude Code:** `node scripts/install/install-safedeps-hooks.mjs --watch-notice` registers a session-start hook. When a session starts or resumes, it reads `safedeps watch status` and says what needs action: the events no one has claimed, the roots the last scan could not read in full, that no scan has run yet, or that the status could not be read. Otherwise it says nothing. `--no-watch-notice` removes it, and keeps the install-time gate.
+- **Any other agent:** add this line to the agent's instruction file. For Codex the global file is `~/.codex/AGENTS.md` (source: https://learn.chatgpt.com/docs/agent-configuration/agents-md, verified 2026-11-23).
+
+  ```
+  Before you start work, run `safedeps watch status`. If summary.pending_events is above 0, tell the user and offer to fix the findings as the safedeps skill says.
+  ```
+
+  Delete the line to stop.
+
+Either way, claim the events before you act on them, and ack each one when the work is recorded. An event is told until it is claimed, so a claimed event is not raised again in the next session. A finding stays in `awaiting_owner` until a scan closes it, whatever happened to its event.
+
+### macOS: check what the scan could read
+
+After the first scheduled scan, run `safedeps watch status` and read `roots walked N/M (K incomplete)` in the summary line. When K is above 0, tell the user what happened, in plain words: "The scheduled scan could not read K of the M project folders in full, so what it could not read there was not checked." Do not call those projects clean, and do not promise a fix you have not seen work.
+
+The rule behind it: the program launchd starts is the scan's wrapper, a script that begins `#!/usr/bin/env bash`, and macOS holds `/usr/bin/env` responsible for the job. That process has no Full Disk Access, so the job cannot read under the folders macOS protects, such as `~/Documents`. Giving `/usr/bin/env` Full Disk Access would give it to every program started through `env`, so safedeps does not ask for it.
+
+What the user can do now:
+
+- keep the projects the scan reads outside the protected folders; or
+- run the scan from an agent's local scheduler (Path 1) whose app the user has allowed to read those folders.
+
+After the change, read `roots walked` again on the next scan. That reading is the check; a setting is not.
+
+### Changing or removing the schedule
+
+- macOS: `install --times HH:MM,HH:MM` sets other slots. `install` with neither `--times` nor `--hour/--minute` sets 09:00 and 21:00 again, so pass the slots each time you reinstall. `install --runtime-only` refreshes the runtime in `~/.safedeps/agent` and touches nothing of launchd, for a host whose scheduler is an agent's routine or cron. `uninstall` removes the LaunchAgent and leaves the runtime in `~/.safedeps/agent` and the watch's state.
+- Linux and Windows: the removal commands are beside the registration commands in [`README.md`](./README.md#re-checking-what-is-already-installed).
+- An agent's routine: remove it where it was made.
+
+Rules:
+
+- Twice a day is the default. Fewer slots are the user's call, not yours.
+- Never a cloud scheduler for the scan.
+- Never merge a fix without the user's yes.
+- Claim before you act, and ack when the work is recorded.
 
 ---
 

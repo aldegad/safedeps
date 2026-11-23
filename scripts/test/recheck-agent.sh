@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# safedeps: the daily re-check agent's runtime, and what building it may touch.
+# safedeps: the re-check agent's runtime, the calendar slots it registers, and what
+# building it may touch.
 #
 # scripts/install/install-safedeps-recheck-agent.mjs builds a copy of the CLI
 # for launchd to run (`stage --root DIR` builds it anywhere, `install` builds it
@@ -581,11 +582,14 @@ printf '#!/bin/sh\necho "$@" >> "${LC_LOG:?}"\nexit 0\n' > "${lc_shim}/launchctl
 chmod 755 "${lc_shim}/launchctl"
 
 LC_LOG=""
-# install CHECKOUT HOME: the checkout's installer registers the agent in HOME.
+# install CHECKOUT HOME [ARG...]: the checkout's installer registers the agent
+# in HOME, with the schedule ARGs given.
 install_in() {
   LAST_RC=0
-  mkdir -p "$2"
-  HOME="$2" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "$1/${INSTALLER}" install > "${tmp_root}/last.out" 2> "${tmp_root}/last.err" || LAST_RC=$?
+  local co="$1" h="$2"
+  shift 2
+  mkdir -p "${h}"
+  HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" install "$@" > "${tmp_root}/last.out" 2> "${tmp_root}/last.err" || LAST_RC=$?
 }
 plist_of() { printf '%s/Library/LaunchAgents/com.aldegad.safedeps.recheck.plist' "$1"; }
 
@@ -683,16 +687,161 @@ row_install_no_core() {
   grep -qF "core-missing: " "${tmp_root}/last.err" || no "install did not refuse by name: $(head -c 300 "${tmp_root}/last.err")"
   [[ "$(digest "${d}")" == "${before}" ]] || no "a refused install changed what is under ${d}"
 }
+
+# ---- the schedule: launchd calendar slots ------------------------------------------
+# What launchd reads is the plist, so the rows read the plist back with plutil,
+# as launchd's own format, and not the installer's text. A slot is
+# {"Hour":H,"Minute":M}; StartCalendarInterval is an array of them.
+slots_of() { # HOME: the plist's StartCalendarInterval as compact JSON
+  plutil -extract StartCalendarInterval json -o - "$(plist_of "$1")" | jq -c .
+}
+# install_schedule HOME EXPECT ARG...: install with ARGs, then the plist holds
+# the slots EXPECT (compact JSON), passes plutil -lint, and the installer's own
+# report names the same slots as HH:MM.
+install_schedule() {
+  local d co h want report
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; LC_LOG="${d}/lc.log"; want="$1"; report="$2"
+  shift 2
+  install_in "${co}" "${h}" "$@"
+  (( LAST_RC == 0 )) || no "install $* exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  plutil -lint -s "$(plist_of "${h}")" || no "plutil -lint refused the plist"
+  [[ "$(slots_of "${h}")" == "${want}" ]] || no "install $*: the plist holds $(slots_of "${h}"), not ${want}"
+  jq -e --argjson r "${report}" '.schedule == $r' "${tmp_root}/last.out" > /dev/null \
+    || no "install $*: the report says $(jq -c .schedule "${tmp_root}/last.out"), not ${report}"
+}
+row_schedule_default() {
+  install_schedule '[{"Hour":9,"Minute":0},{"Hour":21,"Minute":0}]' '["09:00","21:00"]'
+}
+row_schedule_times() {
+  # Given out of order, written in order.
+  install_schedule '[{"Hour":7,"Minute":30},{"Hour":19,"Minute":45}]' '["07:30","19:45"]' --times 19:45,07:30
+  install_schedule '[{"Hour":6,"Minute":0},{"Hour":12,"Minute":0},{"Hour":18,"Minute":5}]' '["06:00","12:00","18:05"]' --times 6:00,12:00 --times 18:05
+}
+row_schedule_legacy() {
+  install_schedule '[{"Hour":6,"Minute":15}]' '["06:15"]' --hour 6 --minute 15
+  install_schedule '[{"Hour":6,"Minute":0}]' '["06:00"]' --hour 6
+  install_schedule '[{"Hour":9,"Minute":30}]' '["09:30"]' --minute 30
+}
+# A schedule the installer refuses is refused before anything is built or
+# registered: no runtime, no plist, no watch config and no launchctl call.
+row_schedule_refused() {
+  local d co h args said
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  while IFS='|' read -r args said; do
+    h=$(mktemp -d "${d}/home.XXXXXX"); LC_LOG="${d}/lc.log"; rm -f "${LC_LOG}"
+    # shellcheck disable=SC2086 # ARGS is a list of words by construction
+    install_in "${co}" "${h}" ${args}
+    (( LAST_RC != 0 )) || no "install ${args} exited 0"
+    grep -qF -- "${said}" "${tmp_root}/last.err" || no "install ${args} did not say '${said}': $(head -c 300 "${tmp_root}/last.err")"
+    [[ ! -e "$(plist_of "${h}")" ]] || no "install ${args} wrote a plist"
+    [[ ! -e "${h}/.safedeps" ]] || no "install ${args} wrote under ~/.safedeps"
+    [[ ! -e "${LC_LOG}" ]] || no "install ${args} called launchctl"
+  done <<'ROWS'
+--times 25:00|--times takes HH:MM slots
+--times 9:5|--times takes HH:MM slots
+--times 09:00,|--times takes HH:MM slots
+--times|--times takes HH:MM slots
+--times 09:00,21:00,9:00|--times names 09:00 twice
+--times 09:00 --hour 9|--times and --hour/--minute both name the schedule
+--hour 24|--hour must be an integer from 0 to 23
+--minute 60|--minute must be an integer from 0 to 59
+--runtime-only --times 09:00|--runtime-only registers no schedule
+--runtime-only --hour 9|--runtime-only registers no schedule
+ROWS
+}
+
+# ---- install --runtime-only: the runtime, and nothing of launchd ------------------------
+# A host whose scheduler is not launchd refreshes the runtime it runs without a
+# launchd agent coming back: no plist written, no launchctl call.
+row_runtime_only_fresh() {
+  local d co h agent
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; agent="${h}/.safedeps/agent"; LC_LOG="${d}/lc.log"
+  install_in "${co}" "${h}" --runtime-only --exclude /fixture/forbidden
+  (( LAST_RC == 0 )) || no "install --runtime-only exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  [[ ! -e "${LC_LOG}" ]] || no "install --runtime-only called launchctl: $(cat "${LC_LOG}")"
+  [[ ! -e "$(plist_of "${h}")" ]] || no "install --runtime-only wrote a plist"
+  diff -r "${co}/lib" "${agent}/lib" > /dev/null || no "the agent's lib/ is not the checkout's lib/"
+  cmp -s "${co}/${CORE}" "${agent}/${CORE}" || no "the agent does not carry the checkout's ${CORE}"
+  [[ -f "${agent}/.safedeps-recheck-runtime" ]] || no "the agent has no marker"
+  runtime_loads "${agent}" || return 1
+  [[ "$(cat "${h}/.safedeps/watch/exclude")" == /fixture/forbidden ]] || no "the watch options were not written"
+  jq -e '.runtime_only == true and .launchd.touched == false and .launchd.plist_present == false' "${tmp_root}/last.out" > /dev/null \
+    || no "the report: $(jq -c '{runtime_only, launchd}' "${tmp_root}/last.out")"
+}
+row_runtime_only_keeps_launchd() {
+  local d co h agent plist before_plist calls
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; agent="${h}/.safedeps/agent"; LC_LOG="${d}/lc.log"
+  install_in "${co}" "${h}" --times 06:00
+  (( LAST_RC == 0 )) || no "the first install exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  plist=$(plist_of "${h}"); before_plist=$(cksum < "${plist}"); calls=$(wc -l < "${LC_LOG}" | tr -d ' ')
+  printf '# a change the next runtime must carry\n' >> "${co}/lib/watch/state.jq"
+  install_in "${co}" "${h}" --runtime-only
+  (( LAST_RC == 0 )) || no "install --runtime-only exited ${LAST_RC}: $(head -c 300 "${tmp_root}/last.err")"
+  [[ "$(cksum < "${plist}")" == "${before_plist}" ]] || no "install --runtime-only changed the plist"
+  [[ "$(wc -l < "${LC_LOG}" | tr -d ' ')" == "${calls}" ]] || no "install --runtime-only called launchctl"
+  diff -r "${co}/lib" "${agent}/lib" > /dev/null || no "the runtime does not carry the checkout's change"
+  runtime_loads "${agent}" || return 1
+  no_scraps "${agent}" || return 1
+  jq -e '.launchd.plist_present == true' "${tmp_root}/last.out" > /dev/null || no "the report did not say a plist is there"
+}
+# --runtime-only builds a runtime too, so a checkout with no core is refused the
+# same way, before anything is written.
+row_runtime_only_no_core() {
+  local d co h before
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  rm -rf "${co}/bin/native"
+  h="${d}/home"; mkdir -p "${h}"; LC_LOG="${d}/lc.log"
+  before=$(digest "${d}")
+  install_in "${co}" "${h}" --runtime-only
+  (( LAST_RC != 0 )) || no "install --runtime-only exited 0 with no core"
+  grep -qF "core-missing: " "${tmp_root}/last.err" || no "install --runtime-only did not refuse by name: $(head -c 300 "${tmp_root}/last.err")"
+  [[ "$(digest "${d}")" == "${before}" ]] || no "a refused install --runtime-only changed what is under ${d}"
+}
+# uninstall takes the plist and launchd's registration, and keeps the runtime.
+row_uninstall_keeps_runtime() {
+  local d co h agent before
+  d=$(new_dir); co="${d}/co"; make_checkout "${co}"
+  h="${d}/home"; agent="${h}/.safedeps/agent"; LC_LOG="${d}/lc.log"
+  install_in "${co}" "${h}"
+  (( LAST_RC == 0 )) || no "install exited ${LAST_RC}"
+  before=$(digest "${agent}")
+  HOME="${h}" LC_LOG="${LC_LOG}" PATH="${lc_shim}:${PATH}" node "${co}/${INSTALLER}" uninstall > "${tmp_root}/last.out" 2> "${tmp_root}/last.err" \
+    || no "uninstall exited $?: $(head -c 300 "${tmp_root}/last.err")"
+  [[ ! -e "$(plist_of "${h}")" ]] || no "uninstall left the plist"
+  grep -q '^bootout ' <(tail -n 1 "${LC_LOG}") || no "uninstall did not boot the agent out"
+  [[ "$(digest "${agent}")" == "${before}" ]] || no "uninstall changed the runtime"
+  jq -e '.runtime_kept == true' "${tmp_root}/last.out" > /dev/null || no "the report did not say the runtime stays"
+}
+
 if [[ "$(uname -s)" == Darwin ]]; then
   row "install registers an agent whose runtime was built whole" row_install
   row "install replaces an agent an earlier version built, which has no marker" row_install_legacy
   row "a failed install leaves the registered agent, its plist and launchd as they were" row_install_fails
   row "install refuses a checkout with no core for this machine by name before it writes anything" row_install_no_core
+  row "install with no schedule writes two calendar slots, 09:00 and 21:00" row_schedule_default
+  row "install --times writes each slot it names, in order" row_schedule_times
+  row "install --hour/--minute, the arguments of earlier versions, writes one slot" row_schedule_legacy
+  row "a schedule the installer refuses leaves no runtime, plist or launchd call" row_schedule_refused
+  row "install --runtime-only builds the runtime and the watch options, with no plist and no launchctl call" row_runtime_only_fresh
+  row "install --runtime-only over a launchd agent replaces the runtime and leaves the plist and launchd as they were" row_runtime_only_keeps_launchd
+  row "install --runtime-only refuses a checkout with no core for this machine by name before it writes anything" row_runtime_only_no_core
+  row "uninstall removes the plist and boots the agent out, and keeps the runtime" row_uninstall_keeps_runtime
 else
   skip "install registers an agent whose runtime was built whole" "${installed_skip}"
   skip "install replaces an agent an earlier version built, which has no marker" "${installed_skip}"
   skip "a failed install leaves the registered agent, its plist and launchd as they were" "${installed_skip}"
   skip "install refuses a checkout with no core for this machine by name before it writes anything" "${installed_skip}"
+  skip "install with no schedule writes two calendar slots, 09:00 and 21:00" "${installed_skip}"
+  skip "install --times writes each slot it names, in order" "${installed_skip}"
+  skip "install --hour/--minute, the arguments of earlier versions, writes one slot" "${installed_skip}"
+  skip "a schedule the installer refuses leaves no runtime, plist or launchd call" "${installed_skip}"
+  skip "install --runtime-only builds the runtime and the watch options, with no plist and no launchctl call" "${installed_skip}"
+  skip "install --runtime-only over a launchd agent replaces the runtime and leaves the plist and launchd as they were" "${installed_skip}"
+  skip "install --runtime-only refuses a checkout with no core for this machine by name before it writes anything" "${installed_skip}"
+  skip "uninstall removes the plist and boots the agent out, and keeps the runtime" "${installed_skip}"
 fi
 
 if (( failures > 0 )); then
