@@ -228,13 +228,17 @@ fresh_home
 write_fixture
 mkdir -p "${home}/cache/osv-vuln" "${home}/cache/kev" "${home}/cache/ghsa" "${home}/approved-specs"
 : > "${log}.rotate.lock"
+# The CLI's output files exist first: in a home it cannot write to, the
+# redirect would fail and the CLI would not run at all.
+: > "${home}/cli.out"
+: > "${home}/cli.err"
 chmod 500 "${home}"
 cli 100000
 chmod 700 "${home}"
-log_kept || fail "a rotation that could not rename changed the log"
-[[ "$(archive_count)" == 0 ]] || fail "a rotation that could not rename made an archive: $(archives)"
 grep -q '^safedeps-core advisory-log: advisory log not rotated: the rename to .* returned OS error ' "${home}/cli.err" \
   || fail "stderr does not say the rotation failed: $(cat "${home}/cli.err")"
+log_kept || fail "a rotation that could not rename changed the log"
+[[ "$(archive_count)" == 0 ]] || fail "a rotation that could not rename made an archive: $(archives)"
 grep -q '\] ERROR advisory log not rotated: the rename to .* returned OS error ' "${log}" \
   || fail "the log does not say the rotation failed"
 pass "a rotation that cannot rename leaves the log whole, and says why on stderr and in the log"
