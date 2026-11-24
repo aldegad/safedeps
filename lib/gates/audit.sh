@@ -175,8 +175,8 @@ failed_with_no_finding() {
 # one that KEV lists, or that cannot be asked, is counted and said so. A
 # package npm counts only for its dependencies (every `via` a name) is taken
 # out once all of those are. The ledger is read through the core
-# (`safedeps-core sources index`); one that cannot be read takes nothing out
-# and says so.
+# (`safedeps-core sources index`), its one reader, and asked by its exit
+# status; one that cannot be read takes nothing out and says so.
 #
 # The lock records are those of the lockfile npm audits: the one npm reads
 # (safedeps_npm_project_lockfile, lib/npm/closure.sh) in the directory npm
@@ -186,27 +186,37 @@ failed_with_no_finding() {
 # directory npm does not name, a lockfile that cannot be read and a project
 # where neither lockfile holds a byte take nothing out, and say so. $1 is
 # npm's report, $2 its counts; the counts left are printed.
+#
+# What the ledger and the lockfile hold reaches jq only through files in a
+# directory of this run's own, never as an argument: a command's arguments
+# have a limit the system sets, and a ledger or a closure has none. The
+# reads that fail say which: a ledger that cannot be read (the core is
+# missing or fails, its answer cannot be written to the file or read from
+# it) is said as not read, and a comparison that fails once the ledger was
+# read is said as not compared.
 accepted_out() {
-  local copy rc=0
-  if ! copy="$(mktemp "${TMPDIR:-/tmp}/safedeps-audit-lock.XXXXXX" 2>/dev/null)"; then
-    note "npm: a copy of the lockfile could not be made, so every advisory npm reported is counted."
+  local dir rc=0
+  if ! dir="$(mktemp -d "${TMPDIR:-/tmp}/safedeps-audit.XXXXXX" 2>/dev/null)"; then
+    note "npm: a directory for the copies this audit reads could not be made, so every advisory npm reported is counted."
     printf '%s' "$2"; return 0
   fi
-  accepted_counts "$1" "$2" "$copy" || rc=$?
-  rm -f -- "$copy"
+  accepted_counts "$1" "$2" "$dir" || rc=$?
+  rm -rf -- "$dir"
   return "$rc"
 }
 accepted_counts() {
-  local report="$1" counts="$2" copy="$3" prefix lock unread=0 entries covered own pairs n v answer dropped='[]' out
+  local report="$1" counts="$2" copy="$3/lock.json" index="$3/sources.json" covered="$3/covered.jsonl" dropped="$3/dropped.jsonl"
+  local prefix lock unread=0 entries own pairs n v answer out
   if ! printf '%s' "$report" | jq -e '(.vulnerabilities | type) == "object" and (.vulnerabilities | length) > 0' >/dev/null 2>&1; then
     printf '%s' "$counts"; return 0
   fi
   if ! sf_core 2>/dev/null \
-    || ! entries="$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources index 2>/dev/null | jq -ce '.entries | arrays')"; then
+    || ! SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources index > "$index" 2>/dev/null \
+    || ! entries="$(jq -er '.entries | arrays | length' "$index" 2>/dev/null)"; then
     note "npm: the accepted-source ledger could not be read, so every advisory npm reported is counted."
     printf '%s' "$counts"; return 0
   fi
-  if [ "$entries" = '[]' ]; then printf '%s' "$counts"; return 0; fi
+  if [ "$entries" = 0 ]; then printf '%s' "$counts"; return 0; fi
   if ! prefix="$(npm prefix 2>/dev/null)" || [ -z "$prefix" ] || [ ! -d "$prefix" ]; then
     note "npm: npm did not say which project it audits (npm prefix), so every advisory npm reported is counted."
     printf '%s' "$counts"; return 0
@@ -225,10 +235,11 @@ accepted_counts() {
   fi
   lock="${prefix%/}/${lock}"
   # The packages an entry covers, each with the versions its records hold.
-  if ! covered="$(jq -c --arg root "$prefix" --arg rel "$lock" --argjson entries "$entries" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "$copy" | jq -sc .)" \
-    || ! own="$(printf '%s' "$report" | jq -c --slurpfile lock "$copy" --argjson covered "$covered" "${SAFEDEPS_AUDIT_ACCEPTED_JQ}"'
+  if ! jq -c --arg root "$prefix" --arg rel "$lock" --slurpfile sources "$index" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "$copy" > "$covered" \
+    || ! own="$(printf '%s' "$report" | jq -c --slurpfile lock "$copy" --slurpfile covered "$covered" "${SAFEDEPS_AUDIT_ACCEPTED_JQ}"'
       [$v | keys[] | select(covered(.)) | {name: ., versions: versions(.)}]')" \
-    || ! pairs="$(printf '%s' "$own" | jq -r '.[] | .name as $n | .versions[] | [$n, .] | @tsv')"; then
+    || ! pairs="$(printf '%s' "$own" | jq -r '.[] | .name as $n | .versions[] | [$n, .] | @tsv')" \
+    || ! : > "$dropped"; then
     note "npm: the accepted-source ledger could not be compared with ${lock}, so every advisory npm reported is counted."
     printf '%s' "$counts"; return 0
   fi
@@ -243,12 +254,12 @@ accepted_counts() {
     else
       note "npm: ${n}@${v} has an accepted source, and OSV or the KEV catalog could not be asked about it, so it is counted."
     fi
-    if ! dropped="$(printf '%s' "$dropped" | jq -c --arg n "$n" '. + [$n]')"; then
+    if ! jq -nc --arg n "$n" '$n' >> "$dropped"; then
       note "could not read the npm audit counts."
       return 1
     fi
   done <<< "$pairs"
-  if ! out="$(printf '%s' "$report" | jq -c --slurpfile lock "$copy" --argjson covered "$covered" --argjson dropped "$dropped" --argjson counts "$counts" "${SAFEDEPS_AUDIT_ACCEPTED_JQ}"'
+  if ! out="$(printf '%s' "$report" | jq -c --slurpfile lock "$copy" --slurpfile covered "$covered" --slurpfile dropped "$dropped" --argjson counts "$counts" "${SAFEDEPS_AUDIT_ACCEPTED_JQ}"'
       def step($t): [$v | keys[] | . as $n
         | ([($v[$n].via // [])[] | objects] | length) as $objects
         | ([($v[$n].via // [])[] | strings]) as $deps

@@ -89,6 +89,7 @@ cd "${ROOT_DIR}" || exit 2
 ALL_BATTERIES=(
   "rust-core|1|dev|1|1|30|scripts/test/rust-core.sh"
   "output-sinks|1|dev|1|1|5|scripts/test/output-sinks.sh"
+  "argv-census|1|dev|1|1|2|scripts/test/argv-census.sh"
   "smoke|1|dev|1|1|350|scripts/test/smoke.sh"
   "recheck-agent|1|dev|1|1|11|scripts/test/recheck-agent.sh"
   "watch-notice|1|dev|1|1|3|scripts/test/watch-notice.sh"

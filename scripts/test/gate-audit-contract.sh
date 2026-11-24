@@ -100,6 +100,19 @@ fi
 exit 5
 STUB
 
+# mktemp, with the directory the audit makes for its copies holding a
+# directory named STUB_MKTEMP_HOLDS, so a file of that name cannot be written
+# there.
+real_mktemp="$(command -v mktemp)"
+cat > "${fakebin}/mktemp" <<STUB
+#!/usr/bin/env bash
+out="\$("${real_mktemp}" "\$@")" || exit \$?
+if [ -n "\${STUB_MKTEMP_HOLDS:-}" ] && [[ "\$*" == *safedeps-audit.* ]]; then
+  mkdir -p "\${out}/\${STUB_MKTEMP_HOLDS}" || exit 1
+fi
+printf '%s\n' "\${out}"
+STUB
+
 cat > "${fakebin}/pip-audit" <<'FAKE'
 #!/usr/bin/env bash
 exit 0
@@ -114,7 +127,7 @@ printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"hi
 exit 0
 FAKE
 
-chmod +x "${fakebin}/npm" "${fakebin}/yarn" "${fakebin}/pnpm" "${fakebin}/jq" "${fakebin}/find" "${fakebin}/pip-audit"
+chmod +x "${fakebin}/npm" "${fakebin}/yarn" "${fakebin}/pnpm" "${fakebin}/jq" "${fakebin}/find" "${fakebin}/mktemp" "${fakebin}/pip-audit"
 
 make_fixture() {
   local manager="$1" fixture="${tmp_root}/${1}-repo"
@@ -192,12 +205,14 @@ pass "strict gate and canonical audit share npm/Yarn verdicts; Yarn Berry is who
 # runs under `||` in the audit, where errexit is off, so each read answers for
 # itself: a jq that failed here read as zero findings, and a tool that printed a
 # clean report and then failed read as clean.
+# The tree whose audit runs: this checkout, or a copy of it (audit_tree below).
+audit_tree="${ROOT_DIR}"
 audit_rc() {
   local fixture="$1"; shift
   run_with_rc "${tmp_root}/audit.out" env \
     PATH="${fakebin}:${PATH}" HOME="${fixture_home}" \
     FAKE_NPM_ARGS_LOG="${tmp_root}/npm-args.log" FAKE_YARN_ARGS_LOG="${tmp_root}/yarn-args.log" "$@" \
-    bash "${ROOT_DIR}/lib/gates/audit.sh" --root "${fixture}" --level moderate
+    bash "${audit_tree}/lib/gates/audit.sh" --root "${fixture}" --level moderate
 }
 assert_audit() {
   local expected="$1" name="$2" fixture="$3"; shift 3
@@ -271,6 +286,90 @@ assert_audit 1 "npm: an advisory no accepted-source entry names counts" "${site_
 site_entry GHSA-site-aaaa-bbbb
 site_lock sha512-siteBytes101
 assert_audit 1 "npm: other bytes under an accepted URL count" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+
+# What the ledger holds reaches the audit's jq through a file, never as an
+# argument: a command's arguments have a limit the system sets, and a ledger
+# has none. The site entry beside 1, 9,000 and 100,000 entries of other
+# packages is judged the same, and each row says how long the audit took.
+unrelated_entries() { # N: that many acceptances of other packages, added to the ledger
+  awk -v n="$1" 'BEGIN { for (i = 1; i <= n; i++) printf "{\"at\":\"2026-01-02T03:04:05Z\",\"op\":\"accept\",\"url\":\"https://example.test/other/-/other-%d-1.0.0.tgz\",\"entries\":[{\"integrity\":\"sha512-other%d\",\"package\":\"other-%d\",\"version\":\"1.0.0\",\"advisories\":[\"GHSA-other-%d\"]}],\"reason\":\"owner: an unrelated acceptance\",\"project\":\"/work/other\",\"tool_use_id\":null}\n", i, i, i, i }' \
+    >> "${site_home}/accepted-sources.jsonl"
+}
+site_lock sha512-siteBytes100
+for n in 1 9000 100000; do
+  site_entry GHSA-site-aaaa-bbbb
+  unrelated_entries "${n}"
+  started="${SECONDS}"
+  assert_audit 0 "npm: beside ${n} entries of other packages, the advisory the site entry names is not counted" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+  printf '# beside %s entries of other packages the audit took %s s\n' "${n}" "$((SECONDS - started))"
+  site_said 'npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)' "npm: the accepted advisory is named beside ${n} entries of other packages"
+done
+site_entry GHSA-site-aaaa-bbbb
+
+# A ledger the audit cannot read takes nothing out, and the audit says it was
+# not read; a comparison that fails once the ledger was read is said as not
+# compared. Each row breaks one step: the core is missing (G1), fails (G2),
+# stops part way (G3), its answer has no file to go to (G4) or is not an
+# index (G5), and the comparison fails before or after it printed (G6). The
+# core's steps are broken in a copy of this tree whose core is missing, or a
+# stand-in that answers `sources index` as STANDIN_INDEX says and runs the
+# real core for everything else.
+core_platform() {
+  local machine="${BASH_VERSINFO[5]:-}" os="" arch=""
+  case "${machine}" in *-darwin*) os=darwin ;; *-linux*) os=linux ;; esac
+  case "${machine%%-*}" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; esac
+  [ -n "${os}" ] && [ -n "${arch}" ] || fail "no core is built for ${machine}"
+  printf '%s-%s\n' "${os}" "${arch}"
+}
+platform="$(core_platform)"
+no_core_tree="${tmp_root}/no-core-tree"
+mkdir -p "${no_core_tree}"
+cp -R "${ROOT_DIR}/lib" "${no_core_tree}/lib"
+stand_in_tree="${tmp_root}/stand-in-tree"
+mkdir -p "${stand_in_tree}/bin/native/${platform}"
+cp -R "${ROOT_DIR}/lib" "${stand_in_tree}/lib"
+{
+  printf '#!/usr/bin/env bash\nreal=%q\n' "${ROOT_DIR}/bin/native/${platform}/safedeps-core"
+  cat <<'CORE'
+if [ "${1:-} ${2:-}" = "sources index" ]; then
+  case "${STANDIN_INDEX:-}" in
+    fails) printf '%s\n' 'safedeps-core: the accepted-source ledger could not be read: stand-in' >&2; exit 1 ;;
+    cut) "${real}" "$@" | head -c 24; exit 0 ;;
+    empty) exit 0 ;;
+    not-an-index) printf '%s\n' '{"present":true,"entries":{},"broken":0}'; exit 0 ;;
+  esac
+fi
+exec "${real}" "$@"
+CORE
+} > "${stand_in_tree}/bin/native/${platform}/safedeps-core"
+chmod +x "${stand_in_tree}/bin/native/${platform}/safedeps-core"
+not_read='npm: the accepted-source ledger could not be read, so every advisory npm reported is counted.'
+site_lock sha512-siteBytes100
+audit_tree="${no_core_tree}"
+assert_audit 1 "npm: G1, with no core the ledger is not read, and the advisory counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+site_said "${not_read}" "npm: G1, the ledger not read is said"
+audit_tree="${stand_in_tree}"
+assert_audit 0 "npm: the stand-in core reads the ledger as the core does" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+for mode in fails cut empty not-an-index; do
+  case "${mode}" in
+    fails) g=G2 what="a core that fails" ;;
+    cut) g=G3 what="an index cut part way" ;;
+    empty) g=G5 what="an empty index" ;;
+    not-an-index) g=G5 what="an index with no entries list" ;;
+  esac
+  assert_audit 1 "npm: ${g}, with ${what} the ledger is not read, and the advisory counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" STANDIN_INDEX="${mode}"
+  site_said "${not_read}" "npm: ${g}, ${what} is said as the ledger not read"
+done
+audit_tree="${ROOT_DIR}"
+assert_audit 1 "npm: G4, where the index cannot be written to its file the ledger is not read, and the advisory counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" STUB_MKTEMP_HOLDS=sources.json
+site_said "${not_read}" "npm: G4, an index with no file is said as the ledger not read"
+for before in 1 ''; do
+  assert_audit 1 "npm: G6, a comparison that fails${before:+ before it printed} counts the advisory" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" STUB_MATCH='--slurpfile sources' STUB_BEFORE="${before}"
+  grep -qE '^safedeps audit: npm: the accepted-source ledger could not be compared with /.+/site-repo/package-lock\.json, so every advisory npm reported is counted\.$' "${tmp_root}/audit.out" \
+    || fail "npm: G6, the failed comparison is said as not compared: $(cat "${tmp_root}/audit.out")"
+  ! grep -qF "${not_read}" "${tmp_root}/audit.out" || fail "npm: G6, a ledger that was read is not said as not read: $(cat "${tmp_root}/audit.out")"
+  pass "npm: G6, the failed comparison${before:+ before it printed} is said as not compared"
+done
 
 # Which lockfile npm's advisories are compared with: the one npm reads
 # (lib/npm/closure.sh, safedeps_npm_project_lockfile) in the directory npm

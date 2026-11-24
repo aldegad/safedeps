@@ -299,6 +299,9 @@ mod tests {
             entry(u, "sha512-both2", "both", "1.0.0", &["GHSA-b", "GHSA-c"]),
             entry(u, "sha512-linked", "linked", "1.0.0", &[]),
             entry(u, "sha512-real", "real", "1.0.0", &["GHSA-r"]),
+            // The same four values twice: both stand, and the package may have
+            // the advisories either names.
+            entry(u, "sha512-real", "real", "1.0.0", &["GHSA-s"]),
             entry(u, "sha512-empty", "w", "1.0.0", &[]),
             entry(u, "sha512-numeric", "numeric", "1", &[]),
             entry(u, "sha512-ws", "ws", "1.0.0", &[]),
@@ -320,7 +323,10 @@ mod tests {
         let json = |e: &Entry| format!(r#"{{"url":"{}","integrity":"{}","package":"{}","version":"{}","advisories":[{}]}}"#,
             String::from_utf8_lossy(&e.url), String::from_utf8_lossy(&e.integrity), String::from_utf8_lossy(&e.package),
             String::from_utf8_lossy(&e.version), e.advisories.iter().map(|a| format!("\"{}\"", String::from_utf8_lossy(a))).collect::<Vec<_>>().join(","));
-        let entries_json = format!("[{}]", entries.iter().map(json).collect::<Vec<_>>().join(","));
+        // The index as the core prints it, in a file: the CLI reads the
+        // ledger through a file, never as an argument.
+        let index = dir.join("sources.json");
+        std::fs::write(&index, format!("{{\"present\":true,\"entries\":[{}],\"broken\":0}}", entries.iter().map(json).collect::<Vec<_>>().join(","))).unwrap();
         let output = std::process::Command::new("/bin/bash")
             .env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default()).env("LC_ALL", "C")
             .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
@@ -328,9 +334,9 @@ mod tests {
 set -euo pipefail
 source lib/npm/ask.sh
 source lib/npm/closure.sh
-jq -r --arg root r --arg rel l --argjson entries "$1" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "$2" \
+jq -r --arg root r --arg rel l --slurpfile sources "$1" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "$2" \
   | jq -r '"\(.package)@\(.version) \(.advisories | tojson)"'
-"#, "coverage-test", &entries_json, dir.join("package-lock.json").to_str().unwrap()])
+"#, "coverage-test", index.to_str().unwrap(), dir.join("package-lock.json").to_str().unwrap()])
             .output().expect("run the CLI coverage reader");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(output.status.success(), "CLI reader failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -346,7 +352,7 @@ jq -r --arg root r --arg rel l --argjson entries "$1" "${SAFEDEPS_NPM_ACCEPTED_J
             "@s/p@1.0.0 [\"GHSA-a\"]".to_string(),
             "both@1.0.0 [\"GHSA-b\"]".to_string(),
             "linked@1.0.0 []".to_string(),
-            "real@1.0.0 [\"GHSA-r\"]".to_string(),
+            "real@1.0.0 [\"GHSA-r\", \"GHSA-s\"]".to_string(),
         ]);
     }
 }

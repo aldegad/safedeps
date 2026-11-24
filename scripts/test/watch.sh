@@ -1210,6 +1210,135 @@ row_accepted_source_other_bytes() {
 }
 row "other bytes under an accepted URL, and an entry revoked, are findings as before" row_accepted_source_other_bytes
 
+# What the ledger holds reaches the watch's jq through a file, never as an
+# argument: a command's arguments have a limit the system sets, and a ledger
+# has none. The site entry beside 1, 9,000 and 100,000 entries of other
+# packages is judged the same, and each row says how long the scan took.
+unrelated_accepts() { # N: that many acceptances of other packages, added to the ledger
+  awk -v n="$1" 'BEGIN { for (i = 1; i <= n; i++) printf "{\"at\":\"2026-01-02T03:04:05Z\",\"op\":\"accept\",\"url\":\"https://example.test/other/-/other-%d-1.0.0.tgz\",\"entries\":[{\"integrity\":\"sha512-other%d\",\"package\":\"other-%d\",\"version\":\"1.0.0\",\"advisories\":[\"GHSA-other-%d\"]}],\"reason\":\"owner: an unrelated acceptance\",\"project\":\"/work/other\",\"tool_use_id\":null}\n", i, i, i, i }' \
+    >> "${home}/accepted-sources.jsonl"
+}
+accepted_beside() { # N
+  local started
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  unrelated_accepts "$1"
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  started="${SECONDS}"
+  scan_ok
+  printf '# beside %s entries of other packages the scan took %s s\n' "$1" "$((SECONDS - started))"
+  [[ "$(npm_findings)" == "[]" ]] || no "beside $1 entries of other packages the accepted advisory is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1 and .summary.open == 0' "accepted beside $1 entries of other packages" '{line: .summary.line, errors}'
+}
+row_accepted_beside_1() { accepted_beside 1; }
+row_accepted_beside_9000() { accepted_beside 9000; }
+row_accepted_beside_100000() { accepted_beside 100000; }
+row "beside 1 entry of another package the advisory the site entry names is no finding" row_accepted_beside_1
+row "beside 9,000 entries of other packages the advisory the site entry names is no finding" row_accepted_beside_9000
+row "beside 100,000 entries of other packages the advisory the site entry names is no finding" row_accepted_beside_100000
+
+# A ledger the watch cannot read covers nothing, and the run says so with an
+# accepted_sources_unreadable error row; a comparison that fails once the
+# ledger was read leaves that lockfile unread, with the reason "accepted
+# sources not compared". Each row breaks one step: the core is missing (G1),
+# fails (G2), stops part way (G3), its answer has no file to go to (G4) or is
+# not an index (G5), and the comparison fails before or after it printed
+# (G6). The core's steps are broken in a copy of this tree whose core is
+# missing, or a stand-in that answers `sources index` as STANDIN_INDEX says
+# and runs the real core for everything else.
+stand_in_tree() { # DIR [none]: a copy of this tree's CLI, with the stand-in core or none
+  local tree="$1" machine="${BASH_VERSINFO[5]:-}" os="" arch="" native
+  mkdir -p "${tree}/bin" "${tree}/scripts"
+  cp "${ROOT_DIR}/bin/safedeps" "${tree}/bin/safedeps"
+  cp -R "${ROOT_DIR}/lib" "${tree}/lib"
+  cp "${ROOT_DIR}/scripts/safedeps-recheck-alert.sh" "${tree}/scripts/safedeps-recheck-alert.sh"
+  [[ "${2:-}" != none ]] || return 0
+  case "${machine}" in *-darwin*) os=darwin ;; *-linux*) os=linux ;; esac
+  case "${machine%%-*}" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; esac
+  [[ -n "${os}" && -n "${arch}" ]] || no "no core is built for ${machine}"
+  native="${tree}/bin/native/${os}-${arch}"
+  mkdir -p "${native}"
+  {
+    printf '#!/usr/bin/env bash\nreal=%q\n' "${ROOT_DIR}/bin/native/${os}-${arch}/safedeps-core"
+    cat <<'CORE'
+if [[ "${1:-} ${2:-}" == "sources index" ]]; then
+  case "${STANDIN_INDEX:-}" in
+    fails) printf '%s\n' 'safedeps-core: the accepted-source ledger could not be read: stand-in' >&2; exit 1 ;;
+    cut) "${real}" "$@" | head -c 24; exit 0 ;;
+    empty) exit 0 ;;
+    not-an-index) printf '%s\n' '{"present":true,"entries":{},"broken":0}'; exit 0 ;;
+  esac
+fi
+exec "${real}" "$@"
+CORE
+  } > "${native}/safedeps-core"
+  chmod +x "${native}/safedeps-core"
+}
+site_world() { # the site lockfile, the entry that covers it and the advisory it names
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+}
+tree_scan() { # TREE ENV...: one scan by that tree's CLI. rc and out hold its answer.
+  local tree="$1"; shift
+  rc=0
+  out=$(cd "${d}" && envd "$@" "${tree}/bin/safedeps" --json watch scan 2> "${d}/stderr") || rc=$?
+}
+not_read() { # WHAT: the scan said the ledger was not read, and the advisory is a finding
+  [[ "${rc}" == 1 ]] || no "$1: the scan exited ${rc}: $(head -c 400 "${d}/stderr")"
+  st '[.errors[] | select(.kind == "accepted_sources_unreadable")] | length == 1' "$1: the error row" '.errors'
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].state == "open"' > /dev/null \
+    || no "$1: the advisory is no finding: $(npm_findings)"
+  st '.summary.accepted_sources == 0' "$1: nothing is accepted"
+}
+row_ledger_g1_no_core() {
+  site_world
+  stand_in_tree "${d}/tree" none
+  tree_scan "${d}/tree"
+  not_read "G1, no core"
+}
+row "G1: with no core the ledger is not read: an accepted_sources_unreadable error row, and the advisory is a finding" row_ledger_g1_no_core
+row_ledger_stand_in() {
+  site_world
+  stand_in_tree "${d}/tree"
+  tree_scan "${d}/tree"
+  [[ "${rc}" == 0 ]] || no "the stand-in core's scan exited ${rc}: $(head -c 400 "${d}/stderr")"
+  st '.summary.accepted_sources == 1 and .summary.open == 0' 'the stand-in reads the ledger as the core does' '{line: .summary.line, errors}'
+  local mode
+  for mode in fails cut empty not-an-index; do
+    tree_scan "${d}/tree" STANDIN_INDEX="${mode}"
+    not_read "${mode}"
+  done
+}
+row "G2, G3, G5: a core that fails, an index cut part way, an empty index and one with no entries list are each said as the ledger not read" row_ledger_stand_in
+row_ledger_g4_no_file() {
+  site_world
+  printf '#!/bin/sh\nout=$(%s "$@") || exit $?\ncase "$*" in *safedeps-providers.*) mkdir -p "$out/npm/accepted-sources.json" || exit 1 ;; esac\nprintf "%%s\\n" "$out"\n' \
+    "$(PATH=/usr/bin:/bin command -v mktemp)" > "${d}/fakebin/mktemp"
+  chmod +x "${d}/fakebin/mktemp"
+  scan
+  not_read "G4, no file for the index"
+}
+row "G4: where the index cannot be written to its file the ledger is not read: the error row, and the advisory is a finding" row_ledger_g4_no_file
+row_ledger_g6_not_compared() {
+  site_world
+  local before
+  for before in 1 ''; do
+    printf '#!/bin/sh\ncase "$*" in *"--slurpfile sources"*) [ -n "%s" ] || %s "$@"; exit 5 ;; esac\nexec %s "$@"\n' \
+      "${before}" "$(command -v jq)" "$(command -v jq)" > "${d}/fakebin/jq"
+    chmod +x "${d}/fakebin/jq"
+    scan
+    [[ "${rc}" == 1 ]] || no "G6${before:+ before it printed}: the scan exited ${rc}: $(head -c 400 "${d}/stderr")"
+    st '[.errors[] | select(.kind == "accepted_sources_unreadable")] | length == 0' "G6: the ledger was read" '.errors'
+    st '[.unmeasured[] | select(.kind == "lockfile_unreadable" and .path == "./package-lock.json" and .reason == "accepted sources not compared")] | length == 1
+        and .summary.complete == false' "G6${before:+ before it printed}: the lockfile is a gap, not compared" '.unmeasured'
+    [[ "$(npm_rows)" == '[{"path":"./package-lock.json","status":"unreadable"}]' ]] || no "G6: the lockfile row: $(npm_rows)"
+  done
+}
+row "G6: a comparison that fails, before or after it printed, leaves the lockfile unread with the reason accepted sources not compared" row_ledger_g6_not_compared
+
 # ---- which npm lockfile ----------------------------------------------------------------
 # A directory is measured by the npm lockfile npm reads there
 # (lib/npm/closure.sh, safedeps_npm_project_lockfile), read once:

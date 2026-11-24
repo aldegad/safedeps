@@ -148,10 +148,12 @@ def fixed_for($pkg): [.affected[]? | select((.package.ecosystem // "") == "npm" 
 '
 
 # Measures one npm lockfile from COPY, the one read of it: its type, its
-# packages, its closure and what the accepted-source entries (ENTRIES) cover
-# of it. ROOT and REL name it on its rows.
+# packages, its closure and what the accepted-source entries cover of it.
+# SOURCES is the file that holds the ledger's index, or empty where the
+# ledger holds no entry or could not be read. ROOT and REL name it on its
+# rows.
 safedeps_watch_measure_npm_file() {
-  local root="$1" rel="$2" copy="$3" entries="$4" status="$5" errors="$6" tmp="$7" specs
+  local root="$1" rel="$2" copy="$3" sources="$4" status="$5" errors="$6" tmp="$7" specs
   if ! jq -e 'type == "object"' "${copy}" >/dev/null 2>&1; then
     jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"not a JSON lockfile"}' >> "${status}"
     jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
@@ -168,9 +170,9 @@ safedeps_watch_measure_npm_file() {
     jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
     return 0
   fi
-  if [[ "${entries}" != '[]' ]] \
-    && ! jq -c --arg root "${root}" --arg rel "${rel}" --argjson entries "${entries}" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "${copy}" >> "${tmp}/npm-covered.jsonl"; then
-    jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"accepted sources not read"}' >> "${status}"
+  if [[ -n "${sources}" ]] \
+    && ! jq -c --arg root "${root}" --arg rel "${rel}" --slurpfile sources "${sources}" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "${copy}" >> "${tmp}/npm-covered.jsonl"; then
+    jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"accepted sources not compared"}' >> "${status}"
     jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
     return 0
   fi
@@ -182,16 +184,22 @@ safedeps_watch_measure_npm_file() {
 # to ERRORS. TMP is a private directory.
 safedeps_watch_measure_npm() {
   local list="$1" findings="$2" status="$3" errors="$4" tmp="$5" now="$6"
-  local root rel file id specs unique chunk_dir chunk items ok=1 catalog kev_ok=1 entries='[]'
+  local root rel file id specs unique chunk_dir chunk items ok=1 catalog kev_ok=1 sources="${tmp}/accepted-sources.json" entries=0
   : > "${tmp}/npm-rows.jsonl"
   : > "${tmp}/npm-measured.txt"
   : > "${tmp}/npm-covered.jsonl"
   # The accepted-source ledger, read once for the run through the core, its
-  # one reader. One that cannot be read covers nothing.
-  if ! sf_core || ! entries=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources index 2>/dev/null | jq -ce '.entries | arrays'); then
-    entries='[]'
+  # one reader, asked by its exit status, into a file of the run's own: what
+  # it holds reaches jq through that file, never as an argument, whose size
+  # the system limits. One that cannot be read (the core is missing or
+  # fails, its answer cannot be written to the file or read from it) covers
+  # nothing, and the run says so.
+  if ! sf_core || ! SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources index > "${sources}" 2>/dev/null \
+    || ! entries=$(jq -er '.entries | arrays | length' "${sources}" 2>/dev/null); then
+    entries=0
     jq -nc '{kind:"accepted_sources_unreadable"}' >> "${errors}"
   fi
+  [[ "${entries}" != 0 ]] || sources=""
   # Each directory once, in the order the walk listed its first npm lockfile,
   # with the names the walk listed there.
   awk -F '\t' '$1 != "" { d = $2; n = $2; sub(/\/[^\/]*$/, "", d); sub(/^.*\//, "", n); k = $1 "\t" d
@@ -225,7 +233,7 @@ safedeps_watch_measure_npm() {
           '{root:$root, path:$rel, kind:"npm", status:"ignored", reason:$reason}' >> "${status}"
         continue
       fi
-      safedeps_watch_measure_npm_file "${root}" "${rel}" "${file}" "${entries}" "${status}" "${errors}" "${tmp}"
+      safedeps_watch_measure_npm_file "${root}" "${rel}" "${file}" "${sources}" "${status}" "${errors}" "${tmp}"
     done
   done < "${tmp}/npm-dirs.tsv"
   [[ -s "${tmp}/npm-measured.txt" ]] || return 0
