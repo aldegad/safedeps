@@ -786,7 +786,7 @@ Old unconfirmed snapshots are automatically pruned (keeping the 10 most recent),
 - **The lock.** `advisory.log.rotate.lock` is the rotation's lock file. It stays in place. The kernel releases the lock when the rotating process exits, however it ends, so a killed rotation does not block the next one. A temporary `advisory.log.compressing` exists while a compression runs.
 - **Who rotates.** The core rotates (`safedeps-core advisory-log rotate`). The CLI and the watch look at the size first and start the core only at the bound. The post hook rotates when it starts its provider queries. Each process looks once.
 - **Without the core, no rotation.** The CLI and the watch then say on stderr, once per run, that the log is not rotated, with its path, its size and the bound. They write no line to the log for it.
-- **What a rotation says.** A rotation writes one line to the new live file: `WARN advisory log rotated: <bytes> bytes moved to <archive>`, followed by any archive name it passed over, its compression and its removals. A rotation that could not rotate writes `ERROR advisory log not rotated: <reason>`.
+- **What a rotation says.** A rotation writes one line to the new live file: `WARN advisory log rotated: <bytes> bytes moved to <archive>`, followed by any archive name it passed over, its compression and its removals. A rotation that finds the lock held writes no line. A rotation that fails writes `ERROR advisory log not rotated: <reason>`.
 
 Limits:
 

@@ -786,7 +786,7 @@ ls -la ~/.safedeps/snapshots/
 - **잠금.** `advisory.log.rotate.lock`은 로테이션의 잠금 파일입니다. 이 파일은 계속 남습니다. 로테이션 프로세스가 어떻게 종료되든 종료되면 커널이 잠금을 해제하므로, 중단된 로테이션이 다음 로테이션을 막지 않습니다. 압축이 진행 중일 때는 임시 파일 `advisory.log.compressing`이 존재합니다.
 - **로테이션을 수행하는 주체.** 코어가 로테이션을 수행합니다(`safedeps-core advisory-log rotate`). CLI와 감시 프로세스는 먼저 크기를 확인하고, 한도에 도달했을 때만 코어를 시작합니다. 포스트 훅은 공급자 쿼리를 시작할 때 로테이션합니다. 각 프로세스는 한 번씩 확인합니다.
 - **코어가 없으면 로테이션도 없습니다.** 이 경우 CLI와 감시 프로세스는 실행마다 한 번씩, 로그가 로테이션되지 않았다는 내용과 로그 경로, 크기, 한도를 표준 오류에 출력합니다. 이 내용은 로그에 기록하지 않습니다.
-- **로테이션 기록.** 로테이션은 새 현재 파일에 한 줄을 씁니다. `WARN advisory log rotated: <bytes> bytes moved to <archive>` 뒤에 건너뛴 아카이브 이름, 압축 내용, 제거 내역이 이어집니다. 로테이션에 실패하면 `ERROR advisory log not rotated: <reason>`을 씁니다.
+- **로테이션 기록.** 로테이션은 새 현재 파일에 한 줄을 씁니다. `WARN advisory log rotated: <bytes> bytes moved to <archive>` 뒤에 건너뛴 아카이브 이름, 압축 내용, 제거 내역이 이어집니다. 잠금이 걸려 있는 것을 발견한 로테이션은 아무 줄도 쓰지 않습니다. 실패한 로테이션은 `ERROR advisory log not rotated: <reason>`을 씁니다.
 
 제한 사항:
 
