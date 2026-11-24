@@ -124,6 +124,11 @@ const SOURCE_NOT_COVERED: &[u8] = b"SAFEDEPS_ACCEPT_SOURCE was set for this inst
 /// the install is kept and before anything is rebuilt over them: an install
 /// whose entries cannot be written is not kept. The one line that says so is
 /// said here, in the install that makes the entries, and in no later one.
+///
+/// They are the last write an install's keeping rests on (`judge`): every
+/// other write that can roll the install back is done before them, and
+/// nothing after them rolls it back. So an install that is rolled back
+/// leaves no entry, and the ledger never releases bytes no install kept.
 fn accept_sources(call: &Call, sources: &mut Sources, report: &mut Report, until: Instant) -> Result<(), W> {
     let Some((url, reason)) = sources.bypass.clone() else { return Ok(()) };
     let home = call.store.home.clone();
@@ -154,16 +159,14 @@ pub const ACCEPTED_FACT: &[u8] = b"SAFEDEPS_ACCEPT_RISK kept this install, which
 const ACCEPTED_HEAD: &[u8] = b"safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.";
 const NOT_COVERED: &[u8] = b"SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package";
 
-/// An install kept under `SAFEDEPS_ACCEPT_RISK`: every problem the checks
-/// found is one the override covers (`effect::Accepted`). The audit record is
-/// written first, and an install whose record cannot be written is not kept.
-/// The verified baseline does not move, because nothing verified this state,
-/// and no rebuild runs, because the closure did not verify.
-fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<W>, reason: &[u8],
-    accepted: &effect::Accepted, input: &[u8]) -> Result<W, W> {
-    let home = call.store.home.clone();
-    let problems = accepted.problems.join(b"; ".as_slice());
-    let audit = state::accepted_risk_path(&home);
+/// The audit record of an install `SAFEDEPS_ACCEPT_RISK` keeps: every
+/// problem the checks found is one the override covers (`effect::Accepted`).
+/// It is written first, before any entry of `SAFEDEPS_ACCEPT_SOURCE` and
+/// before the install is kept (`judge`), and an install whose record cannot
+/// be written is not kept.
+fn audit(call: &Call, reason: &[u8], accepted: &effect::Accepted) -> Result<(), W> {
+    let home = &call.store.home;
+    let audit = state::accepted_risk_path(home);
     let entry = jv::obj(vec![
         ("at", jv::s(os::utc_stamp(os::wall(os::WallRole::AcceptedRiskEntry).seconds()).as_bytes())),
         ("tool_use_id", jv::field(&call.current, rec::TOOL_USE_ID).ok().filter(|v| matches!(v, crate::json::Value::Str(_))).cloned().unwrap_or(crate::json::Value::Null)),
@@ -171,9 +174,18 @@ fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<
         ("snapshot", jv::s(&call.store.id)), ("problems", crate::json::Value::Arr(accepted.problems.iter().map(|p| jv::s(p)).collect())),
         ("packages", crate::json::Value::Arr(accepted.packages.clone())),
     ]);
-    if let Err(error) = state::append_accepted_risk(&home, &jv::dump(&entry)) {
-        return Err(cat(&[b"SAFEDEPS_ACCEPT_RISK was set for this install, and its audit record ", sh::bytes(&audit), b" could not be written (", error.to_string().as_bytes(), b"), so the install was not kept"]));
-    }
+    state::append_accepted_risk(home, &jv::dump(&entry)).map_err(|error| cat(&[b"SAFEDEPS_ACCEPT_RISK was set for this install, and its audit record ", sh::bytes(&audit), b" could not be written (", error.to_string().as_bytes(), b"), so the install was not kept"]))
+}
+
+/// An install kept under `SAFEDEPS_ACCEPT_RISK`, once its audit record and
+/// any entry of `SAFEDEPS_ACCEPT_SOURCE` are written. Nothing here rolls it
+/// back. The verified baseline does not move, because nothing verified this
+/// state, and no rebuild runs, because the closure did not verify.
+fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<W>, reason: &[u8],
+    accepted: &effect::Accepted, input: &[u8]) -> W {
+    let home = call.store.home.clone();
+    let problems = accepted.problems.join(b"; ".as_slice());
+    let audit = state::accepted_risk_path(&home);
     call.store.discard();
     report.lines.extend(confirm);
     let meta = call.store.meta();
@@ -192,8 +204,13 @@ fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<
         b"\n  Project: ", sh::bytes(&call.store.project), b"\n  Accepted risk: ", reason, b"\n  Accepted problems: ", &problems, b"\n", &lines]));
     state::log_advisory(&home, &cat(&[b"post-verify ACCEPTED RISK in ", sh::bytes(&call.store.project), b": kept under SAFEDEPS_ACCEPT_RISK (", reason, b"), not rolled back. Problems: ", &problems, b". Command: ", &call.command]));
     let _ = call.store.cleanup();
-    Ok(cat(&[ACCEPTED_HEAD, b"\nAccepted risk: ", reason, b"\n\nAccepted problems:\n", &problems, b"\n\n", &report.lines.join(&b'\n'), b"\n\n", &report::file(b"Details log", &log)]))
+    cat(&[ACCEPTED_HEAD, b"\nAccepted risk: ", reason, b"\n\nAccepted problems:\n", &problems, b"\n\n", &report.lines.join(&b'\n'), b"\n\n", &report::file(b"Details log", &log)])
 }
+
+/// Which write an install's keeping rests on failed: the audit record of
+/// `SAFEDEPS_ACCEPT_RISK`, or the entries of `SAFEDEPS_ACCEPT_SOURCE`.
+#[derive(Clone, Copy, PartialEq)]
+enum Unwritten { Audit, Entries }
 
 fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant) -> Result<Option<W>, i32> {
     // One deadline for the run, fixed at its start: the provider requests, the
@@ -222,28 +239,47 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
     npm.record(&call.store, &records, &call.current, &trace, &mut report, until, &sources);
     npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm, until, &sources);
     if reasons.is_empty() { heuristics::binaries(&call.store, &mut reasons, post_started); }
-    let mut unrecorded = false;
-    let mut unwritten = false;
+    // The writes the keeping of an install rests on, each before the install
+    // is kept, in this order: the audit record of SAFEDEPS_ACCEPT_RISK, then
+    // the entries of SAFEDEPS_ACCEPT_SOURCE. A write that fails rolls the
+    // install back. The entries come last because they are the one write
+    // that releases anything: later installs of those bytes pass on them. So
+    // a failed audit record leaves no entry, and nothing after the entries
+    // rolls the install back.
+    let reason = accept.clone().unwrap_or_default();
+    let mut unwritten = None;
+    let mut audited = false;
+    if reasons.is_empty() && !accepted.problems.is_empty() {
+        match audit(call, &reason, &accepted) {
+            Ok(()) => audited = true,
+            Err(why) => { state::log_advisory(&call.store.home, &cat(&[b"post-verify: ", &why, b"."])); reasons.push(why); unwritten = Some(Unwritten::Audit); }
+        }
+    }
     if reasons.is_empty() {
         if let Err(why) = accept_sources(call, &mut sources, &mut report, until) {
-            state::log_advisory(&call.store.home, &cat(&[b"post-verify: ", &why, b"."])); reasons.push(why); unwritten = true;
+            state::log_advisory(&call.store.home, &cat(&[b"post-verify: ", &why, b"."])); reasons.push(why); unwritten = Some(Unwritten::Entries);
         }
     }
     if reasons.is_empty() && !accepted.problems.is_empty() {
-        let reason = accept.clone().unwrap_or_default();
-        match keep(call, &mut trace, &mut report, std::mem::take(&mut confirm), &reason, &accepted, input) {
-            Ok(message) => return Ok(Some(message)),
-            Err(why) => { state::log_advisory(&call.store.home, &cat(&[b"post-verify: ", &why, b"."])); reasons.push(why); unrecorded = true; }
-        }
+        return Ok(Some(keep(call, &mut trace, &mut report, std::mem::take(&mut confirm), &reason, &accepted, input)))
     }
     if !reasons.is_empty() {
         // The problems an override would cover are reasons again where it
         // does not keep the install, beside the ones it never covers.
         if accept.is_some() {
             reasons.extend(std::mem::take(&mut accepted.problems));
-            if !unrecorded { reasons.push(NOT_COVERED.to_vec()); }
+            match unwritten {
+                // The reason already says the audit record was not written.
+                Some(Unwritten::Audit) => {}
+                // The audit record was written, and the entries that come
+                // after it were not: the record stands for a decision the
+                // install did not outlive.
+                Some(Unwritten::Entries) if audited => reasons.push(cat(&[b"the audit record of SAFEDEPS_ACCEPT_RISK for this install was written to ",
+                    sh::bytes(&state::accepted_risk_path(&call.store.home)), b" before the entries failed, and it stays"])),
+                _ => reasons.push(NOT_COVERED.to_vec()),
+            }
         }
-        if sources.bypass.is_some() && sources.written.is_empty() && !unwritten {
+        if sources.bypass.is_some() && sources.written.is_empty() && unwritten != Some(Unwritten::Entries) {
             match sources.bypass_unmatched() {
                 Some(url) => reasons.push(cat(&[b"SAFEDEPS_ACCEPT_SOURCE was set for this install and names ", url, b", which neither npm record holds, so it accepted nothing"])),
                 None => reasons.push(SOURCE_NOT_COVERED.to_vec()),
