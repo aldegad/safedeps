@@ -989,7 +989,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{mpsc, Barrier};
+    use std::sync::{mpsc, Arc, Barrier};
     use std::time::Instant;
 
     struct Dir(PathBuf);
@@ -1255,22 +1255,32 @@ mod tests {
         assert_eq!(fs::metadata(path(&d.0)).unwrap().len(), 0);
     }
 
-    /// Shared holds of the store lock, taken as a reader takes it: `holds` of
-    /// them, one every `each`, each taken before the last one goes, so the
-    /// lock is never free and every try of a commit finds it held. The last is
-    /// kept `quiet` longer. No line lands. Returns once the first is held,
-    /// with the thread, which ends when the lock goes.
-    fn relay(dir: &Path, holds: u32, each: Duration, quiet: Duration) -> std::thread::JoinHandle<()> {
+    /// Exclusive holds of the store lock, one after another: `holds` of them,
+    /// one every `each`, the last kept `quiet` longer. No line lands. Each
+    /// next hold's file is open before the last hold goes, so the lock is free
+    /// only between that close and the next lock. Returns once the first is
+    /// held, with the thread, which ends when the lock goes and answers
+    /// whether another took the lock between two holds.
+    fn relay(dir: &Path, holds: u32, each: Duration, quiet: Duration) -> std::thread::JoinHandle<bool> {
         let dir = dir.to_owned();
-        let mut held = holder(&dir, os::FileLock::Shared);
+        let mut held = holder(&dir, os::FileLock::Exclusive);
         std::thread::spawn(move || {
+            let mut gap = false;
             for _ in 1..holds {
                 std::thread::sleep(each);
-                // The next hold is taken before the assignment lets this one go.
-                held = holder(&dir, os::FileLock::Shared);
+                let next = fs::OpenOptions::new().read(true).append(true).open(path(&dir)).unwrap();
+                drop(held);
+                // One try first: a refusal is another holder, which took the
+                // lock between the two holds.
+                if lock_store(&dir, &next, os::FileLock::Exclusive, Duration::ZERO).is_err() {
+                    gap = true;
+                    lock_store(&dir, &next, os::FileLock::Exclusive, LOCK_WAIT).unwrap();
+                }
+                held = next;
             }
             std::thread::sleep(each + quiet);
             drop(held);
+            gap
         })
     }
 
@@ -1278,24 +1288,30 @@ mod tests {
     fn a_commit_waits_while_the_lock_changes_hands_however_long_it_stays_held() {
         // Commits that overlap hand the lock on: a commit whose wait ran out
         // while the lock went from one holder to the next answered
-        // NotApproved(Store, Untouched). Here the lock is never free for
-        // twice the wait, it changes hands every twentieth of it, and no line
-        // lands.
-        let d = scratch();
+        // NotApproved(Store, Untouched). Here the lock changes hands every
+        // twentieth of the wait for twice the wait, and no line lands. A run
+        // where the commit took the lock between two holds does not count.
         let wait = Duration::from_secs(2);
-        let relay = relay(&d.0, 40, Duration::from_millis(100), Duration::ZERO);
-        let (staged, entry) = stage(&d.0, 1, "entry of 1");
-        let (hash, r) = (h(1), rec(1));
-        let started = Instant::now();
-        let mut err = Vec::new();
-        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
-        let waited = started.elapsed();
-        relay.join().unwrap();
-        assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
-        assert!(waited > wait, "the commit answered within the wait, {waited:?}, so the lock was not held that long");
-        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
-        assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
-        assert_eq!(logged(&d.0), vec![record(1)]);
+        until_met(|| {
+            let d = scratch();
+            let relay = relay(&d.0, 40, Duration::from_millis(100), Duration::ZERO);
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            let (hash, r) = (h(1), rec(1));
+            let started = Instant::now();
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
+            let waited = started.elapsed();
+            if relay.join().unwrap() {
+                println!("# note: the commit took the lock between two holds, so this run does not count");
+                return None;
+            }
+            assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
+            assert!(waited > wait, "the commit answered within the wait, {waited:?}, so the lock was not held that long");
+            assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
+            assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+            assert_eq!(logged(&d.0), vec![record(1)]);
+            Some(())
+        });
     }
 
     #[test]
@@ -1303,21 +1319,81 @@ mod tests {
         // The control. The wait starts again when the lock changes hands, and
         // only then: a holder that took the lock and keeps it is waited for
         // the wait, then the commit is refused, as a lock held past the wait
-        // always was.
+        // always was. A run where the commit took the lock between two holds
+        // does not count.
+        let wait = Duration::from_millis(500);
+        until_met(|| {
+            let d = scratch();
+            let relay = relay(&d.0, 5, Duration::from_millis(100), Duration::from_secs(4));
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            let (hash, r) = (h(1), rec(1));
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
+            let holding = !relay.is_finished();
+            if relay.join().unwrap() {
+                println!("# note: the commit took the lock between two holds, so this run does not count");
+                return None;
+            }
+            assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+            assert!(holding, "the commit answered only once the holder let the lock go");
+            assert_eq!(
+                String::from_utf8_lossy(&err),
+                format!("safedeps-core approvals: not committed: {0} could not be opened and locked: the lock of {0} did not finish before the deadline\n", path(&d.0).display())
+            );
+            assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
+            assert!(staged.exists() && !entry.exists());
+            assert!(logged(&d.0).is_empty());
+            Some(())
+        });
+    }
+
+    #[test]
+    fn a_commit_behind_a_read_held_past_the_wait_is_refused_while_other_reads_keep_trying() {
+        // A validator's counterexample, kept as a row. A read keeps the store
+        // lock past the wait, and two more reads, each in a thread of its own,
+        // keep trying to read meanwhile. The lock never changes hands, so the
+        // commit is refused at the wait, while the read still holds the lock,
+        // and nothing is written.
         let d = scratch();
         let wait = Duration::from_millis(500);
-        let relay = relay(&d.0, 5, Duration::from_millis(100), Duration::from_secs(4));
+        fs::OpenOptions::new().append(true).create(true).mode(0o600).open(path(&d.0)).unwrap();
         let (staged, entry) = stage(&d.0, 1, "entry of 1");
-        let (hash, r) = (h(1), rec(1));
+        // The read's hold, taken as a read takes it. It goes once the commit
+        // answered, or after ten waits; the thread answers whether it went
+        // first.
+        let held = locked_for_reading(&d.0, LOCK_WAIT).unwrap().expect("the store");
+        let (answered, told) = mpsc::channel::<()>();
+        let reading = std::thread::spawn(move || {
+            let first = told.recv_timeout(wait * 10).is_err();
+            drop(held);
+            first
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let (dir, stop) = (d.0.clone(), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        let _ = index_within(&dir, wait);
+                        std::thread::sleep(wait / 10);
+                    }
+                })
+            })
+            .collect();
         let mut err = Vec::new();
-        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
-        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
-        assert!(!relay.is_finished(), "the commit answered only once the holder let the lock go");
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &rec(1), &h(1)), wait, &Real, &mut err);
+        let _ = answered.send(());
+        let let_go_first = reading.join().unwrap();
+        stop.store(true, Ordering::SeqCst);
+        for r in readers {
+            r.join().unwrap();
+        }
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched), "{}", String::from_utf8_lossy(&err));
+        assert!(!let_go_first, "the commit answered only once the read let the lock go");
         assert_eq!(
             String::from_utf8_lossy(&err),
             format!("safedeps-core approvals: not committed: {0} could not be opened and locked: the lock of {0} did not finish before the deadline\n", path(&d.0).display())
         );
-        relay.join().unwrap();
         assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
         assert!(staged.exists() && !entry.exists());
         assert!(logged(&d.0).is_empty());

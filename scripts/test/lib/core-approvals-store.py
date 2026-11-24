@@ -48,6 +48,12 @@ inserted, not inserted, duplicates, unconfirmed and taken back add up to the
 approve lines. A run after it inserts what the failed run did not and counts
 what it did as duplicates, and a third run inserts nothing and leaves the
 store's bytes as they were.
+
+One more row holds the store lock shared, on a read-only descriptor, and
+runs `approvals index`. The core's read takes the lock exclusively, on the
+read-only descriptor it reads through, so it is refused at the deadline.
+Without the holder the read is granted. Where the host refuses an exclusive
+lock on a read-only descriptor, the read with no holder fails and says why.
 """
 import calendar
 import fcntl
@@ -80,6 +86,10 @@ PROBE_LANDED = {1: "end", 11: "descriptor"}
 # closes or it is killed. It writes nothing.
 HOLDER = ("import fcntl, sys\nf = open(sys.argv[1], 'ab')\nfcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
           "print('held', flush=True)\nsys.stdin.buffer.read()\n")
+# A shared holder: takes the store lock shared, on a read-only descriptor,
+# says so, and holds it until its stdin closes or it is killed.
+SHARED_HOLDER = ("import fcntl, os, sys\nfd = os.open(sys.argv[1], os.O_RDONLY)\nfcntl.flock(fd, fcntl.LOCK_SH)\n"
+                 "print('held', flush=True)\nsys.stdin.buffer.read()\n")
 WAITERS = (2, 3, 4, 5)
 MIGRATE_ROWS = (
     "a migration killed while it holds the store lock, run again, ends where a whole run ends",
@@ -443,6 +453,32 @@ def row_misplaced_take_back_hash(base):
     expect_index(home, hashes, 0, "misplaced hash")
 
 
+def row_read_lock_is_exclusive(base):
+    """A read takes the store lock exclusively, on the read-only descriptor it
+    reads through: granted where no one holds the lock, and refused at the
+    deadline behind a holder of the shared lock, which a shared lock would
+    share."""
+    home = base / "read-exclusive"
+    commit_ok(home, 1, "the line before the reads")
+    expect_index(home, [h(1)], 0, "a read where no one holds the lock")
+    held = home / "approvals.jsonl"
+    holder = subprocess.Popen([sys.executable, "-I", "-c", SHARED_HOLDER, str(held)], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=home.parent)
+    try:
+        if holder.stdout.readline() != b"held\n":
+            raise Failed(f"the holder did not take the shared lock: {holder.stderr.read()!r}")
+        got = call(home, ["index"])
+        want = (1, b"", b"safedeps-core approvals: %s could not be read: the lock of %s did not finish before the deadline\n"
+                % (bytes(held), bytes(held)))
+        if got != want:
+            raise Failed(f"a read behind a holder of the shared lock exited {got[0]} with {got[1]!r} {got[2]!r}")
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+        holder.communicate()
+    expect_index(home, [h(1)], 0, "a read once the holder is gone")
+
+
 def expect_counts(report, approve, inserted, duplicates, when):
     """A finished run's counts: no line left out, nothing unconfirmed or
     taken back, and the five after the approve lines adding up to them. A
@@ -705,7 +741,8 @@ def main():
                 print(f"not ok - {label}: {error!r}")
                 failed = True
         for label, row in (("migration counts keywords in other log kinds as broken", row_other_log_keywords),
-                           ("migration refuses a take-back hash after another word", row_misplaced_take_back_hash)):
+                           ("migration refuses a take-back hash after another word", row_misplaced_take_back_hash),
+                           ("a read takes the store lock exclusively, through a read-only descriptor", row_read_lock_is_exclusive)):
             try:
                 row(base)
                 print(f"ok - {label}")
