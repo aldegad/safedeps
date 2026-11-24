@@ -745,7 +745,7 @@ Two things went the other way. A script handed to `sh -c`, `bash -c`, `zsh -c`, 
 - **`ua-parser-js` hijack (2021)** -- Compromised package added a `preinstall` script that downloaded and executed cryptominers. Caught by: install script analysis (network access + code execution).
 - **`colors` / `faker` sabotage (2022)** -- While these were author-initiated, the abnormal dependency behavior would trigger the dependency explosion check.
 - **Typosquatting campaigns** -- Ongoing campaigns publishing packages like `crossenv` (instead of `cross-env`) or `babelcli` (instead of `babel-cli`). Caught by: pre-flight typosquatting pattern matching.
-- **Dependency confusion attacks** -- Internal package names published to the public registry with higher version numbers. Caught by: non-standard registry detection + large dependency count changes.
+- **Dependency confusion attacks** -- Internal package names published to the public registry with higher version numbers. Caught by: the closure check, because no approval names the higher version, + non-standard registry detection.
 
 ## Logs and Snapshots
 
