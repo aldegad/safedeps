@@ -123,14 +123,21 @@ impl Sources {
         match &self.ledger { Some(Err(why)) => Some(why), _ => None }
     }
 
-    fn entries(&self) -> impl Iterator<Item = &Entry> {
-        let standing = match &self.ledger { Some(Ok(ix)) => ix.entries.as_slice(), _ => &[] };
-        standing.iter().chain(self.written.iter())
+    fn standing(&self) -> Option<&Index> {
+        match &self.ledger { Some(Ok(ix)) => Some(ix), _ => None }
     }
 
-    /// The entries that stand for this record's four values.
+    /// The entries that stand for this record's four values: the ledger's,
+    /// found by their key (`Index::covering`), and the ones this call wrote.
     fn matching<'a>(&'a self, url: &'a [u8], integrity: &'a [u8], name: &'a [u8], version: &'a [u8]) -> impl Iterator<Item = &'a Entry> + 'a {
-        self.entries().filter(move |e| e.covers(url, integrity, name, version))
+        self.standing().into_iter().flat_map(move |ix| ix.covering(url, integrity, name, version))
+            .chain(self.written.iter().filter(move |e| e.covers(url, integrity, name, version)))
+    }
+
+    /// The entries of `url`: the ledger's, found by their key, and the ones
+    /// this call wrote.
+    fn of_url<'a>(&'a self, url: &'a [u8]) -> impl Iterator<Item = &'a Entry> + 'a {
+        self.standing().into_iter().flat_map(move |ix| ix.with_url(url)).chain(self.written.iter().filter(move |e| e.url == url))
     }
 
     /// An entry that stands, or one this call wrote, covers the record.
@@ -183,11 +190,11 @@ impl Sources {
     /// any entry of the URL, or bytes an entry names under another package.
     /// None where nothing names the URL.
     pub fn url_miss(&self, url: &[u8]) -> Option<(Miss, &Node)> {
-        let named = self.bypass.as_ref().is_some_and(|(u, _)| u == url) || self.entries().any(|e| e.url == url);
+        let named = self.bypass.as_ref().is_some_and(|(u, _)| u == url) || self.of_url(url).next().is_some();
         if !named { return None }
         let n = self.nodes.iter().find(|n| n.url.as_deref() == Some(url) && self.node_allowed(n).is_none())?;
         let Some(integrity) = n.integrity.as_deref() else { return Some((Miss::NoIntegrity, n)) };
-        if self.entries().any(|e| e.url == url && e.integrity == integrity) { Some((Miss::OtherPackage, n)) } else { Some((Miss::OtherBytes, n)) }
+        if self.of_url(url).any(|e| e.integrity == integrity) { Some((Miss::OtherPackage, n)) } else { Some((Miss::OtherBytes, n)) }
     }
 
     /// The reasons an accepted source gives this install: for each URL an
@@ -300,7 +307,7 @@ mod tests {
         let dir = crate::os::scratch_dir("safedeps-accepted").unwrap();
         std::fs::write(dir.join("package-lock.json"), &lock).unwrap();
         let mut s = Sources::read(&dir.join("home"), &Records::read(&dir), None, Instant::now() + Duration::from_secs(5));
-        s.ledger = Some(Ok(Index { present: true, entries: entries.clone(), broken: 0 }));
+        s.ledger = Some(Ok(Index::new(true, entries.clone(), 0)));
         let mut names: Vec<(W, W)> = s.nodes.iter().map(|n| (n.name.clone(), n.version.clone())).collect();
         names.sort();
         names.dedup();

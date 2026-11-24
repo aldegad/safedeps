@@ -1,8 +1,8 @@
 //! The few things the hook asks of the system that std does not offer: the
 //! process's umask, a signal to a process group, a local time with its zone
-//! offset, a file lock, and a monotonic clock every process of the host reads
-//! alike. They are libc's own functions, declared here, so the crate still
-//! names no dependency.
+//! offset, a file lock, a monotonic clock every process of the host reads
+//! alike, and a close whose answer is kept. They are libc's own functions,
+//! declared here, so the crate still names no dependency.
 //!
 //! The rest is how the bash hooks' helper commands print what they read
 //! (`stat`, `ls -di`, `date`, `realpath`), because the other hook compares
@@ -40,6 +40,10 @@ extern "C" {
     fn iswprint_l(c: u32, locale: *mut std::ffi::c_void) -> i32;
     fn flock(fd: i32, operation: i32) -> i32;
     fn clock_gettime(clock: i32, tp: *mut Timespec) -> i32;
+    // Named apart from the methods called close elsewhere, so a reader of the
+    // source tells this call from theirs.
+    #[link_name = "close"]
+    fn sys_close(fd: i32) -> i32;
 }
 
 /// struct timespec: time_t and long, 64 bits each on the three targets
@@ -143,6 +147,13 @@ pub fn host_clock() -> std::io::Result<HostTime> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(HostTime((t.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(t.tv_nsec as u64)))
+}
+
+/// close(2) of `file`, with what it returned. A drop closes a file too, and
+/// throws that answer away.
+pub fn close_file(file: std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::IntoRawFd;
+    if unsafe { sys_close(file.into_raw_fd()) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
 /// One try for flock(2)'s exclusive lock on the open file description of

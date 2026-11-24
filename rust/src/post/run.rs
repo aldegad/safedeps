@@ -3,8 +3,8 @@
 use super::{accepted::{self, Sources}, call::{Call, Record}, effect, heuristics, journal::Journal, jv, lockfile::Records, mark,
     npm::{self, Npm}, report::{self, Report, cat}, rollback::{Before, Rollback}, sh, snapshot,
     trace::{self, Install}};
-use crate::{callid::record as rec, os, state};
-use std::{fs, io::Write, time::Instant};
+use crate::{callid::record as rec, os, sources::{After, Committed, Doubt, Entry, Fault}, state};
+use std::{fs, io::Write, path::Path, time::Instant};
 type W = Vec<u8>;
 
 fn rollback(call: &mut Call, journal: &Journal, trace: &mut Install, report: &mut Report,
@@ -120,15 +120,19 @@ fn accept_source(call: &Call) -> Option<(W, W)> {
 
 const SOURCE_NOT_COVERED: &[u8] = b"SAFEDEPS_ACCEPT_SOURCE was set for this install, and it accepts a source only for an install no other check rolls back, so no entry was written";
 
-/// The entries this call's `SAFEDEPS_ACCEPT_SOURCE` makes, written before
-/// the install is kept and before anything is rebuilt over them: an install
-/// whose entries cannot be written is not kept. The one line that says so is
-/// said here, in the install that makes the entries, and in no later one.
+/// The entries this call's `SAFEDEPS_ACCEPT_SOURCE` makes, one line in the
+/// ledger, written before the install is kept and before anything is rebuilt
+/// over them. The line is committed when its newline is in the file
+/// (`crate::sources`). An install whose line is not committed is not kept,
+/// and none of its entries stands. One whose line is committed is kept,
+/// whatever the steps after the commit returned: each that failed is said
+/// beside the entries (`accepted_words`). The one line that says so is said
+/// here, in the install that makes the entries, and in no later one.
 ///
 /// They are the last write an install's keeping rests on (`judge`): every
 /// other write that can roll the install back is done before them, and
-/// nothing after them rolls it back. So an install that is rolled back
-/// leaves no entry, and the ledger never releases bytes no install kept.
+/// nothing after their commit rolls it back. So an install that is rolled
+/// back leaves no entry, and the ledger never releases bytes no install kept.
 fn accept_sources(call: &Call, sources: &mut Sources, report: &mut Report, until: Instant) -> Result<(), W> {
     let Some((url, reason)) = sources.bypass.clone() else { return Ok(()) };
     let home = call.store.home.clone();
@@ -138,21 +142,42 @@ fn accept_sources(call: &Call, sources: &mut Sources, report: &mut Report, until
         state::log_advisory(&home, &cat(&[b"post-verify: SAFEDEPS_ACCEPT_SOURCE named ", &url, b" for an install in ", &project, b", and neither npm record there holds it, so no entry was written."]));
         return Ok(())
     }
-    let ledger = crate::sources::path(&home);
     let id = jv::field(&call.current, rec::TOOL_USE_ID).ok().and_then(jv::text);
-    let accepts: Vec<_> = entries.iter().map(|entry| crate::sources::Accept { entry, tool_use_id: id }).collect();
-    if let Err(fault) = crate::sources::accept(&home, &accepts, accepted::wait(until)) {
-        return Err(cat(&[b"SAFEDEPS_ACCEPT_SOURCE was set for this install, and the accepted-source ledger ", sh::bytes(&ledger), b" could not take its entries (", &fault.text(), b"), so the install was not kept"]))
-    }
+    let answer = crate::sources::accept(&home, &entries, id, accepted::wait(until));
+    let (said, logged) = accepted_words(answer, &url, &entries, &reason, &project, &crate::sources::path(&home), &call.command)?;
+    report.say(said);
+    state::log_advisory(&home, &logged);
+    sources.written = entries;
+    Ok(())
+}
+
+/// What the ledger's answer to this install's entries makes of the install.
+/// A line that was not committed is the reason the install is not kept. A
+/// committed one keeps it: the report line and the advisory.log line name the
+/// URL, each package with the advisories it accepted, and the ledger, and
+/// then each doubt of the write (`doubt_words`).
+fn accepted_words(answer: Result<Committed, Fault>, url: &[u8], entries: &[Entry], reason: &[u8], project: &[u8], ledger: &Path, command: &[u8]) -> Result<(W, W), W> {
+    let committed = answer.map_err(|fault| cat(&[b"SAFEDEPS_ACCEPT_SOURCE was set for this install, and the accepted-source ledger ", sh::bytes(ledger),
+        b" could not take its entries (", &fault.text(), b"), so the install was not kept"]))?;
     let packages: Vec<W> = entries.iter().map(|e| {
         let ids = if e.advisories.is_empty() { b"no advisory".to_vec() } else { cat(&[b"advisories accepted: ", &e.advisories.join(b", ".as_slice())]) };
         cat(&[&e.package, b"@", &e.version, b" (", &ids, b")"])
     }).collect();
     let packages = packages.join(b"; ".as_slice());
-    report.say(cat(&[b"Accepted source: ", &url, b" for ", &packages, b", recorded in ", sh::bytes(&ledger)]));
-    state::log_advisory(&home, &cat(&[b"post-verify ACCEPTED SOURCE in ", &project, b": ", &url, b" for ", &packages, b", under SAFEDEPS_ACCEPT_SOURCE (", &reason, b"); entries written to ", sh::bytes(&ledger), b". Command: ", &call.command]));
-    sources.written = entries;
-    Ok(())
+    let doubts: W = committed.doubts.iter().flat_map(|d| cat(&[b"; ", &doubt_words(d)])).collect();
+    Ok((cat(&[b"Accepted source: ", url, b" for ", &packages, b", recorded in ", sh::bytes(ledger), &doubts]),
+        cat(&[b"post-verify ACCEPTED SOURCE in ", project, b": ", url, b" for ", &packages, b", under SAFEDEPS_ACCEPT_SOURCE (", reason, b"); entries written to ",
+            sh::bytes(ledger), &doubts, b". Command: ", command])))
+}
+
+/// One doubt of the ledger's write: the entries stand, what the step after
+/// the commit returned, and what that leaves open.
+fn doubt_words(d: &Doubt) -> W {
+    let open: &[u8] = match d.step {
+        After::Sync | After::Close => b"until the system writes them, a power loss can take them away, and the next install of those bytes is then judged as this one was",
+        After::SyncDir => b"this write made the ledger, and until the system writes its directory, a power loss can take the file away, and the next install of those bytes is then judged as this one was",
+    };
+    cat(&[b"the entries stand, and ", &d.text(), b": ", open])
 }
 
 pub const ACCEPTED_FACT: &[u8] = b"SAFEDEPS_ACCEPT_RISK kept this install, which no check verified";
@@ -649,3 +674,57 @@ mod tests {
 mod unfinished_tests;
 #[cfg(test)]
 mod children;
+
+#[cfg(test)]
+mod accepted_words_tests {
+    use super::{accepted_words, cat};
+    use crate::{outcome::{Action, Outcome}, sources::{After, Committed, Doubt, Entry, Fault}};
+    use std::{io, path::{Path, PathBuf}};
+
+    const URL: &[u8] = b"https://example.test/x/-/x-1.0.1.tgz";
+    const LEDGER: &str = "/h/.safedeps/accepted-sources.jsonl";
+    const HOME: &str = "/h/.safedeps";
+    const LOST: &[u8] = b", and the next install of those bytes is then judged as this one was";
+
+    fn entry(package: &str, version: &str, advisories: &[&str]) -> Entry {
+        Entry { url: URL.to_vec(), integrity: b"sha512-one".to_vec(), package: package.into(), version: version.into(),
+            advisories: advisories.iter().map(|a| a.as_bytes().to_vec()).collect(), at: Vec::new(), reason: b"owner: why".to_vec(), project: b"/work/p".to_vec() }
+    }
+    fn words(answer: Result<Committed, Fault>) -> Result<(Vec<u8>, Vec<u8>), Vec<u8>> {
+        let entries = [entry("x", "1.0.1", &["GHSA-a", "GHSA-b"]), entry("y", "2.0.0", &[])];
+        accepted_words(answer, URL, &entries, b"owner: why", b"/work/p", Path::new(LEDGER), b"npm install https://example.test/x/-/x-1.0.1.tgz")
+    }
+    fn io(code: i32, at: &str, action: for<'a> fn(&'a Path) -> Action<'a>) -> Fault {
+        Fault::Operation { outcome: Outcome::Io(Err(io::Error::from_raw_os_error(code))), path: PathBuf::from(at), action }
+    }
+
+    /// The hook keeps an install exactly when its line was committed. A line
+    /// that was not is the reason the install is rolled back. A committed one
+    /// keeps it, whatever the steps after the commit returned, and each that
+    /// failed is said beside the entries, in the report line and in the
+    /// advisory.log line.
+    #[test]
+    fn an_install_is_kept_exactly_when_its_line_was_committed() {
+        let not_kept = |inner: &[u8]| cat(&[b"SAFEDEPS_ACCEPT_SOURCE was set for this install, and the accepted-source ledger ", LEDGER.as_bytes(),
+            b" could not take its entries (", inner, b"), so the install was not kept"]);
+        assert_eq!(words(Err(Fault::Judgment(b"an entry would stand for nothing"))), Err(not_kept(b"an entry would stand for nothing")));
+        assert_eq!(words(Err(io(28, LEDGER, |p| Action::Write(p)))), Err(not_kept(format!("the write to {LEDGER} returned OS error 28").as_bytes())));
+
+        let said = cat(&[b"Accepted source: ", URL, b" for x@1.0.1 (advisories accepted: GHSA-a, GHSA-b); y@2.0.0 (no advisory), recorded in ", LEDGER.as_bytes()]);
+        let logged = |doubts: &[u8]| cat(&[b"post-verify ACCEPTED SOURCE in /work/p: ", URL, b" for x@1.0.1 (advisories accepted: GHSA-a, GHSA-b); y@2.0.0 (no advisory), ",
+            b"under SAFEDEPS_ACCEPT_SOURCE (owner: why); entries written to ", LEDGER.as_bytes(), doubts, b". Command: npm install ", URL]);
+        assert_eq!(words(Ok(Committed::default())), Ok((said.clone(), logged(b""))));
+
+        let doubts = vec![
+            Doubt { step: After::Sync, fault: io(5, LEDGER, |p| Action::Sync(p)) },
+            Doubt { step: After::SyncDir, fault: io(13, HOME, |p| Action::Open(p)) },
+            Doubt { step: After::Close, fault: io(5, LEDGER, |p| Action::Close(p)) },
+        ];
+        let clauses = cat(&[
+            b"; the entries stand, and the sync of ", LEDGER.as_bytes(), b" returned OS error 5: until the system writes them, a power loss can take them away", LOST,
+            b"; the entries stand, and the open of ", HOME.as_bytes(), b" returned OS error 13: this write made the ledger, and until the system writes its directory, a power loss can take the file away", LOST,
+            b"; the entries stand, and the close of ", LEDGER.as_bytes(), b" returned OS error 5: until the system writes them, a power loss can take them away", LOST,
+        ]);
+        assert_eq!(words(Ok(Committed { doubts })), Ok((cat(&[&said, &clauses]), logged(&clauses))));
+    }
+}

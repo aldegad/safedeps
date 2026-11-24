@@ -423,9 +423,9 @@ def accepted(path, project, command, reason, call_id):
 
 
 def sources(path, url, project, call_id):
-    """The accepted-source ledger's last lines are accept lines this call
-    wrote: each names the URL, the project and the call, and they stand for
-    every entry of the URL the last run of accept lines holds."""
+    """The accepted-source ledger's last line is the one accept line this
+    call wrote: it names the URL, the project and the call, and holds at
+    least one entry, each with exactly its four fields."""
     try:
         with open(path, "rb") as handle:
             lines = [l for l in handle.read().decode("utf-8", "surrogateescape").split("\n") if l]
@@ -435,8 +435,13 @@ def sources(path, url, project, call_id):
     want = {"op": "accept", "url": url, "project": project, "tool_use_id": call_id or None}
     if not isinstance(last, dict) or any(last.get(key) != value for key, value in want.items()):
         return 1
-    fields = {"at", "op", "url", "integrity", "package", "version", "advisories", "reason", "project", "tool_use_id"}
-    return 0 if set(last) == fields and isinstance(last.get("advisories"), list) else 1
+    if set(last) != {"at", "op", "url", "entries", "reason", "project", "tool_use_id"}:
+        return 1
+    entries = last.get("entries")
+    if not (isinstance(entries, list) and entries):
+        return 1
+    files = {"integrity", "package", "version", "advisories"}
+    return 0 if all(isinstance(e, dict) and set(e) == files and isinstance(e.get("advisories"), list) for e in entries) else 1
 
 
 def main():

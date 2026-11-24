@@ -1763,7 +1763,7 @@ cmd_approvals() {
 # `sources index` prints and asks `sources revoke` to take a URL's entries
 # back; it never opens the file itself.
 cmd_sources() {
-  local index answer revoked broken
+  local index answer revoked doubts doubt broken
   case "${1:-}" in
     ""|list) [[ $# -le 1 ]] || { sf_eprintf "safedeps: sources lists the ledger and takes no argument. Try 'safedeps help sources'."; return 4; } ;;
     revoke) [[ $# -eq 2 && -n "$2" ]] || { sf_eprintf "safedeps: sources revoke takes one URL. Try 'safedeps help sources'."; return 4; } ;;
@@ -1776,17 +1776,27 @@ cmd_sources() {
   fi
   if [[ "${1:-}" == revoke ]]; then
     answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources revoke "$2") || return 4
-    revoked=$(jq -er '.revoked | numbers' <<< "${answer}") || {
+    # The core answers how many entries the revoke took back, and what each
+    # step after its line's commit returned where one failed. The revoke
+    # stands either way; a doubt is said beside it, and the exit is 4.
+    if ! revoked=$(jq -er '.revoked | numbers' <<< "${answer}") \
+      || ! doubts=$(jq -er '.doubts | arrays | select(all(.[]; type == "string")) | length' <<< "${answer}"); then
       sf_eprintf "safedeps: the core answered the revoke with something this CLI cannot read: ${answer}"
       return 4
-    }
+    fi
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-      jq -nc --arg url "$2" --argjson n "${revoked}" '{command:"sources", action:"revoke", url:$url, revoked:$n}'
+      jq -c --arg url "$2" '{command:"sources", action:"revoke", url:$url, revoked:.revoked, doubts:.doubts}' <<< "${answer}"
     elif [[ "${revoked}" -eq 0 ]]; then
       printf 'safedeps: no accepted-source entry names %s, so nothing was revoked.\n' "$2"
     else
       printf 'safedeps: revoked %s accepted-source entr%s for %s. The next install that brings those bytes is judged as before.\n' \
         "${revoked}" "$([[ "${revoked}" -eq 1 ]] && printf y || printf ies)" "$2"
+    fi
+    if [[ "${doubts}" -gt 0 ]]; then
+      while IFS= read -r doubt; do
+        sf_eprintf "safedeps: WARNING: the revoke line was written, and ${doubt}: until the system writes it, a power loss can bring the entries back. Check 'safedeps sources' after a restart."
+      done < <(jq -r '.doubts[]' <<< "${answer}")
+      return 4
     fi
     [[ "${revoked}" -gt 0 ]] || return 1
     return 0
@@ -1940,7 +1950,11 @@ safedeps sources revoke <URL> [--json]
 
   safedeps sources           Lists the entries that stand.
   safedeps sources revoke U  Takes back every entry of the URL U. Exit 1
-                             when no entry names it.
+                             when no entry names it. Exit 4 when the revoke
+                             was written and a step after it failed: the
+                             entries are taken back, and a power loss
+                             before the system writes the line can bring
+                             them back.
 EOF
       ;;
     approvals)

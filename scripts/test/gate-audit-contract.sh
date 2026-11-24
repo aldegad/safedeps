@@ -246,9 +246,9 @@ site_lock() { # INTEGRITY [KEY]
     + {($key): {version: "1.0.0", resolved: $url, integrity: $integrity}})}' > "${site_fixture}/package-lock.json"
 }
 site_entry() {
-  jq -nc --arg url "${site_url}" --arg id "$1" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url, integrity: "sha512-siteBytes100",
-    package: "site", version: "1.0.0", advisories: [$id], reason: "owner: the fix is on the maker site only",
-    project: "/work/site", tool_use_id: null}' > "${site_home}/accepted-sources.jsonl"
+  jq -nc --arg url "${site_url}" --arg id "$1" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url,
+    entries: [{integrity: "sha512-siteBytes100", package: "site", version: "1.0.0", advisories: [$id]}],
+    reason: "owner: the fix is on the maker site only", project: "/work/site", tool_use_id: null}' > "${site_home}/accepted-sources.jsonl"
 }
 site_said() { grep -qxF "safedeps audit: $1" "${tmp_root}/audit.out" || fail "$2: $(cat "${tmp_root}/audit.out")"; }
 site_lock sha512-siteBytes100

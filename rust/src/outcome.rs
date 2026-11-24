@@ -18,7 +18,7 @@ pub enum Outcome {
 // setting a path's modification time. Link is link(2) to a path, the name
 // it makes.
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal, Gzip, Read(&'a Path), Create(&'a Path), Open(&'a Path), Write(&'a Path), Sync(&'a Path), Rename(&'a Path), Link(&'a Path), Lock(&'a Path), Touch(&'a Path), WriteOf(&'a Path), RenameOf(&'a Path) }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal, Gzip, Read(&'a Path), Create(&'a Path), Open(&'a Path), Write(&'a Path), Sync(&'a Path), Rename(&'a Path), Link(&'a Path), Lock(&'a Path), Touch(&'a Path), WriteOf(&'a Path), RenameOf(&'a Path), Close(&'a Path) }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -48,6 +48,7 @@ impl Outcome {
             Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::WriteOf(path)=>{named=[b"the write of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::RenameOf(path)=>{named=[b"the rename of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Close(path)=>{named=[b"the close of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
         };
         let cat=|parts: &[&[u8]]| parts.concat();
         let error=|error: &io::Error| match error.raw_os_error() {
@@ -97,6 +98,7 @@ mod tests {
             (Action::Touch(path), b"the touch of "),
             (Action::WriteOf(path), b"the write of "),
             (Action::RenameOf(path), b"the rename of "),
+            (Action::Close(path), b"the close of "),
         ] {
             assert_eq!(Outcome::Io(Err(io::Error::from_raw_os_error(5))).describe(action, Form::Action),
                 [name, path.as_os_str().as_bytes(), b" returned OS error 5"].concat());

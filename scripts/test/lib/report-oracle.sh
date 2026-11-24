@@ -1241,16 +1241,32 @@ oracle_line() {
 
   # The one line an install that makes accepted-source entries says, in the
   # message of an install that is kept. The URL is the one this call's record
-  # holds, the ledger is the one under SAFEDEPS_HOME, and its last line is an
-  # accept line of that URL, this project and this call.
-  if [[ "${line}" =~ ^Accepted\ source:\ (https://[^\ ]+)\ for\ (.+),\ recorded\ in\ (/.+)$ ]]; then
+  # holds, the ledger is the one under SAFEDEPS_HOME, and its last line is the
+  # accept line of that URL, this project and this call. After the ledger
+  # comes one clause for each step after the line's commit that failed
+  # (rust/src/post/run.rs, doubt_words): the entries stand, what the step
+  # returned, and what that leaves open. A clause is one of the three forms.
+  local re_accepted='^Accepted source: (https://[^ ]+) for (.+), recorded in (/[^;]+)((; the entries stand, and .+)?)$'
+  if [[ "${line}" =~ ${re_accepted} ]]; then
     oracle_count accepted-source
     [[ "${O_BLOCK}" == confirm || "${O_BLOCK}" == accepted ]] || oracle_red "an Accepted source line outside the message of a kept install"
     [[ "$(python3 "${ORACLE_READ}" string "${O_CONSUMED}" accept_source url 2>/dev/null)" == "${BASH_REMATCH[1]}" ]] \
       || oracle_red "the URL is not the one this call's record holds"
     [[ "${BASH_REMATCH[3]}" == "${O_HOME}/accepted-sources.jsonl" ]] || oracle_red "not the accepted-source ledger under SAFEDEPS_HOME"
-    python3 "${ORACLE_READ}" sources "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" "${O_PROJECT}" "${O_CALL_ID}" \
-      || oracle_red "the ledger's last line is not an accept line of this URL, project and call"
+    local doubts="${BASH_REMATCH[4]}" ledger="${BASH_REMATCH[3]}" url="${BASH_REMATCH[1]}" step at open
+    local re_doubt='^; the entries stand, and the (sync|close|open) of (/[^ ]+) returned [^;:]+: (until the system writes them, a power loss can take them away|this write made the ledger, and until the system writes its directory, a power loss can take the file away), and the next install of those bytes is then judged as this one was'
+    while [[ -n "${doubts}" ]]; do
+      [[ "${doubts}" =~ ${re_doubt} ]] || { oracle_red "a clause after the ledger that is not one of the doubt forms"; break; }
+      step="${BASH_REMATCH[1]}" at="${BASH_REMATCH[2]}" open="${BASH_REMATCH[3]}"
+      doubts="${doubts:${#BASH_REMATCH[0]}}"
+      case "${step}:${open}" in
+        sync:until*|close:until*) [[ "${at}" == "${ledger}" ]] || oracle_red "a doubt of the ledger's own write names another file" ;;
+        sync:this*|open:this*) [[ "${at}" == "${O_HOME}" ]] || oracle_red "a doubt of the ledger's directory names another directory" ;;
+        *) oracle_red "a doubt that pairs a step with what another step leaves open" ;;
+      esac
+    done
+    python3 "${ORACLE_READ}" sources "${ledger}" "${url}" "${O_PROJECT}" "${O_CALL_ID}" \
+      || oracle_red "the ledger's last line is not the accept line of this URL, project and call"
     return 0
   fi
 

@@ -1163,7 +1163,7 @@ site_lock() { # DIR INTEGRITY
 }
 site_accept() { # ADVISORY...
   jq -nc --arg url "${site_url}" --arg p "${d}/p/a" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url,
-    integrity: "sha512-siteBytes100", package: "site", version: "1.0.0", advisories: $ARGS.positional,
+    entries: [{integrity: "sha512-siteBytes100", package: "site", version: "1.0.0", advisories: $ARGS.positional}],
     reason: "owner: the fix is on the maker site only", project: $p, tool_use_id: "toolu_fixture"}' --args "$@" \
     >> "${home}/accepted-sources.jsonl"
 }
