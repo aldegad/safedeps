@@ -25,16 +25,52 @@
 //! ecosystem, package and version would vouch for an entry of another
 //! context, which no check approved.
 //!
-//! Isolation: the store lock, flock(2) on the store file itself. A writer
-//! holds LOCK_EX for its whole write and a reader holds LOCK_SH for its whole
-//! read, so a reader never sees a line half written and two writers never
-//! write at once. Under the lock a writer first seals a torn last line (below),
-//! then appends its own line in the same write and syncs it before it says
-//! the line is written. The lock belongs to the open file and goes when the
-//! file is closed, so a process that dies holding it leaves nothing to clean
-//! up: the next writer or reader takes it at once. A lock another process
-//! holds past LOCK_WAIT is an error: nothing is written or read without the
-//! lock.
+//! Isolation: the store lock, flock(2) on the store file itself, and LOCK_EX
+//! for every hold. A writer holds it for its whole write and a reader for its
+//! whole read, on the read-only file it reads, so a reader never sees a line
+//! half written, two writers never write at once, and no two holds overlap.
+//! Under the lock a writer first seals a torn last line (below), then appends
+//! its own line in the same write and syncs it before it says the line is
+//! written. The lock belongs to the open file and goes when the file is
+//! closed, so a process that dies holding it leaves nothing to clean up: the
+//! next writer or reader takes it at once. Reads pay for one mode: they wait
+//! for each other, and a read that stalls under the lock has the reads behind
+//! it refused after LOCK_WAIT, as it has a commit.
+//!
+//! The turn. A waiter waits while the lock changes hands, and LOCK_WAIT
+//! behind one hold. Every hold of the lock, a writer's or a reader's, writes
+//! its turn once it took the lock, in `approvals.turn` beside the store: when
+//! the hold began and a check of that time, one line of fixed width written
+//! over the last. The time is the host's monotonic clock (`os::host_clock`),
+//! one clock for every process of the host, read just before the try that
+//! took the lock, so a turn never says a hold began later than it did. A
+//! waiter counts LOCK_WAIT from the later of two times: when it began to
+//! wait, and when the hold it waits behind began, as the turn says. After
+//! every try, refused or granted, it reads the turn and counts again, and a
+//! try that ended past LOCK_WAIT from that start is refused either way. Up to
+//! LOCK_WAIT exactly a try is within the wait. A waiter whose try the lock
+//! granted that late lets the lock go before anything is read or written,
+//! its own turn included. The first turn it reads whole can be older than its
+//! wait, so it never counts: a turn left from before the host started again
+//! can name a time the clock reaches only later. Only a turn other than the
+//! first counts.
+//! A turn that cannot be read, whose check is not its time's, as a line read
+//! while a hold writes over it can be, or that names a time later than now,
+//! counts for nothing, and the wait keeps the start it had. No two holds
+//! overlap, so commits that overlap wait their turn, however many there are,
+//! and none is refused for the crowd, while a waiter that waited past
+//! LOCK_WAIT behind one hold is refused: nothing is written or read without
+//! the lock. A read of the clock that fails is a lock that failed, with the
+//! error the clock returned: the waiter lets go of a lock it was granted
+//! before that read, and it is refused.
+//! A hold writes its turn after it took the lock, so for a moment the turn is
+//! still the last hold's, longer where a hold stalls between its lock and its
+//! turn, and a hold that cannot write its turn leaves the last one standing.
+//! The waiter then counts from its own start or from the last hold's: it is
+//! refused sooner, never later. Processes in two Linux time namespaces read
+//! two such clocks (time_namespaces(7)): a turn from the other one can move a
+//! wait by the namespaces' offset. The turn is no record: only a waiter reads
+//! it, and it vouches for nothing.
 //!
 //! The same lock orders every write of a ledger entry an approval stands on:
 //! a commit and a revoke of an entry each run under it from their first
@@ -166,7 +202,7 @@
 use crate::{
     jq,
     json::{self, Value},
-    ledger, os, state,
+    ledger, os, sha256, state,
     outcome::{Action, Form, Outcome},
 };
 use std::{
@@ -195,8 +231,10 @@ const FIELDS: [&str; 4] = ["at", "hash", "via", "record"];
 /// The torn-line seal's byte. A writer ends a torn last line with it and a
 /// newline, and a line that holds it vouches for nothing.
 const SEAL: u8 = 0;
-/// How long a writer or a reader waits for the store lock. A holder writes
-/// one line or reads the file, so ten seconds is far past any honest holder.
+/// How long a writer or a reader waits for the store lock while one hold
+/// keeps it. A holder writes one line or reads the file, so a hold of ten
+/// seconds is taken for a holder that stopped. Each new hold starts the wait
+/// again (the turn, `lock_store`).
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Who wrote a line.
@@ -371,19 +409,26 @@ pub fn index(dir: &Path) -> Result<Index, Fault> {
 }
 
 fn index_within(dir: &Path, wait: Duration) -> Result<Index, Fault> {
+    let Some(file) = locked_for_reading(dir, wait)? else {
+        return Ok(Index { present: false, hashes: Vec::new(), broken: 0 });
+    };
+    let mut bytes = Vec::new();
+    let mut f: &fs::File = &file;
+    observed(f.read_to_end(&mut bytes), &path(dir), |p| Action::Read(p))?;
+    Ok(read(&bytes))
+}
+
+/// The store, opened read-only and locked for a read, or None where there is
+/// no store: a read never makes one. The lock goes with the file.
+fn locked_for_reading(dir: &Path, wait: Duration) -> Result<Option<fs::File>, Fault> {
     let store = path(dir);
     let file = match fs::File::open(&store) {
         Ok(f) => regular(f, &store)?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(Index { present: false, hashes: Vec::new(), broken: 0 });
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Fault::operation(Outcome::Io(Err(e)), &store, |p| Action::Open(p))),
     };
-    os::flock_within(&file, os::FileLock::Shared, wait).map_err(|o| Fault::operation(o, &store, |p| Action::Lock(p)))?;
-    let mut bytes = Vec::new();
-    let mut f: &fs::File = &file;
-    observed(f.read_to_end(&mut bytes), &store, |p| Action::Read(p))?;
-    Ok(read(&bytes))
+    lock_store(dir, &file, wait)?;
+    Ok(Some(file))
 }
 
 /// The store's bytes as an index. A last line with no newline is a write that
@@ -556,11 +601,92 @@ fn log_line(log: &Path, at: &str, text: &[u8]) -> Result<(), Fault> {
     observed(f.write_all(&l), log, |p| Action::Write(p))
 }
 
+/// The turn's file, beside the store.
+const TURN: &str = "approvals.turn";
+
+/// One hold of the store lock, as its holder wrote it once it took the lock:
+/// when the hold began, on the host's monotonic clock, read just before the
+/// try that took the lock, so never later than the hold began.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Turn {
+    began: os::HostTime,
+}
+
+impl Turn {
+    /// The length of every turn's line: the time in 20 digits, a space, its
+    /// check in 16 hex digits and a newline. A turn is written over the last
+    /// whole, and nothing is truncated.
+    const LEN: usize = 38;
+
+    /// The first 16 hex digits of the SHA-256 of the time's 20 digits.
+    fn check(digits: &str) -> String {
+        sha256::hex(digits.as_bytes())[..16].to_string()
+    }
+
+    fn line(&self) -> String {
+        let digits = format!("{:020}", self.began.0);
+        format!("{digits} {}\n", Self::check(&digits))
+    }
+
+    /// A turn's line, or None for bytes that are not one: a line of another
+    /// form, or one whose check is not its time's, as a line read while a
+    /// hold writes over it can be.
+    fn parse(line: &[u8; Self::LEN]) -> Option<Self> {
+        let text = std::str::from_utf8(line).ok()?.strip_suffix('\n')?;
+        let (digits, check) = text.split_once(' ')?;
+        if digits.len() != 20 || !digits.bytes().all(|b| b.is_ascii_digit()) || check != Self::check(digits) {
+            return None;
+        }
+        Some(Self { began: os::HostTime(digits.parse().ok()?) })
+    }
+}
+
+/// Writes the turn of the hold that `began`, over the last, under the lock
+/// it just took. The open does not wait for a FIFO's reader, and only a
+/// regular file is written to.
+fn write_turn(dir: &Path, began: os::HostTime) -> io::Result<()> {
+    let file = fs::OpenOptions::new().write(true).create(true).mode(0o600).custom_flags(os::O_NONBLOCK).open(dir.join(TURN))?;
+    if !file.metadata()?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    file.write_all_at(Turn { began }.line().as_bytes(), 0)
+}
+
+/// The turn beside the store, or None where no turn can be read.
+fn read_turn(dir: &Path) -> Option<Turn> {
+    let file = fs::OpenOptions::new().read(true).custom_flags(os::O_NONBLOCK).open(dir.join(TURN)).ok()?;
+    let mut line = [0u8; Turn::LEN];
+    file.read_exact_at(&mut line, 0).ok()?;
+    Turn::parse(&line)
+}
+
+/// The store lock on `file`, the store in `dir`, then this hold's turn. The
+/// wait is counted from the later of the waiter's start and the start of the
+/// hold the turn names (the module's "The turn"), again after every try, the
+/// try the lock granted included. A turn names that hold only where it is
+/// read whole, is not the first turn this waiter read whole, and began no
+/// later than now. A lock granted after the wait ran out is let go before
+/// this hold's turn is written: the waiter is refused, and the turn stays the
+/// last hold's.
+fn lock_store(dir: &Path, file: &fs::File, wait: Duration) -> Result<(), Fault> {
+    let mut first = None;
+    let began = os::flock_within(file, wait, os::host_clock, |now| {
+        let turn = read_turn(dir)?;
+        let was = *first.get_or_insert(turn);
+        (turn != was && turn.began <= now).then_some(turn.began)
+    })
+    .map_err(|o| Fault::operation(o, &path(dir), |p| Action::Lock(p)))?;
+    // A turn not written leaves the last one standing: a waiter's patience,
+    // never the lock.
+    let _ = write_turn(dir, began);
+    Ok(())
+}
+
 /// The store, opened and locked for a commit or a revoke. The lock goes with
 /// the file.
 fn locked(dir: &Path, wait: Duration) -> Result<fs::File, Fault> {
     let file = open_for_append(dir)?;
-    os::flock_within(&file, os::FileLock::Exclusive, wait).map_err(|o| Fault::operation(o, &path(dir), |p| Action::Lock(p)))?;
+    lock_store(dir, &file, wait)?;
     Ok(file)
 }
 
@@ -879,10 +1005,11 @@ fn run(dir: &Path, args: &[String], stdin: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Barrier;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Instant;
 
     struct Dir(PathBuf);
     impl Drop for Dir {
@@ -918,10 +1045,23 @@ mod tests {
             other => panic!("not a not-written answer: {other:?}"),
         }
     }
-    fn holder(dir: &Path, lock: os::FileLock) -> fs::File {
+    /// A hold of the store lock, taken as a writer or a reader takes it.
+    fn holder(dir: &Path) -> fs::File {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
-        os::flock_within(&f, lock, Duration::from_secs(1)).unwrap();
+        lock_store(dir, &f, Duration::from_secs(1)).unwrap();
         f
+    }
+    /// One try for the store lock on `file`, which writes the turn where the
+    /// lock was granted, as `lock_store` writes it: false, and nothing
+    /// written, where another holds the lock. A wait of zero is no such try:
+    /// a try the lock granted ends after the wait began, so past it.
+    fn take_at_once(dir: &Path, file: &fs::File) -> bool {
+        let tried = os::host_clock().unwrap();
+        let took = os::try_flock(file).unwrap();
+        if took {
+            write_turn(dir, tried).unwrap();
+        }
+        took
     }
     fn ino(p: &Path) -> u64 {
         fs::metadata(p).unwrap().ino()
@@ -1098,7 +1238,9 @@ mod tests {
                         let n = t * 25 + k;
                         let (staged, entry) = stage(&dir, n, &format!("entry of {n}"));
                         let (hash, r) = (h(n), rec(n));
-                        assert_eq!(commit(&dir, &approval(n, &staged, &entry, &r, &hash), &mut Vec::new()), Answer::Approved);
+                        let mut err = Vec::new();
+                        let answer = commit(&dir, &approval(n, &staged, &entry, &r, &hash), &mut err);
+                        assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
                     }
                 })
             })
@@ -1121,7 +1263,7 @@ mod tests {
     fn a_reader_waits_for_a_line_being_written() {
         let d = scratch();
         let whole = line("2026-11-19T08:00:00Z", &h(2), Via::Check, &rec(2));
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let mut w: &fs::File = &held;
         w.write_all(&whole[..25]).unwrap();
         let dir = d.0.clone();
@@ -1136,7 +1278,7 @@ mod tests {
     #[test]
     fn a_lock_held_past_the_wait_is_an_error_and_nothing_is_written() {
         let d = scratch();
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let e = not_written(append_within(&d.0, &h(1), &rec(1), Duration::from_millis(100)));
         assert_eq!(e, format!("the lock of {} did not finish before the deadline", path(&d.0).display()).as_bytes());
         assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap_err().text(), e);
@@ -1144,12 +1286,595 @@ mod tests {
         assert_eq!(fs::metadata(path(&d.0)).unwrap().len(), 0);
     }
 
+    /// Exclusive holds of the store lock, one after another: `holds` of them,
+    /// one every `each`, the last kept `quiet` longer. No line lands. Each
+    /// next hold's file is open before the last hold goes, so the lock is free
+    /// only between that close and the next lock. Returns once the first is
+    /// held, with the thread, which ends when the lock goes and answers
+    /// whether another took the lock between two holds.
+    fn relay(dir: &Path, holds: u32, each: Duration, quiet: Duration) -> std::thread::JoinHandle<bool> {
+        let dir = dir.to_owned();
+        let mut held = holder(&dir);
+        std::thread::spawn(move || {
+            let mut gap = false;
+            for _ in 1..holds {
+                std::thread::sleep(each);
+                let next = fs::OpenOptions::new().read(true).append(true).open(path(&dir)).unwrap();
+                drop(held);
+                // One try first: a refusal is another holder, which took the
+                // lock between the two holds.
+                if !take_at_once(&dir, &next) {
+                    gap = true;
+                    lock_store(&dir, &next, LOCK_WAIT).unwrap();
+                }
+                held = next;
+            }
+            std::thread::sleep(each + quiet);
+            drop(held);
+            gap
+        })
+    }
+
     #[test]
-    fn readers_share_the_lock() {
+    fn a_commit_waits_while_the_lock_changes_hands_however_long_it_stays_held() {
+        // Commits that overlap hand the lock on: a commit whose wait ran out
+        // while the lock went from one holder to the next answered
+        // NotApproved(Store, Untouched). Here the lock changes hands every
+        // twentieth of the wait for twice the wait, and no line lands. A run
+        // where the commit took the lock between two holds does not count.
+        let wait = Duration::from_secs(2);
+        until_met(|| {
+            let d = scratch();
+            let relay = relay(&d.0, 40, Duration::from_millis(100), Duration::ZERO);
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            let (hash, r) = (h(1), rec(1));
+            let started = Instant::now();
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
+            let waited = started.elapsed();
+            if relay.join().unwrap() {
+                println!("# note: the commit took the lock between two holds, so this run does not count");
+                return None;
+            }
+            assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
+            assert!(waited > wait, "the commit answered within the wait, {waited:?}, so the lock was not held that long");
+            assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
+            assert_eq!(fs::read_to_string(&entry).unwrap(), "entry of 1");
+            assert_eq!(logged(&d.0), vec![record(1)]);
+            Some(())
+        });
+    }
+
+    #[test]
+    fn a_lock_held_past_the_wait_after_its_last_handoff_is_an_error_and_nothing_is_written() {
+        // The control. The wait counts from the start of the hold the commit
+        // waits behind: a holder that took the lock and keeps it is waited
+        // for the wait from its start, then the commit is refused, as a lock
+        // held past the wait always was. A run where the commit took the lock
+        // between two holds does not count.
+        let wait = Duration::from_millis(500);
+        until_met(|| {
+            let d = scratch();
+            let relay = relay(&d.0, 5, Duration::from_millis(100), Duration::from_secs(4));
+            let (staged, entry) = stage(&d.0, 1, "entry of 1");
+            let (hash, r) = (h(1), rec(1));
+            let mut err = Vec::new();
+            let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), wait, &Real, &mut err);
+            let holding = !relay.is_finished();
+            if relay.join().unwrap() {
+                println!("# note: the commit took the lock between two holds, so this run does not count");
+                return None;
+            }
+            assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+            assert!(holding, "the commit answered only once the holder let the lock go");
+            assert_eq!(
+                String::from_utf8_lossy(&err),
+                format!("safedeps-core approvals: not committed: {0} could not be opened and locked: the lock of {0} did not finish before the deadline\n", path(&d.0).display())
+            );
+            assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
+            assert!(staged.exists() && !entry.exists());
+            assert!(logged(&d.0).is_empty());
+            Some(())
+        });
+    }
+
+    #[test]
+    fn a_commit_behind_a_read_held_past_the_wait_is_refused_while_other_reads_keep_trying() {
+        // A validator's counterexample, kept as a row. A read keeps the store
+        // lock past the wait, and two more reads, each in a thread of its own,
+        // keep trying to read meanwhile. The lock never changes hands, so the
+        // commit is refused at the wait, while the read still holds the lock,
+        // and nothing is written.
         let d = scratch();
-        append(&d.0, &h(1), &rec(1)).unwrap();
-        let _held = holder(&d.0, os::FileLock::Shared);
-        assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap().hashes, vec![h(1)]);
+        let wait = Duration::from_millis(500);
+        fs::OpenOptions::new().append(true).create(true).mode(0o600).open(path(&d.0)).unwrap();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        // The read's hold, taken as a read takes it. It goes once the commit
+        // answered, or after ten waits; the thread answers whether it went
+        // first.
+        let held = locked_for_reading(&d.0, LOCK_WAIT).unwrap().expect("the store");
+        let (answered, told) = mpsc::channel::<()>();
+        let reading = std::thread::spawn(move || {
+            let first = told.recv_timeout(wait * 10).is_err();
+            drop(held);
+            first
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let (dir, stop) = (d.0.clone(), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        let _ = index_within(&dir, wait);
+                        std::thread::sleep(wait / 10);
+                    }
+                })
+            })
+            .collect();
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &rec(1), &h(1)), wait, &Real, &mut err);
+        let _ = answered.send(());
+        let let_go_first = reading.join().unwrap();
+        stop.store(true, Ordering::SeqCst);
+        for r in readers {
+            r.join().unwrap();
+        }
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched), "{}", String::from_utf8_lossy(&err));
+        assert!(!let_go_first, "the commit answered only once the read let the lock go");
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            format!("safedeps-core approvals: not committed: {0} could not be opened and locked: the lock of {0} did not finish before the deadline\n", path(&d.0).display())
+        );
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
+        assert!(staged.exists() && !entry.exists());
+        assert!(logged(&d.0).is_empty());
+    }
+
+    #[test]
+    fn a_turn_that_cannot_be_read_is_no_handoff() {
+        // A turn a waiter cannot read counts for nothing, however often it
+        // looks: a holder that keeps the lock is waited for the wait and no
+        // longer.
+        let d = scratch();
+        let held = holder(&d.0);
+        fs::remove_file(d.0.join(TURN)).unwrap();
+        fs::create_dir(d.0.join(TURN)).unwrap();
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let dir = d.0.clone();
+        let waiter = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            commit_with(&dir, &approval(1, &staged, &entry, &rec(1), &h(1)), Duration::from_millis(300), &Real, &mut err)
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        let answered = waiter.is_finished();
+        drop(held);
+        let answer = waiter.join().unwrap();
+        assert!(answered, "the commit still waited when the holder let the lock go");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+    }
+
+    /// A hold of the store lock that has not written its turn: the lock
+    /// taken and nothing else, as a holder has it between its lock and its
+    /// turn.
+    fn bare_hold(dir: &Path) -> fs::File {
+        let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
+        assert!(os::try_flock(&f).unwrap(), "another held the lock");
+        f
+    }
+    /// The turn's bytes, as the last hold that wrote one left them.
+    fn turn_bytes(dir: &Path) -> Vec<u8> {
+        fs::read(dir.join(TURN)).unwrap()
+    }
+    /// `bytes` over the turn's, in place, as a hold writes its turn.
+    fn put_turn(dir: &Path, bytes: &[u8]) {
+        fs::OpenOptions::new().write(true).open(dir.join(TURN)).unwrap().write_all_at(bytes, 0).unwrap();
+    }
+
+    #[test]
+    fn a_commit_behind_one_hold_that_wrote_its_turn_late_is_refused_at_the_wait() {
+        // A validator's counterexample, kept as a row. A read takes the lock,
+        // and its turn lands six seconds later: until then the turn is the
+        // last hold's. The read keeps the lock thirteen seconds. The lock
+        // never changes hands while the commit waits, so the commit is
+        // refused at the wait, while the read still holds the lock, and
+        // nothing is written. A wait counted again from the moment the
+        // waiter saw the turn change ran past the read's thirteen seconds,
+        // and the commit was approved once the read let the lock go.
+        let d = scratch();
+        drop(holder(&d.0));
+        let last = turn_bytes(&d.0);
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let held = locked_for_reading(&d.0, LOCK_WAIT).unwrap().expect("the store");
+        let began = Instant::now();
+        let its_turn = turn_bytes(&d.0);
+        assert_ne!(its_turn, last, "the read wrote no turn of its own");
+        put_turn(&d.0, &last);
+        let (dir, s, e) = (d.0.clone(), staged.clone(), entry.clone());
+        let waiter = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            let answer = commit(&dir, &approval(1, &s, &e, &rec(1), &h(1)), &mut err);
+            (answer, err)
+        });
+        std::thread::sleep(Duration::from_secs(6));
+        put_turn(&d.0, &its_turn);
+        std::thread::sleep(Duration::from_secs(13).saturating_sub(began.elapsed()));
+        let answered = waiter.is_finished();
+        drop(held);
+        let (answer, err) = waiter.join().unwrap();
+        assert!(answered, "the commit answered only once the read let the lock go: {answer:?}");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched), "{}", String::from_utf8_lossy(&err));
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: Vec::new(), broken: 0 });
+        assert!(staged.exists() && !entry.exists());
+        assert!(logged(&d.0).is_empty());
+    }
+
+    #[test]
+    fn a_waiter_behind_a_hold_that_has_not_written_its_turn_over_an_old_one_waits_the_wait() {
+        // The turn is a hold's that let the lock go twice the wait ago, and a
+        // new hold took the lock and has not written its turn yet. A waiter
+        // that counted from the start that old turn names would be refused at
+        // its first try, for a hold that only began. It waits the wait from
+        // its own start.
+        let wait = Duration::from_secs(1);
+        let d = scratch();
+        drop(holder(&d.0));
+        std::thread::sleep(wait * 2);
+        let held = bare_hold(&d.0);
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let started = Instant::now();
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &rec(1), &h(1)), wait, &Real, &mut err);
+        let waited = started.elapsed();
+        drop(held);
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched), "{}", String::from_utf8_lossy(&err));
+        assert!(waited >= wait, "refused after {waited:?}, before the wait: the old turn was counted for the new hold");
+    }
+
+    #[test]
+    fn a_waiter_that_comes_in_the_middle_of_a_hold_waits_the_wait_from_its_own_start() {
+        // A hold wrote its turn as it took the lock, and a commit comes three
+        // quarters of the wait later. The commit is refused the wait after it
+        // began to wait, not the wait after the hold began: the wait is the
+        // waiter's.
+        let wait = Duration::from_secs(1);
+        let d = scratch();
+        let held = holder(&d.0);
+        std::thread::sleep(wait * 3 / 4);
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let started = Instant::now();
+        let mut err = Vec::new();
+        let answer = commit_with(&d.0, &approval(1, &staged, &entry, &rec(1), &h(1)), wait, &Real, &mut err);
+        let waited = started.elapsed();
+        drop(held);
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched), "{}", String::from_utf8_lossy(&err));
+        assert!(waited >= wait, "refused after {waited:?}: the wait was counted from the hold's start");
+    }
+
+    #[test]
+    fn a_torn_turn_is_no_new_hold() {
+        // A waiter can read the turn while a hold writes it, and get the
+        // first bytes of one line with the last of another. Such a line is no
+        // hold's. Here the turn goes back and forth between two such lines,
+        // made of the turns two holds wrote, while the second hold keeps the
+        // lock. The lock never changes hands, so the commit is refused at the
+        // wait, while the hold keeps the lock.
+        let wait = Duration::from_millis(300);
+        let d = scratch();
+        drop(holder(&d.0));
+        let old = turn_bytes(&d.0);
+        let held = holder(&d.0);
+        let new = turn_bytes(&d.0);
+        let k = old.iter().zip(&new).position(|(a, b)| a != b).expect("two holds wrote one turn") + 1;
+        let torn = [[&new[..k], &old[k..]].concat(), [&old[..k], &new[k..]].concat()];
+        for t in &torn {
+            assert!(t != &old && t != &new, "a torn line that is one of the two");
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let flipper = {
+            let (dir, stop) = (d.0.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                for t in torn.iter().cycle() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    put_turn(&dir, t);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+        };
+        let (staged, entry) = stage(&d.0, 1, "entry of 1");
+        let dir = d.0.clone();
+        let waiter = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            commit_with(&dir, &approval(1, &staged, &entry, &rec(1), &h(1)), wait, &Real, &mut err)
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        let answered = waiter.is_finished();
+        stop.store(true, Ordering::SeqCst);
+        flipper.join().unwrap();
+        drop(held);
+        let answer = waiter.join().unwrap();
+        assert!(answered, "the commit still waited when the hold let the lock go: a torn turn was taken for a new hold");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+    }
+
+    /// A waiter's commit of 1 under `dir`, in a thread, behind a hold kept
+    /// `held_for`; `meanwhile` runs once the commit started. Answers whether
+    /// the commit answered while the hold kept the lock, and what.
+    fn commit_behind(dir: &Path, held: fs::File, wait: Duration, held_for: Duration, meanwhile: impl FnOnce()) -> (bool, Answer) {
+        let (staged, entry) = stage(dir, 1, "entry of 1");
+        let home = dir.to_owned();
+        let began = Instant::now();
+        let waiter = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            commit_with(&home, &approval(1, &staged, &entry, &rec(1), &h(1)), wait, &Real, &mut err)
+        });
+        meanwhile();
+        std::thread::sleep(held_for.saturating_sub(began.elapsed()));
+        let answered = waiter.is_finished();
+        drop(held);
+        (answered, waiter.join().unwrap())
+    }
+
+    #[test]
+    fn a_turn_that_was_there_when_the_wait_began_never_counts() {
+        // A turn written before the host's clock started again can name a
+        // time the clock reaches only later, and a hold that has not written
+        // its own turn leaves it standing. Here it names a time just short of
+        // the wait. Counted once the clock reached it, it would have the wait
+        // start there and run past the hold. It was the first turn the waiter
+        // read, so it counts for nothing, and the commit is refused at the
+        // wait while the hold keeps the lock.
+        let wait = Duration::from_secs(2);
+        let d = scratch();
+        drop(holder(&d.0));
+        let held = bare_hold(&d.0);
+        put_turn(&d.0, Turn { began: os::host_clock().unwrap().after(wait * 9 / 10) }.line().as_bytes());
+        let (answered, answer) = commit_behind(&d.0, held, wait, wait * 3 / 2, || ());
+        assert!(answered, "the commit answered only once the hold let the lock go: {answer:?}");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+    }
+
+    #[test]
+    fn a_turn_that_names_a_time_later_than_now_counts_for_nothing() {
+        // A turn that names a time the clock has not reached is no hold of
+        // this host. Here one an hour ahead lands while a hold keeps the lock,
+        // after the waiter read the hold's own: the commit is refused at the
+        // wait while the hold keeps the lock.
+        let wait = Duration::from_millis(500);
+        let d = scratch();
+        let held = holder(&d.0);
+        let (answered, answer) = commit_behind(&d.0, held, wait, Duration::from_secs(2), || {
+            std::thread::sleep(wait / 5);
+            put_turn(&d.0, Turn { began: os::host_clock().unwrap().after(Duration::from_secs(3600)) }.line().as_bytes());
+        });
+        assert!(answered, "the commit answered only once the hold let the lock go: {answer:?}");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+    }
+
+    #[test]
+    fn a_turn_is_a_time_on_the_host_clock_and_its_check() {
+        // The line a hold writes: its time read just before the lock, and the
+        // check that a line read while a hold writes over it fails.
+        let d = scratch();
+        let before = os::host_clock().unwrap();
+        drop(holder(&d.0));
+        let after = os::host_clock().unwrap();
+        let bytes = turn_bytes(&d.0);
+        assert_eq!(bytes.len(), Turn::LEN);
+        let turn = Turn::parse(bytes.as_slice().try_into().unwrap()).expect("a whole turn");
+        assert!(before <= turn.began && turn.began <= after, "{before:?} {turn:?} {after:?}");
+        assert_eq!(bytes[20], b' ');
+        assert_eq!(&bytes[21..37], sha256::hex(&bytes[..20])[..16].as_bytes());
+        let mut wrong = bytes.clone();
+        wrong[19] = if wrong[19] == b'0' { b'1' } else { b'0' };
+        assert_eq!(Turn::parse(wrong.as_slice().try_into().unwrap()), None, "a time whose check is another's");
+    }
+
+    /// A commit's steps as `Real` runs them, but paced: the lock kept
+    /// `before_line` before the store is read, and `after_line` once the line
+    /// landed, which `landed` is told. `began` and `ended` are the hold's first
+    /// step and its last.
+    struct Paced {
+        before_line: Duration,
+        after_line: Duration,
+        landed: Option<mpsc::Sender<()>>,
+        began: Cell<Option<Instant>>,
+        ended: Cell<Option<Instant>>,
+    }
+
+    impl Steps for Paced {
+        fn lstat(&self, p: &Path) -> io::Result<fs::Metadata> {
+            self.began.set(Some(Instant::now()));
+            fs::symlink_metadata(p)
+        }
+        fn read(&self, file: &fs::File, store: &Path) -> Result<Index, Fault> {
+            std::thread::sleep(self.before_line);
+            read_locked(file, store)
+        }
+        fn log(&self, log: &Path, at: &str, text: &[u8]) -> Result<(), Fault> {
+            if let Some(landed) = &self.landed {
+                landed.send(()).unwrap();
+            }
+            std::thread::sleep(self.after_line);
+            log_line(log, at, text)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.ended.set(Some(Instant::now()));
+            fs::rename(from, to)
+        }
+    }
+
+    /// What `waiter` answered behind two commits of 1 and 2 under `dir`, one
+    /// after the other in a thread of their own. The first keeps the lock
+    /// `hold` once its line landed, the second `hold` before its line, and
+    /// `waiter` starts when the first line landed, so it waits through the
+    /// lock going from one to the other: each hold is shorter than `wait`, the
+    /// two together longer. `waiter` answers what it answered and whether it
+    /// took the lock. A run where it took the lock between the two holds, or
+    /// where a hold reached `wait`, did not meet that condition: it says so,
+    /// and its answer is None.
+    fn behind_two_commits<T>(dir: &Path, hold: Duration, wait: Duration, waiter: impl FnOnce() -> (T, bool)) -> Option<T> {
+        let (landed, first_line) = mpsc::channel();
+        let home = dir.to_owned();
+        let pair = std::thread::spawn(move || {
+            let paced = |before_line, after_line, landed| Paced { before_line, after_line, landed, began: Cell::new(None), ended: Cell::new(None) };
+            [(1, paced(Duration::ZERO, hold, Some(landed))), (2, paced(hold, Duration::ZERO, None))].map(|(n, steps)| {
+                let (staged, entry) = stage(&home, n, &format!("entry of {n}"));
+                let mut err = Vec::new();
+                let answer = commit_with(&home, &approval(n, &staged, &entry, &rec(n), &h(n)), LOCK_WAIT, &steps, &mut err);
+                assert_eq!(answer, Answer::Approved, "commit {n}: {}", String::from_utf8_lossy(&err));
+                (steps.began.get().unwrap(), steps.ended.get().unwrap())
+            })
+        });
+        first_line.recv().unwrap();
+        let (answer, took) = waiter();
+        let answered = Instant::now();
+        let [first, second] = pair.join().unwrap();
+        let held = |(began, ended): (Instant, Instant)| ended - began;
+        if held(first) >= wait || held(second) >= wait {
+            println!("# note: a hold reached the wait ({:?}, {:?}), so this run does not count", held(first), held(second));
+            return None;
+        }
+        if took && answered < second.1 {
+            println!("# note: the waiter took the lock between the two holds, so this run does not count");
+            return None;
+        }
+        Some(answer)
+    }
+
+    /// The answer of the first of three runs that met its condition. A row
+    /// where none did is red.
+    fn until_met<T>(run: impl FnMut() -> Option<T>) -> T {
+        std::iter::repeat_with(run).take(3).flatten().next().expect("no run of three met its condition")
+    }
+
+    #[test]
+    fn a_commit_behind_two_commits_waits_for_both_when_each_holds_less_than_the_wait() {
+        // Two commits each keep the lock less than the wait, and a commit
+        // that waits through both waits longer than the wait. It is approved:
+        // the lock changed hands. Two seconds a hold is the control, where
+        // the two together are shorter than the wait too.
+        for seconds in [2, 6] {
+            let ((answer, err), ix) = until_met(|| {
+                let d = scratch();
+                let (staged, entry) = stage(&d.0, 3, "entry of 3");
+                let met = behind_two_commits(&d.0, Duration::from_secs(seconds), LOCK_WAIT, || {
+                    let mut err = Vec::new();
+                    let answer = commit(&d.0, &approval(3, &staged, &entry, &rec(3), &h(3)), &mut err);
+                    let took = answer == Answer::Approved;
+                    ((answer, err), took)
+                })?;
+                Some((met, index(&d.0).unwrap()))
+            });
+            assert_eq!(answer, Answer::Approved, "{seconds} s a hold: {}", String::from_utf8_lossy(&err));
+            assert_eq!(ix, Index { present: true, hashes: vec![h(1), h(2), h(3)], broken: 0 }, "{seconds} s a hold");
+        }
+    }
+
+    #[test]
+    fn a_reader_behind_two_commits_waits_for_both_when_each_holds_less_than_the_wait() {
+        let wait = Duration::from_secs(5);
+        let ix = until_met(|| {
+            let d = scratch();
+            behind_two_commits(&d.0, Duration::from_secs(3), wait, || {
+                let ix = index_within(&d.0, wait).map_err(|e| String::from_utf8_lossy(&e.text()).into_owned());
+                let took = ix.is_ok();
+                (ix, took)
+            })
+        });
+        assert_eq!(ix, Ok(Index { present: true, hashes: vec![h(1), h(2)], broken: 0 }));
+    }
+
+    /// A commit of 1 under `dir`, in a thread, behind one hold: a hold that
+    /// took the lock from the last one while the commit waited, and keeps it
+    /// `held_for` from the start its turn names. Answers what the commit
+    /// answered and said, the hold's turn, and when the commit answered; or
+    /// None, saying so, for a run where the commit did not wait for that hold
+    /// to let the lock go. It began only after the hold began, or it answered
+    /// while the hold still kept the lock: it took the lock between the two
+    /// holds, or it was refused at a try the lock refused.
+    fn behind_one_hold(dir: &Path, held_for: Duration) -> Option<(Answer, Vec<u8>, Turn, os::HostTime)> {
+        let last = holder(dir);
+        let (staged, entry) = stage(dir, 1, "entry of 1");
+        let home = dir.to_owned();
+        let waiter = std::thread::spawn(move || {
+            let called = os::host_clock().unwrap();
+            let mut err = Vec::new();
+            let answer = commit(&home, &approval(1, &staged, &entry, &rec(1), &h(1)), &mut err);
+            (called, answer, err, os::host_clock().unwrap())
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        let next = fs::OpenOptions::new().read(true).append(true).open(path(dir)).unwrap();
+        drop(last);
+        lock_store(dir, &next, LOCK_WAIT).unwrap();
+        let turn = read_turn(dir).expect("the hold's turn");
+        let until = turn.began.after(held_for);
+        std::thread::sleep(Duration::from_nanos(until.0.saturating_sub(os::host_clock().unwrap().0)).saturating_sub(Duration::from_millis(40)));
+        while os::host_clock().unwrap() < until {
+            std::hint::spin_loop();
+        }
+        let answered = waiter.is_finished();
+        drop(next);
+        let (called, answer, err, at) = waiter.join().unwrap();
+        if called > turn.began {
+            println!("# note: the commit began only after the hold took the lock, so this run does not count");
+            return None;
+        }
+        if answered {
+            println!("# note: the commit answered while the hold kept the lock ({answer:?}), so this run does not count");
+            return None;
+        }
+        Some((answer, err, turn, at))
+    }
+
+    #[test]
+    fn a_commit_granted_the_lock_after_the_wait_ran_out_is_refused_and_writes_nothing() {
+        // A validator's counterexample, kept as a row. One hold keeps the
+        // lock a tenth of a millisecond past the wait from its start, and the
+        // commit behind it is granted the lock at its next try, after the
+        // wait ran out. So the commit is refused, and it lets the lock go
+        // before it writes anything: the store keeps its torn tail unsealed,
+        // the turn is still the hold's, and the entry no check approved
+        // stands. A wait judged only at the tries the lock refused let the
+        // commit through once the hold let the lock go.
+        const TORN: &[u8] = b"{\"at\":\"2020-01-01T";
+        let (d, entry, turn, answer, err) = until_met(|| {
+            let d = scratch();
+            fs::write(path(&d.0), TORN).unwrap();
+            let entry = stand(&d.0, 1, "an entry no check approved");
+            let (answer, err, turn, _) = behind_one_hold(&d.0, LOCK_WAIT + Duration::from_micros(100))?;
+            Some((d, entry, turn, answer, err))
+        });
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched), "{}", String::from_utf8_lossy(&err));
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            format!("safedeps-core approvals: not committed: {0} could not be opened and locked: the lock of {0} did not finish before the deadline\n", path(&d.0).display())
+        );
+        assert_eq!(fs::read(path(&d.0)).unwrap(), TORN, "the store's bytes changed");
+        assert_eq!(turn_bytes(&d.0), turn.line().as_bytes(), "the turn is not the hold's");
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "an entry no check approved");
+        assert!(logged(&d.0).is_empty());
+    }
+
+    #[test]
+    fn a_commit_granted_the_lock_before_the_wait_ran_out_behind_one_hold_is_approved() {
+        // The control. The hold keeps the lock 9.7 seconds from its start,
+        // and the commit behind it is granted the lock at its next try,
+        // within the wait: it is approved. A run where it answered otherwise
+        // only past the wait, as a machine too busy to try again in time can
+        // make it, does not count.
+        let (d, answer, err) = until_met(|| {
+            let d = scratch();
+            let (answer, err, turn, at) = behind_one_hold(&d.0, Duration::from_millis(9700))?;
+            if answer != Answer::Approved && at > turn.began.after(LOCK_WAIT) {
+                println!("# note: the commit answered {answer:?} only past the wait, so this run does not count");
+                return None;
+            }
+            Some((d, answer, err))
+        });
+        assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
     }
 
     #[test]
@@ -1240,11 +1965,7 @@ mod tests {
     }
     fn held_elsewhere(home: &Path) -> bool {
         let other = fs::File::open(path(home)).unwrap();
-        match os::flock_within(&other, os::FileLock::Exclusive, Duration::ZERO) {
-            Ok(()) => false,
-            Err(Outcome::Deadline) => true,
-            Err(e) => panic!("the lock check failed: {e:?}"),
-        }
+        !os::try_flock(&other).expect("the lock check")
     }
 
     /// The kind of advisory.log line `text` is to a commit: its approve line,
@@ -1483,7 +2204,7 @@ mod tests {
         let before = ino(&entry);
         let (staged, _) = stage(&d.0, 1, "entry of 1");
         let (hash, r) = (h(1), rec(1));
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let steps = driven("", 0);
         let mut err = Vec::new();
         let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), Duration::from_millis(100), &steps, &mut err);
@@ -1835,7 +2556,7 @@ mod tests {
         let entry = stand(&d.0, 1, "the entry A approved");
         let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry A approved, revoked");
         let hash = h(1);
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let mut err = Vec::new();
         let r = revocation(1, &hash, &staged, &entry, &seen);
         let answer = revoke_with(&d.0, &r, Duration::from_millis(100), |_, _| panic!("a revoke renamed without the lock"), &mut err);
