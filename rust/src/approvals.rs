@@ -390,19 +390,26 @@ pub fn index(dir: &Path) -> Result<Index, Fault> {
 }
 
 fn index_within(dir: &Path, wait: Duration) -> Result<Index, Fault> {
+    let Some(file) = locked_for_reading(dir, wait)? else {
+        return Ok(Index { present: false, hashes: Vec::new(), broken: 0 });
+    };
+    let mut bytes = Vec::new();
+    let mut f: &fs::File = &file;
+    observed(f.read_to_end(&mut bytes), &path(dir), |p| Action::Read(p))?;
+    Ok(read(&bytes))
+}
+
+/// The store, opened read-only and locked for a read, or None where there is
+/// no store: a read never makes one. The lock goes with the file.
+fn locked_for_reading(dir: &Path, wait: Duration) -> Result<Option<fs::File>, Fault> {
     let store = path(dir);
     let file = match fs::File::open(&store) {
         Ok(f) => regular(f, &store)?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(Index { present: false, hashes: Vec::new(), broken: 0 });
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Fault::operation(Outcome::Io(Err(e)), &store, |p| Action::Open(p))),
     };
     lock_store(dir, &file, os::FileLock::Shared, wait)?;
-    let mut bytes = Vec::new();
-    let mut f: &fs::File = &file;
-    observed(f.read_to_end(&mut bytes), &store, |p| Action::Read(p))?;
-    Ok(read(&bytes))
+    Ok(Some(file))
 }
 
 /// The store's bytes as an index. A last line with no newline is a write that
