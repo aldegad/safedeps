@@ -598,6 +598,136 @@ fi
 : > "${tmp_root}/release"
 stop "${holder}"
 
+# --- a look acts only through what holds the slot -----------------------------------------
+# moongchi's handoff (the checkpoint of slot-stale-lock-race-1124) as a row.
+# The first slot is free to take, and the second is held by a live process
+# throughout, so one run at a time can run. B looks at the first slot and is
+# held at the step where it acts on that look. A takes the slot, runs and ends
+# normally. C passes a gone ticket and takes the slot. Then B acts on its look.
+# The failure is B running beside C.
+#
+# B's PATH holds a pause at each step where a runner acts on its look. A
+# runner that judges a slot's record pauses at its claim of the record (mv of
+# the pid) and at its kernel question about the pid it claimed. A runner whose
+# slot is a kernel lock pauses at its lock call (perl with LOCK_). Each pause
+# holds once, until the row releases it, so the order is the row's and not
+# the scheduler's. The slots are set up both ways, and a runner reads the form
+# it knows: the first a directory with a gone record and no lock file, the
+# second a directory with a live record and a lock file a live process holds.
+H="${tmp_root}/handoff"
+pause="${tmp_root}/pause"
+mkdir -p "${pause}"
+for tool in mv python3 perl; do
+  {
+    printf '#!/bin/bash\nreal=%q\n' "$(command -v "${tool}" || true)"
+    case "${tool}" in
+      mv) printf '%s\n' 'point=claim; [[ "$1" == "$HOME/safedeps-runs/.slot/pid" ]] || exec "${real}" "$@"' ;;
+      python3) printf '%s\n' 'point=check' \
+        '[[ "$4" == running && "$5" == "$(cat "${PAUSE_AT}/A.pid" 2>/dev/null)" ]] || exec "${real}" "$@"' \
+        '[[ -e "$HOME/safedeps-runs/.slot/.reap-$(cat "${PAUSE_AT}/B.pid" 2>/dev/null)" ]] || exec "${real}" "$@"' ;;
+      perl) printf '%s\n' 'point=lock; [[ "$*" == *LOCK_* ]] || exec "${real}" "$@"' ;;
+    esac
+    cat <<'EOF'
+mkdir "${PAUSE_AT}/at-${point}" 2>/dev/null || exec "${real}" "$@"
+for (( i = 0; i < 3000; i++ )); do [[ -e "${PAUSE_AT}/go-${point}" ]] && break; sleep 0.1; done
+exec "${real}" "$@"
+EOF
+  } > "${pause}/${tool}"
+  chmod +x "${pause}/${tool}"
+done
+cat > "${tmp_root}/lock-holder" <<'EOF'
+#!/bin/bash
+# lock-holder <file> <ready> <marker>: holds a lock on file the way a runner
+# holds its slot, its shell's open of the file on fd 9 and flock(2) on that
+# descriptor by perl, until it is killed.
+exec 9>> "$1" || exit 2
+perl -MFcntl=:flock -e 'open(my $h, ">>&=", 9) or exit 2; flock($h, LOCK_EX | LOCK_NB) or exit 1' || exit 1
+: > "$2"
+exec -a "$3" sleep 600
+EOF
+chmod +x "${tmp_root}/lock-holder"
+# lock_held <file>: a live process of this battery's own holds the lock on
+# file, and $locker is its pid.
+lock_held() {
+  local i
+  rm -f "${tmp_root}/locked"
+  ( cd "${tmp_root}" && exec "${tmp_root}/lock-holder" "$1" "${tmp_root}/locked" "${MARK}" ) 2> /dev/null &
+  locker=$!
+  children+=("${locker}")
+  for (( i = 0; i < 600; i++ )); do
+    [[ -e "${tmp_root}/locked" ]] && return 0
+    kill -0 "${locker}" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  return 1
+}
+# launch <name> [<dir>]: a runner named name in the background, with dir
+# first on its PATH when given. Its suite marks $H/entered-<name> and runs
+# until $H/end-<name> appears. $launched is the runner's pid, and what it
+# says goes to $H/<name>.err.
+launch() {
+  local path="${PATH}"
+  [[ -z "${2:-}" ]] || path="$2:${PATH}"
+  ( cd "${tmp_root}" && exec env HOME="${home}" PATH="${path}" PAUSE_AT="${H}" "${home}/safedeps-runs/slot.sh" "$1" \
+      bash -c ': > "$1"; while [ ! -e "$2" ]; do sleep 0.1; done' _ "${H}/entered-$1" "${H}/end-$1" "${MARK}" ) \
+    < /dev/null > /dev/null 2> "${H}/$1.err" &
+  launched=$!
+  children+=("${launched}")
+}
+# appeared <path>...: whether one of the paths appeared within a minute.
+appeared() {
+  local i p
+  for (( i = 0; i < 600; i++ )); do
+    for p in "$@"; do [[ -e "${p}" ]] && return 0; done
+    sleep 0.1
+  done
+  return 1
+}
+said() { tr '\n' ' ' < "${H}/$1.err" 2>/dev/null | head -c 200 || true; }
+# handoff: the order above. It stops at the first step that did not come, and
+# what went wrong goes into $got.
+handoff() {
+  local i rc
+  lock_held "${home}/safedeps-runs/.slot2.lock" || { got="the second slot's lock was never held"; return; }
+  launch B "${pause}"; B=${launched}; printf '%s\n' "${B}" > "${H}/B.pid"
+  appeared "${H}/at-claim" "${H}/at-lock" || { got="B never came to its claim or its lock call: $(said B)"; return; }
+  launch A; A=${launched}
+  appeared "${H}/entered-A" || { got="A never ran: $(said A)"; return; }
+  printf '%s\n' "${A}" > "${H}/A.pid"
+  if [[ -e "${H}/at-claim" ]]; then
+    : > "${H}/go-claim"
+    appeared "${H}/at-check" || { got="B never asked the kernel about A after its claim: $(said B)"; return; }
+  fi
+  : > "${H}/end-A"
+  for (( i = 0; i < 600; i++ )); do kill -0 "${A}" 2>/dev/null || break; sleep 0.1; done
+  ! kill -0 "${A}" 2>/dev/null || { got="A did not end"; return; }
+  rc=0; wait "${A}" || rc=$?; A=""
+  [[ "${rc}" == 0 ]] || { got="A ended ${rc}, not 0: $(said A)"; return; }
+  ticket "${witness}" other "${other_id}"
+  launch C; C=${launched}
+  appeared "${H}/entered-C" || { got="C never ran: $(said C)"; return; }
+  : > "${H}/go-check"; : > "${H}/go-lock"
+  for (( i = 0; i < 600; i++ )); do
+    [[ ! -e "${H}/entered-B" ]] || break
+    ! grep -q 'slots busy' "${H}/B.err" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [[ -e "${H}/entered-B" ]]; then
+    got="B ran beside C, so two runs held one slot"
+  elif ! grep -q 'slots busy' "${H}/B.err" 2>/dev/null; then
+    got="B decided nothing within a minute: $(said B)"
+  fi
+  kill -0 "${C}" 2>/dev/null || got="${got:+${got}, and }C is not running"
+}
+fresh 2; slot "${witness}" "${other_id}"; slot_in .slot2 "${witness}" "${witness_id}"
+rm -rf "${H}"; mkdir -p "${H}"
+got=""; A=""; B=""; C=""; locker=""
+handoff
+for f in go-claim go-check go-lock end-A end-B end-C; do : > "${H}/${f}"; done
+for p in "${B}" "${C}" "${A}" "${locker}"; do [[ -z "${p}" ]] || stop "${p}"; done
+label="a waiter that acts on its look after A took the slot, ran and ended, and C took it, does not run beside C"
+if [[ -z "${got}" ]]; then pass "${label}"; else fail "${label} (${got})"; fi
+
 # --- a run the kernel cannot name does not queue ------------------------------------------
 fresh 1
 bin="${tmp_root}/bin-${row}"
