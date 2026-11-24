@@ -34,7 +34,9 @@
 # GRID_SAME_SECOND_START_MS=<0-999> starts each trial of the same-second row
 # (section 3) at that millisecond of a wall-clock second, as a host whose trial
 # interval is a whole number of seconds does. It shows whether the row depends
-# on when its trials happen to start; `npm test` never sets it.
+# on when its trials happen to start; `npm test` never sets it. It is a knob of
+# this test battery only. The hooks, the core and the CLI do not read it, and
+# it is not a safedeps setting.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
