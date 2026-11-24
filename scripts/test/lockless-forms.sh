@@ -26,7 +26,7 @@
 # question it answers is what npm writes and what `npm rebuild` executes, which
 # is a property of npm and not of the command text. What keeps that safe:
 # the only packages are synthetic ones packed here, the registry is
-# fixture-registry.mjs on 127.0.0.1, and npm's proxies point at a closed local
+# fixture-registry.py on 127.0.0.1, and npm's proxies point at a closed local
 # port so a request for anything else fails instead of leaving the machine.
 # The request log is checked at the end.
 set -euo pipefail

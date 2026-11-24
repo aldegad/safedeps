@@ -213,7 +213,7 @@ site_home="${tmp_root}/site-home"
 mkdir -p "${site_home}"
 site_state="${tmp_root}/site-provider.json"
 printf '%s\n' '{"vulnerable":["site@1.0.0"]}' > "${site_state}"
-( cd "${tmp_root}" && exec node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${tmp_root}/site-provider.port" "${site_state}" ) &
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-provider.py" "${tmp_root}/site-provider.port" "${site_state}" ) &
 server_pid=$!
 for _ in $(seq 50); do [ -s "${tmp_root}/site-provider.port" ] && break; sleep 0.1; done
 [ -s "${tmp_root}/site-provider.port" ] || fail "the fixture provider starts"

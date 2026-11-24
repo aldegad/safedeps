@@ -232,8 +232,8 @@ printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 # reached it -- no marker, worktree cwd, and it never exits on its own. Only the
 # EXIT trap killed it, so any SIGKILL leaked one. It now spawns from tmp_root and
 # carries the marker, which folds it into the sweep and the cwd layer both.
-( cd "${tmp_root}" && exec -a "${E2E_CHILD_MARKER}" \
-    node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${port_file}" "${state_file}" ) &
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-provider.py" --mark "${E2E_CHILD_MARKER}" \
+    "${port_file}" "${state_file}" ) &
 server_pid=$!
 owned_children+=("${server_pid}")
 

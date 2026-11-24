@@ -62,9 +62,15 @@ pass "bash syntax"
 node --check scripts/install/install-safedeps-hooks.mjs >/dev/null
 node --check scripts/install/install-safedeps-recheck-agent.mjs >/dev/null
 node --check scripts/install/migrate-safedeps-state.mjs >/dev/null
-node --check scripts/test/fixture-provider.mjs >/dev/null
 node scripts/install/install-safedeps-recheck-agent.mjs --help >/dev/null
 pass "node syntax"
+
+# Parsed, not compiled: compiling would leave __pycache__ in the checkout.
+python3 -c 'import ast, sys
+for name in sys.argv[1:]:
+    ast.parse(open(name).read(), name)' \
+  scripts/test/fixture-provider.py scripts/test/fixture-registry.py scripts/test/lib/fixture_http.py
+pass "fixture server syntax"
 
 version_json=$(HOME="${tmp_root}/home-version" SAFEDEPS_HOME="${tmp_root}/safe-version" ./bin/safedeps --json version)
 pkg_version=$(jq -r '.version' package.json)

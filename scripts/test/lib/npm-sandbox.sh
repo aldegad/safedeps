@@ -8,7 +8,7 @@
 #
 #   - The only packages are synthetic ones packed here (sd-victim, sd-approved,
 #     sd-swapped), with lifecycle scripts that only append a line to MARKS.
-#   - The registry is fixture-registry.mjs on 127.0.0.1, and npm's proxies
+#   - The registry is fixture-registry.py on 127.0.0.1, and npm's proxies
 #     point at a closed local port, so a request for anything else fails
 #     instead of leaving the machine. The caller checks the request log at the
 #     end (npm_sandbox_registry_was_local).
@@ -115,13 +115,16 @@ make_package sd-swapped 1.0.0
 make_package sd-swapped 1.0.1
 
 # --- local registry and advisory provider ----------------------------------------
-( cd "${tmp_root}" && exec -a "${CHILD_MARKER}" \
-    node "${ROOT_DIR}/scripts/test/fixture-registry.mjs" \
-    "${tmp_root}/registry.port" "${tmp_root}/tarballs" "${tmp_root}/registry.log" ) &
+# Each server writes what it saw of every connection, with times, to a trace
+# (lib/fixture_http.py), so a failed row's artifacts say whether a request
+# that went unanswered reached the server. --mark puts the child marker in the
+# server's arguments, where the sweep reads it.
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-registry.py" --mark "${CHILD_MARKER}" \
+    "${tmp_root}/registry.port" "${tmp_root}/tarballs" "${tmp_root}/registry.log" "${tmp_root}/registry.trace" ) &
 owned_children+=("$!")
 printf '{"vulnerable":[]}\n' > "${tmp_root}/osv-state.json"
-( cd "${tmp_root}" && exec -a "${CHILD_MARKER}" \
-    node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${tmp_root}/osv.port" "${tmp_root}/osv-state.json" ) &
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-provider.py" --mark "${CHILD_MARKER}" \
+    "${tmp_root}/osv.port" "${tmp_root}/osv-state.json" "${tmp_root}/osv.trace" ) &
 owned_children+=("$!")
 for _ in {1..50}; do
   [[ -s "${tmp_root}/registry.port" && -s "${tmp_root}/osv.port" ]] && break
@@ -166,7 +169,7 @@ export SAFEDEPS_OSV_API_URL="${osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${
   SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=0
 # The fixture registry is not the public registry, and the gate knows it: npm
 # fetches every registry.npmjs.org URL the lockfiles record from here
-# (fixture-registry.mjs), and without this the rebuild vouches for nothing:
+# (fixture-registry.py), and without this the rebuild vouches for nothing:
 # every install would be kept with its scripts withheld. This one
 # registry, by its exact URL, is let through by name (lib/npm/ask.sh
 # safedeps_npm_test_registry), and each hook run says so in advisory.log. Any
