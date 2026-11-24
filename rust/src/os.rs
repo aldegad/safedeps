@@ -133,15 +133,16 @@ impl HostTime {
     }
 }
 
-/// The host's monotonic clock, now. clock_gettime(2) fails only for a clock
-/// the system does not have, and std's Instant::now panics there too: the
-/// lock's wait read Instant before it read this clock.
-pub fn host_clock() -> HostTime {
+/// The host's monotonic clock, now, or the error clock_gettime(2) returned.
+/// It fails for a clock the system does not have. The caller answers that
+/// error as its own outcome, so a clock that cannot be read refuses what
+/// waited on it and does not end the process.
+pub fn host_clock() -> std::io::Result<HostTime> {
     let mut t = Timespec { tv_sec: 0, tv_nsec: 0 };
     if unsafe { clock_gettime(HOST_CLOCK, &mut t) } != 0 {
-        panic!("clock_gettime({HOST_CLOCK}) failed: {}", std::io::Error::last_os_error());
+        return Err(std::io::Error::last_os_error());
     }
-    HostTime((t.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(t.tv_nsec as u64))
+    Ok(HostTime((t.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(t.tv_nsec as u64)))
 }
 
 /// One try for flock(2)'s exclusive lock on the open file description of
@@ -185,27 +186,38 @@ fn past_the_wait(start: HostTime, wait: std::time::Duration, at: HostTime) -> bo
 /// granted: the start of this hold, never later than the lock was taken. The
 /// lock goes when the file is closed, by a drop or by the end of the process,
 /// so a holder that dies leaves no lock behind, as a lock directory does.
-pub fn flock_within(file: &std::fs::File, wait: std::time::Duration, mut holder: impl FnMut(HostTime) -> Option<HostTime>) -> Result<HostTime, crate::outcome::Outcome> {
+///
+/// `clock` is the clock the wait is counted on: `host_clock`, or a test's. A
+/// read of it that fails is the lock's outcome, with the error it returned,
+/// as a try that fails is. That holds for the read at the start, the one
+/// before a try and the one after it. Where the try before that read was
+/// granted, the lock is let go first. So no answer but a lock taken in time
+/// keeps the lock.
+pub fn flock_within(file: &std::fs::File, wait: std::time::Duration, mut clock: impl FnMut() -> std::io::Result<HostTime>, mut holder: impl FnMut(HostTime) -> Option<HostTime>) -> Result<HostTime, crate::outcome::Outcome> {
+    use crate::outcome::Outcome;
     use std::os::unix::io::AsRawFd;
-    let began = host_clock();
+    let returned = |e: std::io::Error| Outcome::Io(Err(e));
+    let began = clock().map_err(returned)?;
     let mut start = began;
     loop {
-        let tried = host_clock();
-        let granted = try_flock(file).map_err(|e| crate::outcome::Outcome::Io(Err(e)))?;
-        let ended = host_clock();
-        if let Some(held) = holder(ended) {
-            start = held.max(began);
-        }
-        if past_the_wait(start, wait, ended) {
-            if granted && unsafe { flock(file.as_raw_fd(), LOCK_UN) } != 0 {
-                return Err(crate::outcome::Outcome::Io(Err(std::io::Error::last_os_error())));
+        let tried = clock().map_err(returned)?;
+        let granted = try_flock(file).map_err(returned)?;
+        let judged = clock().map_err(returned).and_then(|ended| {
+            if let Some(held) = holder(ended) {
+                start = held.max(began);
             }
-            return Err(crate::outcome::Outcome::Deadline);
+            if past_the_wait(start, wait, ended) { Err(Outcome::Deadline) } else { Ok(()) }
+        });
+        match judged {
+            Ok(()) if granted => return Ok(tried),
+            Ok(()) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(refused) => {
+                if granted && unsafe { flock(file.as_raw_fd(), LOCK_UN) } != 0 {
+                    return Err(Outcome::Io(Err(std::io::Error::last_os_error())));
+                }
+                return Err(refused);
+            }
         }
-        if granted {
-            return Ok(tried);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10))
     }
 }
 
@@ -235,17 +247,17 @@ mod lock_tests {
         let dir = Scratch(scratch_dir("safedeps-os-lock-test").unwrap());
         let locked = dir.0.join("locked");
         let held = File::create(&locked).unwrap();
-        assert!(flock_within(&held, Duration::from_secs(10), |_| None).is_ok(), "another held the lock");
+        assert!(flock_within(&held, Duration::from_secs(10), host_clock, |_| None).is_ok(), "another held the lock");
         let mut held = Some(held);
         let mut began = None;
         let waiter = File::open(&locked).unwrap();
-        let answer = flock_within(&waiter, Duration::from_millis(5), |now| {
+        let answer = flock_within(&waiter, Duration::from_millis(5), host_clock, |now| {
             held = None;
             Some(*began.get_or_insert(now))
         });
         assert!(matches!(answer, Err(Outcome::Deadline)), "{answer:?}");
         let other = File::open(&locked).unwrap();
-        assert!(flock_within(&other, Duration::from_secs(10), |_| None).is_ok(), "the waiter kept the lock it was granted");
+        assert!(flock_within(&other, Duration::from_secs(10), host_clock, |_| None).is_ok(), "the waiter kept the lock it was granted");
     }
 
     #[test]
@@ -261,14 +273,57 @@ mod lock_tests {
         let dir = Scratch(scratch_dir("safedeps-os-lock-test").unwrap());
         let locked = dir.0.join("locked");
         let held = File::create(&locked).unwrap();
-        assert!(flock_within(&held, Duration::from_secs(10), |_| None).is_ok(), "another held the lock");
+        assert!(flock_within(&held, Duration::from_secs(10), host_clock, |_| None).is_ok(), "another held the lock");
         let mut held = Some(held);
         let waiter = File::open(&locked).unwrap();
-        let answer = flock_within(&waiter, Duration::from_millis(5), |now| match held.take() {
+        let answer = flock_within(&waiter, Duration::from_millis(5), host_clock, |now| match held.take() {
             Some(_) => Some(now),
             None => Some(HostTime(now.0.saturating_sub(1_000_000))),
         });
         assert!(answer.is_ok(), "{answer:?}");
+    }
+
+    #[test]
+    fn a_clock_that_cannot_be_read_is_the_locks_outcome_and_keeps_no_lock() {
+        // The wait reads its clock five times here: at its start (1), before
+        // the first try (2), after it (3), before the second (4) and after it
+        // (5). `held` refuses the first try and lets the lock go as the
+        // holder hears of it, so the second try is granted. Each read in
+        // turn fails. The answer is the clock's own error as the lock's
+        // outcome, the wait reads the clock no more, and another open of the
+        // file takes the lock at once. Read 5 falls after a try the lock
+        // granted: a wait that ended there without letting the lock go kept
+        // it, and the clock read panicked before this.
+        let dir = Scratch(scratch_dir("safedeps-os-lock-test").unwrap());
+        let locked = dir.0.join("locked");
+        File::create(&locked).unwrap();
+        for failing in 1..=5 {
+            let held = File::open(&locked).unwrap();
+            assert!(try_flock(&held).unwrap(), "read {failing}: another held the lock");
+            let mut held = Some(held);
+            let mut reads = 0;
+            let waiter = File::open(&locked).unwrap();
+            let answer = flock_within(
+                &waiter,
+                Duration::from_secs(10),
+                || {
+                    reads += 1;
+                    if reads == failing { Err(std::io::Error::from_raw_os_error(22)) } else { host_clock() }
+                },
+                |_| {
+                    held = None;
+                    None
+                },
+            );
+            match &answer {
+                Err(Outcome::Io(Err(e))) => assert_eq!(e.raw_os_error(), Some(22), "read {failing}: {answer:?}"),
+                _ => panic!("read {failing}: {answer:?}"),
+            }
+            assert_eq!(reads, failing, "read {failing}: the wait read the clock again after a read failed");
+            drop(held);
+            let other = File::open(&locked).unwrap();
+            assert!(try_flock(&other).unwrap(), "read {failing}: the waiter kept the lock");
+        }
     }
 
     #[test]

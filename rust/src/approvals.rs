@@ -60,7 +60,9 @@
 //! overlap, so commits that overlap wait their turn, however many there are,
 //! and none is refused for the crowd, while a waiter that waited past
 //! LOCK_WAIT behind one hold is refused: nothing is written or read without
-//! the lock.
+//! the lock. A read of the clock that fails is a lock that failed, with the
+//! error the clock returned: the waiter lets go of a lock it was granted
+//! before that read, and it is refused.
 //! A hold writes its turn after it took the lock, so for a moment the turn is
 //! still the last hold's, longer where a hold stalls between its lock and its
 //! turn, and a hold that cannot write its turn leaves the last one standing.
@@ -668,7 +670,7 @@ fn read_turn(dir: &Path) -> Option<Turn> {
 /// last hold's.
 fn lock_store(dir: &Path, file: &fs::File, wait: Duration) -> Result<(), Fault> {
     let mut first = None;
-    let began = os::flock_within(file, wait, |now| {
+    let began = os::flock_within(file, wait, os::host_clock, |now| {
         let turn = read_turn(dir)?;
         let was = *first.get_or_insert(turn);
         (turn != was && turn.began <= now).then_some(turn.began)
@@ -1054,7 +1056,7 @@ mod tests {
     /// written, where another holds the lock. A wait of zero is no such try:
     /// a try the lock granted ends after the wait began, so past it.
     fn take_at_once(dir: &Path, file: &fs::File) -> bool {
-        let tried = os::host_clock();
+        let tried = os::host_clock().unwrap();
         let took = os::try_flock(file).unwrap();
         if took {
             write_turn(dir, tried).unwrap();
@@ -1627,7 +1629,7 @@ mod tests {
         let d = scratch();
         drop(holder(&d.0));
         let held = bare_hold(&d.0);
-        put_turn(&d.0, Turn { began: os::host_clock().after(wait * 9 / 10) }.line().as_bytes());
+        put_turn(&d.0, Turn { began: os::host_clock().unwrap().after(wait * 9 / 10) }.line().as_bytes());
         let (answered, answer) = commit_behind(&d.0, held, wait, wait * 3 / 2, || ());
         assert!(answered, "the commit answered only once the hold let the lock go: {answer:?}");
         assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
@@ -1644,7 +1646,7 @@ mod tests {
         let held = holder(&d.0);
         let (answered, answer) = commit_behind(&d.0, held, wait, Duration::from_secs(2), || {
             std::thread::sleep(wait / 5);
-            put_turn(&d.0, Turn { began: os::host_clock().after(Duration::from_secs(3600)) }.line().as_bytes());
+            put_turn(&d.0, Turn { began: os::host_clock().unwrap().after(Duration::from_secs(3600)) }.line().as_bytes());
         });
         assert!(answered, "the commit answered only once the hold let the lock go: {answer:?}");
         assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
@@ -1655,9 +1657,9 @@ mod tests {
         // The line a hold writes: its time read just before the lock, and the
         // check that a line read while a hold writes over it fails.
         let d = scratch();
-        let before = os::host_clock();
+        let before = os::host_clock().unwrap();
         drop(holder(&d.0));
-        let after = os::host_clock();
+        let after = os::host_clock().unwrap();
         let bytes = turn_bytes(&d.0);
         assert_eq!(bytes.len(), Turn::LEN);
         let turn = Turn::parse(bytes.as_slice().try_into().unwrap()).expect("a whole turn");
@@ -1797,10 +1799,10 @@ mod tests {
         let (staged, entry) = stage(dir, 1, "entry of 1");
         let home = dir.to_owned();
         let waiter = std::thread::spawn(move || {
-            let called = os::host_clock();
+            let called = os::host_clock().unwrap();
             let mut err = Vec::new();
             let answer = commit(&home, &approval(1, &staged, &entry, &rec(1), &h(1)), &mut err);
-            (called, answer, err, os::host_clock())
+            (called, answer, err, os::host_clock().unwrap())
         });
         std::thread::sleep(Duration::from_secs(1));
         let next = fs::OpenOptions::new().read(true).append(true).open(path(dir)).unwrap();
@@ -1808,8 +1810,8 @@ mod tests {
         lock_store(dir, &next, LOCK_WAIT).unwrap();
         let turn = read_turn(dir).expect("the hold's turn");
         let until = turn.began.after(held_for);
-        std::thread::sleep(Duration::from_nanos(until.0.saturating_sub(os::host_clock().0)).saturating_sub(Duration::from_millis(40)));
-        while os::host_clock() < until {
+        std::thread::sleep(Duration::from_nanos(until.0.saturating_sub(os::host_clock().unwrap().0)).saturating_sub(Duration::from_millis(40)));
+        while os::host_clock().unwrap() < until {
             std::hint::spin_loop();
         }
         let answered = waiter.is_finished();
