@@ -366,6 +366,7 @@ pub enum WallRole {
     ConfirmWarningsHeader,
     AcceptedRiskHeader,
     AcceptedRiskEntry,
+    AcceptedSourceEntry,
     ApprovalRecord,
     JournalOpened,
     JournalStage,

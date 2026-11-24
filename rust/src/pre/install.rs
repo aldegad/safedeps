@@ -44,6 +44,24 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         return out
     }
     let codex=jq::stream_has(&call.input,"turn_id");
+    let source=match accept_source(call,run,read) {
+        Ok(source)=>source,
+        Err(why)=>{
+            if undecided(call,run,&mut out){return out}
+            log_command(call,&cat(&[b"pre-guard DENY: SAFEDEPS_ACCEPT_SOURCE is in this command and does not count (",&why,b")."]));
+            deny(&mut out,&cat(&[b"safedeps: SAFEDEPS_ACCEPT_SOURCE is in this command and does not count: ",&why,b". The install was not run. It counts only as an assignment in front of each npm install, `SAFEDEPS_ACCEPT_SOURCE='<https URL> <who decided and why>' npm install <https URL>`, with nothing beside the installs but cd, pushd, popd, echo, printf, export, true, :, test or [. Fix the command, or run it without the name."]));
+            return out
+        }
+    };
+    if source.is_some()&&codex {
+        if undecided(call,run,&mut out){return out}
+        log_command(call,b"pre-guard DENY: SAFEDEPS_ACCEPT_SOURCE does not count on Codex, which cannot withhold install scripts.");
+        deny(&mut out,notices::SOURCE_CODEX.as_bytes());
+        return out
+    }
+    if let Some((url,reason))=&source {
+        log_command(call,&cat(&[b"pre-guard: SAFEDEPS_ACCEPT_SOURCE is set for this npm install (",url,b"; ",reason,b"). The post-install gate keeps a package this install brings from that URL only where the lockfile records it with an integrity, and records it in ",crate::sources::path(&call.guard_dir).as_os_str().as_bytes(),b"."]));
+    }
     let accept=match accept_risk(call,run,read) {
         Ok(accept)=>accept,
         Err(why)=>{
@@ -115,7 +133,8 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
     for (flag,message) in notices::INERT {
         if if *flag=="downgrade"{flags==b"downgrade"}else{flags.split(|b|*b==b' ').any(|s|s==flag.as_bytes())}{log_command(call,message.as_bytes())}
     }
-    let record=pending::Record{cwd:&cwd,project_from:from,npm_install,runner_only,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why,accept_risk:accept.as_deref()};
+    let record=pending::Record{cwd:&cwd,project_from:from,npm_install,runner_only,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why,accept_risk:accept.as_deref(),
+        accept_source:source.as_ref().map(|(url,reason)|(url.as_slice(),reason.as_slice()))};
     if let Err(error)=pending::write(call,&snap,&record){out.warn(format!("safedeps: could not write this install's pending state: {}",error).as_bytes());out.code=1;return out}
     if flags.starts_with(b"rewrite")&&!command.is_empty() {
         let unread=flags.split(|b|*b==b' ').any(|s|matches!(s,b"unverified"|b"unread"|b"release"));
@@ -154,15 +173,35 @@ fn registry_notice(call:&Call,read:&Readings) {
 }
 
 /// The reason `SAFEDEPS_ACCEPT_RISK` gives for this command, where it
-/// counts: every reading reads the same value (`Run::accept_risk`), and every
+/// counts (`prefix_override`).
+fn accept_risk(call:&Call,run:&mut Run,read:&Readings)->Result<Option<W>,W> {
+    prefix_override(call,run,read,|r,c|r.accept_risk(c))
+}
+
+/// The URL and the reason `SAFEDEPS_ACCEPT_SOURCE` gives for this command,
+/// where it counts (`prefix_override`): the value's first word is one URL an
+/// entry can name (`sources::url_acceptable`), and the words after it, the
+/// reason, are not blank.
+fn accept_source(call:&Call,run:&mut Run,read:&Readings)->Result<Option<(W,W)>,W> {
+    let Some(value)=prefix_override(call,run,read,|r,c|r.accept_source(c))? else{return Ok(None)};
+    let (url,reason)=value.split_once_byte(b' ');
+    crate::sources::url_acceptable(url).map_err(|why|cat(&[b"the URL it names (",url,b") is not one it can accept: ",why.as_bytes()]))?;
+    let reason=&reason[reason.iter().position(|b|*b!=b' ').unwrap_or(reason.len())..];
+    if reason.is_empty(){return Err(b"its value names a URL and no reason after it: who decided and why".to_vec())}
+    Ok(Some((url.to_vec(),reason.to_vec())))
+}
+
+/// The value an override a person puts in front of each npm install gives
+/// for this command, where it counts: every reading reads the same value
+/// (`read`, one of `Run::accept_risk` and `Run::accept_source`), and every
 /// npm install in the command lands where npm records it, so the effect gate
 /// reads what the override keeps. Ok(None) where the command does not hold
 /// the name; Err with the reason where it holds it and it does not count.
-fn accept_risk(call:&Call,run:&mut Run,read:&Readings)->Result<Option<W>,W> {
+fn prefix_override<'c>(call:&Call,run:&mut Run<'c>,read:&Readings,reader:impl Fn(&mut Run<'c>,&[u8])->core::AcceptRisk)->Result<Option<W>,W> {
     let mut seen:Option<core::AcceptRisk>=None;
     for &reading in &read.set {
         run.reading=Some(reading);
-        let answer=run.accept_risk(&call.command);
+        let answer=reader(run,&call.command);
         run.reading=None;
         match &seen {
             None=>seen=Some(answer),

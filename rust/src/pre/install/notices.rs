@@ -11,3 +11,7 @@ pub const INERT:&[(&str,&str)] = &[
     ("unverified", r#"pre-guard: an npm install in this command holds a word the shell decides at run time (a tilde, a brace, $x, $(...), a glob or another expansion), which can set ignore-scripts, take the next word as its value, or end npm's options; safedeps put --ignore-scripts both right after the verb and after the last argument, and could not read whether npm keeps it true, so the install's scripts may run before the effect gate verifies."#),
     ("unread", r#"pre-guard: text of this command that safedeps did not read as a command holds an npm install verb, or an npm inside a word the shell computes, or a command word or npm's command in it is one the shell computes; safedeps put --ignore-scripts right after each npm install verb in a script word or a piped heredoc body that a blank follows or that ends its line, where v2.17.2 put it, and none elsewhere in that text."#),
 ];
+/// SAFEDEPS_ACCEPT_SOURCE on Codex: an install it would keep brings bytes
+/// from outside the public registry, and on Codex their install scripts run
+/// during the install, before any hook can judge them.
+pub const SOURCE_CODEX:&str = "safedeps: SAFEDEPS_ACCEPT_SOURCE does not count on Codex. Codex cannot withhold install scripts, so the scripts of a package from outside the public registry would run before any check could judge it. The install was not run. Accept the source where the install runs with --ignore-scripts (Claude Code); once the ledger holds it, the same bytes install here as an approved package.";

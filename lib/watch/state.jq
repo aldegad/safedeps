@@ -17,6 +17,9 @@ def st_closed: "closed";
 def closed_seen_fixed: "seen_fixed";
 def closed_withdrawn: "advisory_withdrawn";
 def closed_retired: "root_retired";
+# An advisory of a package an accepted-source entry covers, which the entry
+# names, with KEV answering that it is not listed (lib/watch/lockfiles.sh).
+def closed_source_accepted: "source_accepted";
 # Runtime finding states (lib/watch/runtime.sh writes them).
 def rt_update_available: "update_available";
 def rt_current_as_of: "current_as_of";
@@ -251,11 +254,13 @@ def summary:
      pending_events: ([.events[] | select(.status == ev_pending)] | length),
      claimed_events: ([.events[] | select(.status == ev_claimed)] | length),
      unknown_events: ([.events[] | select(.status == ev_unknown)] | length),
+     accepted_sources: ([$lf[] | select(.kind == "npm") | .accepted[]? | .package + "@" + .version] | unique | length),
      agent_runtime_stale: (if $rt.built == true then $rt.stale else false end)}
   | . + {complete: (.population == "fresh" and .unmeasured == 0 and .blocked == 0),
          line: ("population \(.population) \(.population_count); roots walked \(.roots_walked)/\(.roots_walked + .roots_walk_incomplete) (\(.roots_walk_incomplete) incomplete); osv measured \(.osv_measured); native audit \(.native_audit); unmeasured \(.unmeasured)"
                 + (if .unmeasured > 0 then " (" + (.unmeasured_by_kind | to_entries | map("\(.key) \(.value)") | join(", ")) + ")" else "" end)
                 + "; blocked \(.blocked); open \(.open) (fixable \(.fixable), triage \(.triage), no fix \(.no_fix))"
+                + (if .accepted_sources > 0 then "; accepted sources \(.accepted_sources)" else "" end)
                 + (if .agent_runtime_stale == null then
                      "; agent runtime stale unknown" + (if ($rt.error // "") == "" then "" else " (\($rt.error))" end)
                    else "" end))};

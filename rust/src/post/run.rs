@@ -1,6 +1,6 @@
 //! The effect hook's call ordering. File selection and facts belong to the
 //! domain modules; this is where their ordering becomes a single judgment.
-use super::{call::{Call, Record}, effect, heuristics, journal::Journal, jv, mark,
+use super::{accepted::{self, Sources}, call::{Call, Record}, effect, heuristics, journal::Journal, jv, mark,
     npm::{self, Npm}, report::{self, Report, cat}, rollback::{Before, Rollback}, sh, snapshot,
     trace::{self, Install}};
 use crate::{callid::record as rec, os, state};
@@ -59,7 +59,9 @@ fn backstop(call: &mut Call, journal: &Journal, input: &[u8], until: Instant) ->
     }
     if !call.backstop_trace() { return Ok(None) }
     let mut reasons = Vec::new();
-    effect::check(&call.store, &mut reasons, None, until);
+    let mut sources = Sources::read(&call.store.home, &call.store.project, None, until);
+    effect::check(&call.store, &mut reasons, None, &mut sources, until);
+    sources.reasons(&mut reasons);
     if reasons.is_empty() {
         state::log_advisory(&call.store.home, &cat(&[b"post-verify BACKSTOP clean: ", call.record.subject(), b"; the npm closure in ", sh::bytes(&call.store.project), b" passed the command-independent npm closure check."]));
         return Ok(None)
@@ -101,6 +103,50 @@ fn accept_risk(call: &Call) -> Option<W> {
         Ok(crate::json::Value::Str(reason)) if reason.iter().any(|b| *b != b' ') => Some(reason.clone()),
         _ => None,
     }
+}
+
+/// The URL and the reason `SAFEDEPS_ACCEPT_SOURCE` gave for this call, from
+/// this call's own pending record (`accept_source`), where the pre-guard
+/// found that it counts. As with the accepted risk, a record that does not
+/// hold both as strings, the URL one an entry can name and the reason not
+/// blank, holds none.
+fn accept_source(call: &Call) -> Option<(W, W)> {
+    let v = jv::field(&call.current, rec::ACCEPT_SOURCE).ok()?;
+    let url = jv::text(jv::field(v, rec::SOURCE_URL).ok()?)?;
+    let reason = jv::text(jv::field(v, rec::SOURCE_REASON).ok()?)?;
+    (crate::sources::url_acceptable(url).is_ok() && reason.iter().any(|b| *b != b' ')).then(|| (url.to_vec(), reason.to_vec()))
+}
+
+const SOURCE_NOT_COVERED: &[u8] = b"SAFEDEPS_ACCEPT_SOURCE was set for this install, and it accepts a source only for an install no other check rolls back, so no entry was written";
+
+/// The entries this call's `SAFEDEPS_ACCEPT_SOURCE` makes, written before
+/// the install is kept and before anything is rebuilt over them: an install
+/// whose entries cannot be written is not kept. The one line that says so is
+/// said here, in the install that makes the entries, and in no later one.
+fn accept_sources(call: &Call, sources: &mut Sources, report: &mut Report, until: Instant) -> Result<(), W> {
+    let Some((url, reason)) = sources.bypass.clone() else { return Ok(()) };
+    let home = call.store.home.clone();
+    let project = sh::bytes(&call.store.project).to_vec();
+    let entries = sources.to_write(&project);
+    if entries.is_empty() {
+        state::log_advisory(&home, &cat(&[b"post-verify: SAFEDEPS_ACCEPT_SOURCE named ", &url, b" for an install in ", &project, b", and neither npm record there holds it, so no entry was written."]));
+        return Ok(())
+    }
+    let ledger = crate::sources::path(&home);
+    let id = jv::field(&call.current, rec::TOOL_USE_ID).ok().and_then(jv::text);
+    let accepts: Vec<_> = entries.iter().map(|entry| crate::sources::Accept { entry, tool_use_id: id }).collect();
+    if let Err(fault) = crate::sources::accept(&home, &accepts, accepted::wait(until)) {
+        return Err(cat(&[b"SAFEDEPS_ACCEPT_SOURCE was set for this install, and the accepted-source ledger ", sh::bytes(&ledger), b" could not take its entries (", &fault.text(), b"), so the install was not kept"]))
+    }
+    let packages: Vec<W> = entries.iter().map(|e| {
+        let ids = if e.advisories.is_empty() { b"no advisory".to_vec() } else { cat(&[b"advisories accepted: ", &e.advisories.join(b", ".as_slice())]) };
+        cat(&[&e.package, b"@", &e.version, b" (", &ids, b")"])
+    }).collect();
+    let packages = packages.join(b"; ".as_slice());
+    report.say(cat(&[b"Accepted source: ", &url, b" for ", &packages, b", recorded in ", sh::bytes(&ledger)]));
+    state::log_advisory(&home, &cat(&[b"post-verify ACCEPTED SOURCE in ", &project, b": ", &url, b" for ", &packages, b", under SAFEDEPS_ACCEPT_SOURCE (", &reason, b"); entries written to ", sh::bytes(&ledger), b". Command: ", &call.command]));
+    sources.written = entries;
+    Ok(())
 }
 
 pub const ACCEPTED_FACT: &[u8] = b"SAFEDEPS_ACCEPT_RISK kept this install, which no check verified";
@@ -163,14 +209,22 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
     let mut confirm = Vec::new();
     let accept = accept_risk(call);
     let mut accepted = effect::Accepted::default();
+    let mut sources = Sources::read(&call.store.home, &call.store.project, accept_source(call), until);
     npm.collect(&call.store, &mut reasons);
-    effect::check(&call.store, &mut reasons, accept.as_ref().map(|_| &mut accepted), until);
+    effect::check(&call.store, &mut reasons, accept.as_ref().map(|_| &mut accepted), &mut sources, until);
+    sources.reasons(&mut reasons);
     heuristics::scripts(&call.store, &npm.nodes, &mut reasons)?;
     heuristics::lockfile(&call.store, &mut reasons);
-    npm.record(&call.store, &call.current, &trace, &mut report, until);
-    npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm, until);
+    npm.record(&call.store, &call.current, &trace, &mut report, until, &sources);
+    npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm, until, &sources);
     if reasons.is_empty() { heuristics::binaries(&call.store, &mut reasons, post_started); }
     let mut unrecorded = false;
+    let mut unwritten = false;
+    if reasons.is_empty() {
+        if let Err(why) = accept_sources(call, &mut sources, &mut report, until) {
+            state::log_advisory(&call.store.home, &cat(&[b"post-verify: ", &why, b"."])); reasons.push(why); unwritten = true;
+        }
+    }
     if reasons.is_empty() && !accepted.problems.is_empty() {
         let reason = accept.clone().unwrap_or_default();
         match keep(call, &mut trace, &mut report, std::mem::take(&mut confirm), &reason, &accepted, input) {
@@ -185,13 +239,19 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
             reasons.extend(std::mem::take(&mut accepted.problems));
             if !unrecorded { reasons.push(NOT_COVERED.to_vec()); }
         }
+        if sources.bypass.is_some() && sources.written.is_empty() && !unwritten {
+            match sources.bypass_unmatched() {
+                Some(url) => reasons.push(cat(&[b"SAFEDEPS_ACCEPT_SOURCE was set for this install and names ", url, b", which neither npm record holds, so it accepted nothing"])),
+                None => reasons.push(SOURCE_NOT_COVERED.to_vec()),
+            }
+        }
         call.store.discard();
         let mut target = snapshot::confirmed(&call.store.home, &call.store.hash).map_err(|_| 0)?;
         if target.is_empty() || !sh::is_file(&call.store.path(&target, b"meta.json")) { target = call.store.id.clone(); }
         return rollback(call, journal, &mut trace, &mut report, target, &reasons.join(b"; ".as_slice()), input, false).map(Some)
     }
     report.lines.extend(confirm);
-    npm.rebuild(&call.store, &call.current, &mut trace, input, &mut report, until);
+    npm.rebuild(&call.store, &call.current, &mut trace, input, &mut report, until, &sources);
     call.store.confirm(&mut report).map_err(|_| 0)?;
     call.store.cleanup().map_err(|_| 0)?;
     if report.lines.is_empty() { return Ok(None) }

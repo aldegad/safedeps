@@ -62,6 +62,10 @@ pub mod record {
     pub const NPM_FETCH: &str = "npm_fetch";
     pub const TOOL_USE_ID: &str = "tool_use_id";
     pub const ACCEPT_RISK: &str = "accept_risk";
+    /// An object of `url` and `reason`, or null.
+    pub const ACCEPT_SOURCE: &str = "accept_source";
+    pub const SOURCE_URL: &str = "url";
+    pub const SOURCE_REASON: &str = "reason";
     /// In the install record's `npm_trace`, and in the backstop entry.
     pub const BASELINE: &str = "baseline";
     pub const INODES: &str = "inodes";
@@ -94,7 +98,7 @@ pub mod record {
 #[test]
 fn record_names_are_spelled_once() {
     let names = [record::SNAPSHOT_ID, record::PROJECT_DIR, record::DIR_HASH, record::PROJECT_DIR_FROM, record::NPM_INSTALL,
-        record::RUNNER_ONLY, record::NPM_TRACE, record::NPM_UNATTRIBUTABLE, record::NPM_FETCH, record::ACCEPT_RISK,
+        record::RUNNER_ONLY, record::NPM_TRACE, record::NPM_UNATTRIBUTABLE, record::NPM_FETCH, record::ACCEPT_RISK, record::ACCEPT_SOURCE,
         record::BASELINE, record::INODES, record::KEY, record::RESOLUTION, record::CLOCKS, record::ENTRIES,
         record::SECONDS, record::SUBSECOND, record::RECORDS[1]];
     for (file, text) in [("pre/pending.rs", include_str!("pre/pending.rs")), ("pre.rs", include_str!("pre.rs")),

@@ -9,6 +9,9 @@ type Records = BTreeMap<W, Vec<Value>>;
 type Nodes = BTreeMap<W, Value>;
 type Bundles = BTreeMap<W, Vec<W>>;
 pub type Fetch<'a> = &'a dyn Fn(&Value) -> Result<Vec<Value>, ()>;
+/// Whether an entry of the accepted-source ledger covers the record at a key
+/// (`accepted::Sources::record_covered`).
+pub type Covered<'a> = &'a dyn Fn(&[u8], &Value) -> bool;
 
 fn alt(v: &Value, default: &Value) -> Value { if jv::truthy(v) { v.clone() } else { default.clone() } }
 fn f<'a>(v: &'a Value, key: &str) -> Result<&'a Value, ()> { jv::field(v, key) }
@@ -30,7 +33,7 @@ fn public(rec: &Value) -> Result<bool, ()> { Ok(matches!(f(rec,"resolved")?, Val
 
 struct Judge<'a> {
     records: &'a Records, nodes: &'a Nodes, bundles: Option<&'a Bundles>, withheld: &'a Value,
-    problems: Fetch<'a>, memo: BTreeMap<W, Option<W>>,
+    problems: Fetch<'a>, accepted: Covered<'a>, memo: BTreeMap<W, Option<W>>,
 }
 impl Judge<'_> {
     fn problems(&self, rec: &Value) -> Result<Vec<Value>, ()> {
@@ -62,12 +65,18 @@ impl Judge<'_> {
             return Ok(unrecorded(&cat(&[b" on disk, the lockfile records ",&join_unique(names,b" or ")])));
         }
         if !jv::in_tree(key) { return Ok(Some(cat(&[b"candidate\t",key,b"\t",key,b" (",&here,b")"]))) }
+        // A record an accepted-source entry covers is the person's release
+        // of exactly those bytes under exactly that URL: it counts as an
+        // approved one from the public registry, and a record of withheld
+        // bytes does not hold it back. The same bytes under another URL are
+        // not covered, and stay held.
         let mut all_source = true;
-        for r in recs { all_source &= self.source(r)?; }
+        for r in recs { all_source &= (self.accepted)(key, r) || self.source(r)?; }
         if all_source {
             let mut held = false;
             let mut missing = false;
             for r in recs {
+                if (self.accepted)(key, r) { continue }
                 let tokens = jv::tokens(r); missing |= tokens.is_empty();
                 for t in tokens { held |= !matches!(jv::field_bytes(self.withheld,&t)?,Value::Null); }
             }
@@ -142,7 +151,7 @@ fn records(dir: &Path) -> Result<Records, ()> {
 }
 
 /// Every line of the bash tree judgment, before shell command substitution.
-pub fn judge(dir: &Path, home: &Path, query: &jv::Stream, withheld: &Value, problems: Fetch<'_>, origins: Fetch<'_>) -> Result<Vec<W>, ()> {
+pub fn judge(dir: &Path, home: &Path, query: &jv::Stream, withheld: &Value, problems: Fetch<'_>, origins: Fetch<'_>, accepted: Covered<'_>) -> Result<Vec<W>, ()> {
     if query.failed || query.values.len()!=1 { return Err(()) }
     let Value::Arr(items)=&query.values[0] else { return Err(()) };
     let mut locations=Vec::new(); let mut nodes=Nodes::new();
@@ -154,7 +163,7 @@ pub fn judge(dir: &Path, home: &Path, query: &jv::Stream, withheld: &Value, prob
         locations.push(k.clone()); nodes.insert(k.clone(),node.clone());
     }
     let records=records(dir)?;
-    let mut j=Judge{records:&records,nodes:&nodes,bundles:None,withheld,problems,memo:BTreeMap::new()};
+    let mut j=Judge{records:&records,nodes:&nodes,bundles:None,withheld,problems,accepted,memo:BTreeMap::new()};
     let mut nested=Vec::new();
     for loc in &locations { if j.verdict(loc)?.is_some_and(|l| l.starts_with(b"nested\t")) { nested.push(loc.clone()); } }
     let bundles=read_bundles(dir,&nested).unwrap_or_default();

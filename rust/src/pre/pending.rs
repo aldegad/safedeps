@@ -26,6 +26,11 @@ pub struct Record<'a> {
     /// install.rs). It belongs to this call's record alone, so the override
     /// reaches this command's post hook and no other call.
     pub accept_risk:Option<&'a [u8]>,
+    /// The URL and the reason a `SAFEDEPS_ACCEPT_SOURCE` assignment in front
+    /// of this call's npm installs gives, where it counts (`accept_source` in
+    /// install.rs). Like the accepted risk, it belongs to this call's record
+    /// alone, and the post hook makes the ledger entry from it.
+    pub accept_source:Option<(&'a [u8],&'a [u8])>,
 }
 fn inode(path:&Path)->String {
     // ls -di names the link's own inode, but only when its target exists.
@@ -60,6 +65,7 @@ pub fn write(call:&Call,snapshot:&Snapshot,record:&Record)->io::Result<PathBuf> 
         (rec::NPM_TRACE,trace),(rec::NPM_UNATTRIBUTABLE,jq::arg(record.attribution)),
         (rec::NPM_FETCH,fetch),(rec::TOOL_USE_ID,id.as_deref().map(jq::s).unwrap_or(jq::J::Null)),
         (rec::ACCEPT_RISK,record.accept_risk.map(jq::arg).unwrap_or(jq::J::Null)),
+        (rec::ACCEPT_SOURCE,record.accept_source.map(|(url,reason)|jq::obj(vec![(rec::SOURCE_URL,jq::arg(url)),(rec::SOURCE_REASON,jq::arg(reason))])).unwrap_or(jq::J::Null)),
     ]);
     let path=os::path(&cat(&[base.as_os_str().as_bytes(),b".json"]));
     state::write_state_file(&path,jq::pretty(&value).as_bytes())?;

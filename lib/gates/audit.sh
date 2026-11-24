@@ -25,6 +25,14 @@ set -euo pipefail
 # availability failure anywhere (2); else clean (0). No ecosystem is skipped
 # silently (no-silent-fallback invariant).
 
+# The core and the npm readers this CLI uses, for the accepted-source ledger
+# (accepted_out below).
+SAFEDEPS_REPO_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../providers/providers.sh
+source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
+# shellcheck source=../npm/closure.sh
+source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
+
 REPO_ROOT=""
 AUDIT_LEVEL="${SAFEDEPS_AUDIT_LEVEL:-${SAFEDEPS_NPM_AUDIT_LEVEL:-${KUMA_NPM_AUDIT_LEVEL:-moderate}}}"
 ECOS_REQUESTED=()
@@ -156,6 +164,92 @@ failed_with_no_finding() {
   [ "$1" -ne 0 ] && ! printf '%s' "$2" | jq -e 'any(.[]; . != 0)' >/dev/null 2>&1
 }
 
+# --- accepted sources (npm) ---------------------------------------------------
+# A vulnerable package that the accepted-source ledger covers is taken out of
+# npm's counts and named on one line that is not a warning. It is covered when
+# every lock record of it names an entry's URL, integrity, name and version
+# (SAFEDEPS_NPM_ACCEPTED_JQ, lib/npm/closure.sh), and every advisory npm names
+# for it is one its entries name. npm names an advisory by its GitHub URL, so
+# the id is the URL's last part. A KEV listing is never covered: each covered
+# package is asked of OSV and the KEV catalog (safedeps_providers_query), and
+# one that KEV lists, or that cannot be asked, is counted and said so. A
+# package npm counts only for its dependencies (every `via` a name) is taken
+# out once all of those are. The ledger is read through the core
+# (`safedeps-core sources index`); one that cannot be read takes nothing out
+# and says so. $1 is npm's report, $2 its counts, $3 the lockfile; the counts
+# left are printed.
+accepted_out() {
+  local report="$1" counts="$2" lock="$3" entries covered own pairs n v answer dropped='[]' out
+  if ! printf '%s' "$report" | jq -e '(.vulnerabilities | type) == "object" and (.vulnerabilities | length) > 0' >/dev/null 2>&1; then
+    printf '%s' "$counts"; return 0
+  fi
+  if ! sf_core 2>/dev/null \
+    || ! entries="$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources index 2>/dev/null | jq -ce '.entries | arrays')"; then
+    note "npm: the accepted-source ledger could not be read, so every advisory npm reported is counted."
+    printf '%s' "$counts"; return 0
+  fi
+  if [ "$entries" = '[]' ]; then printf '%s' "$counts"; return 0; fi
+  # The packages an entry covers, each with the versions its records hold.
+  if ! covered="$(jq -c --arg root "$REPO_ROOT" --arg rel "$lock" --argjson entries "$entries" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "$lock" | jq -sc .)" \
+    || ! own="$(printf '%s' "$report" | jq -c --slurpfile lock "$lock" --argjson covered "$covered" "${SAFEDEPS_AUDIT_ACCEPTED_JQ}"'
+      [$v | keys[] | select(covered(.)) | {name: ., versions: versions(.)}]')" \
+    || ! pairs="$(printf '%s' "$own" | jq -r '.[] | .name as $n | .versions[] | [$n, .] | @tsv')"; then
+    note "npm: the accepted-source ledger could not be compared with ${lock}, so every advisory npm reported is counted."
+    printf '%s' "$counts"; return 0
+  fi
+  while IFS=$'\t' read -r n v; do
+    [ -n "$n" ] || continue
+    if answer="$(safedeps_providers_query npm "$n" "$v" 2>/dev/null)" \
+      && printf '%s' "$answer" | jq -e '.kev.exploited == false' >/dev/null 2>&1; then
+      continue
+    fi
+    if printf '%s' "$answer" | jq -e '.kev.exploited == true' >/dev/null 2>&1; then
+      note "npm: ${n}@${v} has an accepted source, and CISA KEV lists one of its advisories, so it is counted."
+    else
+      note "npm: ${n}@${v} has an accepted source, and OSV or the KEV catalog could not be asked about it, so it is counted."
+    fi
+    if ! dropped="$(printf '%s' "$dropped" | jq -c --arg n "$n" '. + [$n]')"; then
+      note "could not read the npm audit counts."
+      return 1
+    fi
+  done <<< "$pairs"
+  if ! out="$(printf '%s' "$report" | jq -c --slurpfile lock "$lock" --argjson covered "$covered" --argjson dropped "$dropped" --argjson counts "$counts" "${SAFEDEPS_AUDIT_ACCEPTED_JQ}"'
+      def step($t): [$v | keys[] | . as $n
+        | ([($v[$n].via // [])[] | objects] | length) as $objects
+        | ([($v[$n].via // [])[] | strings]) as $deps
+        | select(($objects > 0 or ($deps | length) > 0)
+            and ($objects == 0 or (covered($n) and ($dropped | index([$n]) | not)))
+            and all($deps[]; . as $d | $t | index([$d]) != null))];
+      def fix($t): step($t) as $u | if $u == $t then $t else fix($u) end;
+      fix([]) as $taken
+      | {counts: (reduce $taken[] as $n ($counts; ($v[$n].severity // "") as $s
+                   | if has($s) then .[$s] -= 1 | (if has("total") then .total -= 1 else . end) else . end)),
+         taken: [$taken[] | . as $n | (versions($n) | join(", ")) as $vers
+                 | ([($v[$n].via // [])[] | objects | (.url // "") | split("/") | last] | unique) as $ids
+                 | $n + "@" + $vers + (if ($ids | length) > 0 then " (" + ($ids | join(", ")) + ")" else "" end)]}')"; then
+    note "npm: the accepted-source ledger could not be compared with ${lock}, so every advisory npm reported is counted."
+    printf '%s' "$counts"; return 0
+  fi
+  if printf '%s' "$out" | jq -e '.taken | length > 0' >/dev/null 2>&1; then
+    note "npm: accepted sources (safedeps sources), not counted: $(printf '%s' "$out" | jq -r '.taken | join("; ")')"
+  fi
+  printf '%s' "$out" | jq -c '.counts'
+}
+
+# Definitions both reads of npm's report share: $v is its vulnerabilities,
+# versions($n) the versions npm's nodes of $n hold in the lockfile, and
+# covered($n) that every node of $n is a package an entry covers, and every
+# advisory npm names for $n directly is one those entries name.
+SAFEDEPS_AUDIT_ACCEPTED_JQ='
+  ($lock[0].packages // {}) as $records
+  | ($covered | map({key: (.package + "@" + .version), value: .advisories}) | from_entries) as $cov
+  | .vulnerabilities as $v
+  | def versions($n): [($v[$n].nodes // [])[] | ($records[.] // {}) | .version // empty] | unique;
+    def covered($n): [($v[$n].nodes // [])[] | ($records[.] // {}) | $cov[$n + "@" + (.version // "")]] as $a
+      | ($a | length) > 0 and all($a[]; . != null)
+        and all(($v[$n].via // [])[] | objects; ((.url // "") | split("/") | last) as $id | all($a[]; index([$id]) != null));
+'
+
 # --- per-ecosystem audits -----------------------------------------------------
 
 # npm and pnpm share the npm v6/v7 report shape: .metadata.vulnerabilities holds
@@ -175,6 +269,14 @@ audit_npm_like() {
   if ! counts="$(printf '%s' "$report" | jq -c '.metadata.vulnerabilities')" || failed_with_no_finding "$audit_rc" "$counts"; then
     note "could not reach the advisory database via ${eco} (offline or registry error)."
     return 2
+  fi
+  if [ "$eco" = npm ]; then
+    local lock=package-lock.json
+    [ -f "$lock" ] || lock=npm-shrinkwrap.json
+    if ! counts="$(accepted_out "$report" "$counts" "$lock")"; then
+      note "could not read the npm audit counts."
+      return 2
+    fi
   fi
   verdict_from_counts "$eco" "$counts"
 }

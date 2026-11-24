@@ -279,3 +279,48 @@ fn accept_risk_counts_only_in_front_of_each_npm_install() {
         }
     }
 }
+
+/// `SAFEDEPS_ACCEPT_SOURCE` is read by the same reader as
+/// `SAFEDEPS_ACCEPT_RISK`, in the same shape, and each name is read on its
+/// own: one never counts for the other.
+#[test]
+fn accept_source_counts_only_in_front_of_each_npm_install_and_apart_from_accept_risk() {
+    use crate::core::AcceptRisk;
+    let core = Core::new();
+    let read = |reading: Reading, cmd: &str| {
+        let mut run = Run::new(&core);
+        run.reading = Some(reading);
+        let answer = (run.accept_source(cmd.as_bytes()), run.accept_risk(cmd.as_bytes()));
+        assert!(!run.failed, "{reading:?}: {cmd}");
+        answer
+    };
+    let url = "https://example.test/x/-/x-1.0.1.tgz";
+    let value = format!("{url} owner: the fixed release is on the maker's site only");
+    let counted = [
+        format!("SAFEDEPS_ACCEPT_SOURCE='{value}' npm install {url}"),
+        format!("cd sub && SAFEDEPS_ACCEPT_SOURCE='{value}' npm install {url}"),
+        format!("SAFEDEPS_ACCEPT_SOURCE='{value}' npm ci"),
+    ];
+    let refused = [
+        format!("export SAFEDEPS_ACCEPT_SOURCE='{value}'; npm install {url}"),
+        format!("SAFEDEPS_ACCEPT_SOURCE='{value}' npm install {url} && npm install y@1"),
+        format!("SAFEDEPS_ACCEPT_SOURCE=\"$U why\" npm install {url}"),
+        format!("SAFEDEPS_ACCEPT_SOURCE='{value}' yarn add {url}"),
+        format!("env SAFEDEPS_ACCEPT_SOURCE='{value}' npm install {url}"),
+        "SAFEDEPS_ACCEPT_SOURCE= npm ci".to_string(),
+        "SAFEDEPS_ACCEPT_SOURCES=x npm ci".to_string(),
+    ];
+    for reading in [Reading::Bash, Reading::Zsh, Reading::Dash] {
+        for cmd in &counted {
+            assert_eq!(read(reading, cmd), (AcceptRisk::Reason(value.as_bytes().to_vec()), AcceptRisk::Absent), "{reading:?}: {cmd}");
+        }
+        for cmd in &refused {
+            let (source, risk) = read(reading, cmd);
+            assert!(matches!(source, AcceptRisk::Invalid(_)), "{reading:?}: {cmd}");
+            assert_eq!(risk, AcceptRisk::Absent, "{reading:?}: {cmd}");
+        }
+        let both = format!("SAFEDEPS_ACCEPT_RISK=r SAFEDEPS_ACCEPT_SOURCE='{value}' npm install {url}");
+        assert_eq!(read(reading, &both), (AcceptRisk::Reason(value.as_bytes().to_vec()), AcceptRisk::Reason(b"r".to_vec())), "{reading:?}");
+        assert_eq!(read(reading, "SAFEDEPS_ACCEPT_RISK=r npm ci"), (AcceptRisk::Absent, AcceptRisk::Reason(b"r".to_vec())), "{reading:?}");
+    }
+}
