@@ -1466,9 +1466,23 @@ pass "approved installs in sub, a subdirectory, a workspace member and a symlink
 # content, so neither a second-granularity comparison nor a content hash sees
 # it. The row is real only when that condition happened, so each trial records
 # the baseline's and the lockfile's mtimes, read between the command and the
-# post hook while the baseline still exists, and the battery requires at least
-# one trial in which the lockfile was written after the baseline and inside the
-# same whole second. Nothing sleeps between the pre-guard and the command.
+# post hook while the baseline still exists, and a trial meets the condition
+# only when the lockfile was written after the baseline and inside the same
+# whole second.
+#
+# The row makes the condition itself instead of waiting for a trial interval
+# that happens to give it. The baseline comes a near-constant time after the
+# trial starts (the pre-guard's work), and the lockfile a near-constant time
+# after the baseline (npm's). Each trial measures both. The next one starts at
+# the millisecond of a second that puts its baseline in the middle of the part
+# of a second in which a write that much later is still inside it. A trial that
+# does not meet the condition counts as unmet, and the row tries again, up to
+# twelve trials, and stops at two met. None met is red: the row could not make
+# its condition, and an install that never wrote inside the baseline's second
+# says nothing about one that does. A host whose lockfile comes a second or
+# more after the baseline is red the same way, as no start brings that write
+# into the baseline's second. Nothing sleeps between the pre-guard and the
+# command: the wait is before the pre-guard starts.
 record_same_second() {
   local baseline lock
   baseline=$(jq -r '.npm_trace.baseline // empty' "${CASE_HOME}"/pending/*.json 2>/dev/null | head -n 1)
@@ -1497,22 +1511,47 @@ second_phase_wait() {
 }
 # One row (scripts/test/lib/shard.sh), from here to its pass line.
 if shard_row "a no-op reinstall in the second the pre-guard ran in leaves a trace"; then
-  same_second_seen=0
+  same_second_seen=0 same_second_unmet=0
+  # Over the trials measured so far: the milliseconds from a trial's start to
+  # its baseline (lead), and from the baseline to the lockfile (gap). Until a
+  # trial is measured, lead is taken as 0 and gap as 500.
+  measured=0 lead_sum=0 gap_sum=0
   for trial in 1 2 3 4 5 6 7 8 9 10 11 12; do
     new_project
     (cd "${CASE_PROJECT}" && npm install sd-approved --ignore-scripts >/dev/null 2>&1) || fail "the fixture installs sd-approved first"
     : > "${MARKS}"
     TRIAL=""
+    lead=0 gap=500
+    (( measured == 0 )) || { lead=$(( lead_sum / measured )); gap=$(( gap_sum / measured )); }
+    # The millisecond of its second the baseline is aimed at: the middle of
+    # [0, 1000 - gap), the part in which a write gap later stays in the second.
+    aim=$(( gap < 1000 ? (1000 - gap) / 2 : 0 ))
     [[ -z "${SAME_SECOND_START}" ]] || second_phase_wait "${SAME_SECOND_START}" >/dev/null
+    started=$(second_phase_wait "$(( ((aim - lead) % 1000 + 1000) % 1000 ))")
     run_install "npm install sd-approved" claude record_same_second
-    [[ "${TRIAL}" != *same_second=yes* ]] || same_second_seen=$(( same_second_seen + 1 ))
-    printf '   trial %s: %s ungated=%s\n' "${trial}" "${TRIAL}" "$(ungated && echo yes || echo no)"
+    took="" trial_re='^baseline=([0-9]+)[^ ]* lock=([0-9]+)'
+    if [[ "${TRIAL}" =~ ${trial_re} ]]; then
+      lead=$(( BASH_REMATCH[1] - started )) gap=$(( BASH_REMATCH[2] - BASH_REMATCH[1] ))
+      measured=$(( measured + 1 )) lead_sum=$(( lead_sum + lead )) gap_sum=$(( gap_sum + gap ))
+      took=" lead=${lead}ms gap=${gap}ms"
+    fi
+    if [[ "${TRIAL}" == *same_second=yes* ]]; then
+      same_second_seen=$(( same_second_seen + 1 )) condition=met
+    else
+      same_second_unmet=$(( same_second_unmet + 1 )) condition=unmet
+    fi
+    printf '   trial %s: aim=%sms %s%s condition=%s ungated=%s\n' \
+      "${trial}" "${aim}" "${TRIAL}" "${took}" "${condition}" "$(ungated && echo yes || echo no)"
     ungated && note_failure "a no-op reinstall leaves a trace even in the baseline's second (trial ${trial}: ${TRIAL})"
     [[ -z "${CASE_POST}" ]] || note_failure "a no-op reinstall confirms quietly (trial ${trial}: ${CASE_POST})"
     (( same_second_seen < 2 )) || break
   done
-  (( same_second_seen > 0 )) || note_failure "no trial put the lockfile write in the baseline's second, so the same-second row observed nothing"
-  pass "a no-op reinstall in the second the pre-guard ran in leaves a trace (${same_second_seen} same-second trial(s) observed)"
+  if (( same_second_seen == 0 )); then
+    gap_said="no trial's lockfile could be read"
+    (( measured == 0 )) || gap_said="the lockfile came $(( gap_sum / measured ))ms after the baseline on average"
+    note_failure "the same-second row could not make its condition: none of ${same_second_unmet} trials wrote the lockfile inside the baseline's second (${gap_said})"
+  fi
+  pass "a no-op reinstall in the second the pre-guard ran in leaves a trace (${same_second_seen} of $(( same_second_seen + same_second_unmet )) trials met the condition)"
 fi
 
 # --- 4. The trace check starts no npm -------------------------------------------------------

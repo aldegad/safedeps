@@ -75,12 +75,14 @@ cd "${ROOT_DIR}" || exit 2
 #
 #   self-budget        times the guard's answers against budgets of one to
 #                      twenty-five seconds. On its own it is nearly all sleep.
-#   effect-trace-grid  needs at least one npm install, of twelve tries, to
-#                      write its lockfile inside the wall-clock second the
-#                      pre-guard ran in. Run in the first phase on a Mac at
-#                      load 120-200, the lockfile landed 0.6-5.7s after the
-#                      pre-guard in every try and the battery failed; on the
-#                      8-CPU Linux VM at load 17 it landed after 0.4s.
+#   effect-trace-grid  needs npm to write its lockfile less than a second
+#                      after the pre-guard's baseline. The row starts each
+#                      try so that such a write lands inside the baseline's
+#                      wall-clock second, and no start brings a slower one
+#                      there. Run in the first phase on a Mac at load
+#                      120-200, the lockfile landed 0.6-5.7s after the
+#                      pre-guard and the battery failed; on the 8-CPU Linux
+#                      VM at load 17 it landed after 0.4s.
 #
 # The timed second phase waits for native source-copy failure controls. Their
 # builds may load the host; ordinary first-phase batteries may run beside it.
