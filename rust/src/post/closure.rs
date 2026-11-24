@@ -57,7 +57,7 @@ pub fn unique_sorted(specs: Vec<Spec>) -> Vec<Spec> {
 }
 
 /// `package_name_from_path`: the package a key under node_modules names.
-pub(super) fn name_from_path(key: &[u8]) -> Value {
+fn name_from_path(key: &[u8]) -> Value {
     let tail = jv::after_last_node_modules(key).unwrap_or(b"");
     if tail.is_empty() {
         // `"" | split("/") | .[0]`

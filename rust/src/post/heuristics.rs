@@ -1,5 +1,5 @@
 //! The post hook's script, lockfile-change, and new-bin heuristics.
-use super::{closure, jv, sh, snapshot::{self, Store}, trace, report::cat};
+use super::{jv, sh, snapshot::{self, Store}, trace, report::cat};
 use crate::{ere::Regex, json::Value, sha256};
 use std::{collections::HashSet, fs, path::Path, time::Instant};
 type W = Vec<u8>;
@@ -85,28 +85,60 @@ enum Lock { Blank, Names(Option<HashSet<W>>, HashSet<W>) }
 fn map<'a>(v: &'a Value, key: &str) -> Result<Option<&'a [(W, Value)]>, ()> {
     match jv::field(v, key)? { Value::Null => Ok(None), Value::Obj(o) => Ok(Some(o.as_slice())), _ => Err(()) }
 }
-/// The folder a key names: its last name, with the scope in front of it.
-fn folder(key: &[u8]) -> Option<W> {
-    let mut parts = key.rsplit(|b| *b == b'/').filter(|p| !p.is_empty());
-    let last = parts.next()?;
-    Some(match parts.next() { Some(scope) if scope.starts_with(b"@") => cat(&[scope, b"/", last]), _ => last.to_vec() })
-}
-/// The names an entry declares beside its place: the package it is (`name`,
-/// where the place is an alias) and the package an `npm:` version aliases
-/// (how the `dependencies` tree spells an alias).
-fn declared(entry: &Value, names: &mut HashSet<W>) -> Result<(), ()> {
-    match jv::field(entry, "name")? {
-        Value::Str(name) => { names.insert(name.clone()); }
-        other if jv::truthy(other) => return Err(()),
-        _ => {}
+/// A key's folders, read as npm resolves a location from the project: an
+/// empty or `.` folder is none, and `..` takes away the folder before it. A
+/// `..` with no folder before it stays, as where a link points outside the
+/// project.
+fn folders(key: &[u8]) -> Vec<&[u8]> {
+    let mut out: Vec<&[u8]> = Vec::new();
+    for part in key.split(|b| *b == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." if out.last().is_some_and(|before| *before != b"..") => { out.pop(); }
+            _ => out.push(part),
+        }
     }
+    out
+}
+/// The name a place gives the package npm installs there: the last folder,
+/// where it sits in a `node_modules` folder or in a scope folder there, with
+/// the scope in front of it. None where the key is no such place: the folder
+/// of a workspace member or of a linked directory, or a folder inside a
+/// package, where npm installs nothing.
+fn place(folders: &[&[u8]]) -> Option<W> {
+    match folders {
+        [.., modules, scope, name] if *modules == b"node_modules" && scope.starts_with(b"@") => Some(cat(&[*scope, b"/", *name])),
+        [.., modules, name] if *modules == b"node_modules" => Some(name.to_vec()),
+        _ => None,
+    }
+}
+/// The name npm gives the package in a folder whose entry gives none: the
+/// last folder, with the scope folder in front of it. npm writes an entry's
+/// `name` only where the package's own name is not this one.
+fn folder(folders: &[&[u8]]) -> Option<W> {
+    match folders {
+        [.., scope, name] if scope.starts_with(b"@") => Some(cat(&[*scope, b"/", *name])),
+        [.., name] => Some(name.to_vec()),
+        [] => None,
+    }
+}
+/// The names an entry gives beside its place: the package it is (`name`,
+/// where the place is an alias or no place at all) and the package an `npm:`
+/// version aliases (how the `dependencies` tree spells an alias). True where
+/// it gives a `name`.
+fn declared(entry: &Value, names: &mut HashSet<W>) -> Result<bool, ()> {
+    let named = match jv::field(entry, "name")? {
+        Value::Str(name) => { names.insert(name.clone()); !name.is_empty() }
+        other if jv::truthy(other) => return Err(()),
+        _ => false,
+    };
     if let Value::Str(version) = jv::field(entry, "version")? {
         if let Some(spec) = version.strip_prefix(b"npm:") {
             let end = spec.iter().rposition(|b| *b == b'@').filter(|at| *at > 0).unwrap_or(spec.len());
             names.insert(spec[..end].to_vec());
         }
     }
-    Ok(())
+    Ok(named)
 }
 /// The `dependencies` tree of lockfileVersion 1 and 2: each key is a name,
 /// and an entry nests its own tree.
@@ -119,12 +151,17 @@ fn tree(v: &Value, names: &mut HashSet<W>) -> Result<(), ()> {
     }
     Ok(())
 }
-/// The names the lock gives a package, from each of npm's maps: a key of
-/// `packages` gives the name npm's closure reads there and the folder it is,
-/// a key of the tree is a name, and an entry adds the names it declares. A
-/// name is its bytes, so a scope or case alone makes another one. Err where
-/// the text is not one JSON object, or where a map npm writes, an entry, or a
-/// declared name is there and is not one.
+/// The names the lock gives its packages, from each of npm's maps, read as
+/// npm reads them. A key of `packages` that is a place in a `node_modules`
+/// folder gives the name the package is installed under, and its entry adds
+/// the package's own name where that differs (an alias). Any other key, the
+/// folder of a workspace member or a linked directory or a folder inside a
+/// package, is no place: its name is the one its entry gives, or, where npm
+/// writes none, its folder's. So a folder that moves keeps its name, and the
+/// project's own entry gives none. A key of the tree is a name, and an entry
+/// adds the names it gives. A name is its bytes, so a scope or case alone
+/// makes another one. Err where the text is not one JSON object, or where a
+/// map npm writes, an entry, or a given name is there and is not one.
 fn lock(text: &[u8]) -> Result<Lock, ()> {
     let st = jv::read(text);
     let v = match (st.failed, st.values.as_slice()) {
@@ -136,9 +173,13 @@ fn lock(text: &[u8]) -> Result<Lock, ()> {
         Some(entries) => {
             let mut names = HashSet::new();
             for (key, entry) in entries.iter().filter(|(key, _)| !key.is_empty()) {
-                if jv::in_tree(key) { if let Value::Str(name) = closure::name_from_path(key) { names.insert(name); } }
-                names.extend(folder(key));
-                declared(entry, &mut names)?;
+                let parts = folders(key);
+                let named = declared(entry, &mut names)?;
+                match place(&parts) {
+                    Some(name) => { names.insert(name); }
+                    None if !named => names.extend(folder(&parts)),
+                    None => {}
+                }
             }
             names.remove(&W::new());
             Some(names)
