@@ -183,6 +183,46 @@ pub fn flock_within(file: &std::fs::File, wait: std::time::Duration, mut holder:
     }
 }
 
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use crate::outcome::Outcome;
+    use std::fs::{self, File};
+    use std::time::Duration;
+
+    /// A directory of the test's own, removed with its files when dropped.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_lock_granted_once_the_wait_ran_out_is_a_deadline_and_is_let_go() {
+        // The hold that refused the first try began as that try ended, and
+        // lets the lock go then. The next try comes after ten milliseconds
+        // of sleep and is granted, past the five the wait has: the wait ran
+        // out before that try ended, so the answer is the deadline, and the
+        // lock the try was granted is let go. A wait judged only at the tries
+        // the lock refused kept the lock.
+        let dir = Scratch(scratch_dir("safedeps-os-lock-test").unwrap());
+        let locked = dir.0.join("locked");
+        let held = File::create(&locked).unwrap();
+        assert!(flock_within(&held, Duration::from_secs(10), |_| None).is_ok(), "another held the lock");
+        let mut held = Some(held);
+        let mut began = None;
+        let waiter = File::open(&locked).unwrap();
+        let answer = flock_within(&waiter, Duration::from_millis(5), |now| {
+            held = None;
+            Some(*began.get_or_insert(now))
+        });
+        assert!(matches!(answer, Err(Outcome::Deadline)), "{answer:?}");
+        let other = File::open(&locked).unwrap();
+        assert!(flock_within(&other, Duration::from_secs(10), |_| None).is_ok(), "the waiter kept the lock it was granted");
+    }
+}
+
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 

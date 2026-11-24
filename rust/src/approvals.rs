@@ -1764,6 +1764,97 @@ mod tests {
         assert_eq!(ix, Ok(Index { present: true, hashes: vec![h(1), h(2)], broken: 0 }));
     }
 
+    /// A commit of 1 under `dir`, in a thread, behind one hold: a hold that
+    /// took the lock from the last one while the commit waited, and keeps it
+    /// `held_for` from the start its turn names. Answers what the commit
+    /// answered and said, the hold's turn, and when the commit answered; or
+    /// None, saying so, for a run where the commit did not wait for that hold
+    /// to let the lock go. It began only after the hold began, or it answered
+    /// while the hold still kept the lock: it took the lock between the two
+    /// holds, or it was refused at a try the lock refused.
+    fn behind_one_hold(dir: &Path, held_for: Duration) -> Option<(Answer, Vec<u8>, Turn, os::HostTime)> {
+        let last = holder(dir);
+        let (staged, entry) = stage(dir, 1, "entry of 1");
+        let home = dir.to_owned();
+        let waiter = std::thread::spawn(move || {
+            let called = os::host_clock();
+            let mut err = Vec::new();
+            let answer = commit(&home, &approval(1, &staged, &entry, &rec(1), &h(1)), &mut err);
+            (called, answer, err, os::host_clock())
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        let next = fs::OpenOptions::new().read(true).append(true).open(path(dir)).unwrap();
+        drop(last);
+        lock_store(dir, &next, LOCK_WAIT).unwrap();
+        let turn = read_turn(dir).expect("the hold's turn");
+        let until = turn.began.after(held_for);
+        std::thread::sleep(Duration::from_nanos(until.0.saturating_sub(os::host_clock().0)).saturating_sub(Duration::from_millis(40)));
+        while os::host_clock() < until {
+            std::hint::spin_loop();
+        }
+        let answered = waiter.is_finished();
+        drop(next);
+        let (called, answer, err, at) = waiter.join().unwrap();
+        if called > turn.began {
+            println!("# note: the commit began only after the hold took the lock, so this run does not count");
+            return None;
+        }
+        if answered {
+            println!("# note: the commit answered while the hold kept the lock ({answer:?}), so this run does not count");
+            return None;
+        }
+        Some((answer, err, turn, at))
+    }
+
+    #[test]
+    fn a_commit_granted_the_lock_after_the_wait_ran_out_is_refused_and_writes_nothing() {
+        // A validator's counterexample, kept as a row. One hold keeps the
+        // lock a tenth of a millisecond past the wait from its start, and the
+        // commit behind it is granted the lock at its next try, after the
+        // wait ran out. So the commit is refused, and it lets the lock go
+        // before it writes anything: the store keeps its torn tail unsealed,
+        // the turn is still the hold's, and the entry no check approved
+        // stands. A wait judged only at the tries the lock refused let the
+        // commit through once the hold let the lock go.
+        const TORN: &[u8] = b"{\"at\":\"2020-01-01T";
+        let (d, entry, turn, answer, err) = until_met(|| {
+            let d = scratch();
+            fs::write(path(&d.0), TORN).unwrap();
+            let entry = stand(&d.0, 1, "an entry no check approved");
+            let (answer, err, turn, _) = behind_one_hold(&d.0, LOCK_WAIT + Duration::from_micros(100))?;
+            Some((d, entry, turn, answer, err))
+        });
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched), "{}", String::from_utf8_lossy(&err));
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            format!("safedeps-core approvals: not committed: {0} could not be opened and locked: the lock of {0} did not finish before the deadline\n", path(&d.0).display())
+        );
+        assert_eq!(fs::read(path(&d.0)).unwrap(), TORN, "the store's bytes changed");
+        assert_eq!(turn_bytes(&d.0), turn.line().as_bytes(), "the turn is not the hold's");
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "an entry no check approved");
+        assert!(logged(&d.0).is_empty());
+    }
+
+    #[test]
+    fn a_commit_granted_the_lock_before_the_wait_ran_out_behind_one_hold_is_approved() {
+        // The control. The hold keeps the lock 9.7 seconds from its start,
+        // and the commit behind it is granted the lock at its next try,
+        // within the wait: it is approved. A run where it answered otherwise
+        // only past the wait, as a machine too busy to try again in time can
+        // make it, does not count.
+        let (d, answer, err) = until_met(|| {
+            let d = scratch();
+            let (answer, err, turn, at) = behind_one_hold(&d.0, Duration::from_millis(9700))?;
+            if answer != Answer::Approved && at > turn.began.after(LOCK_WAIT) {
+                println!("# note: the commit answered {answer:?} only past the wait, so this run does not count");
+                return None;
+            }
+            Some((d, answer, err))
+        });
+        assert_eq!(answer, Answer::Approved, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(index(&d.0).unwrap(), Index { present: true, hashes: vec![h(1)], broken: 0 });
+    }
+
     #[test]
     fn a_sync_that_fails_after_a_whole_write_is_unsynced_and_the_line_is_seen() {
         // No file system here fails a sync on demand, so the sync is the one
