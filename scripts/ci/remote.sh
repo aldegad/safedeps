@@ -26,7 +26,8 @@
 #                             build in this run. Picks the run's locale first
 #                             and writes it to out/locale; the build and every
 #                             unit run under it. Writes out/core-prepare's
-#                             build.log, receipt.json and exit before units.
+#                             build.log, build.locale, receipt.json and exit
+#                             before units.
 #   remote.sh start RUN UNIT  Requires successful preparation, then starts one
 #                             unit detached and returns. The unit
 #                             writes RUN's name into out/<unit>.run, and stops
@@ -49,7 +50,8 @@
 # RUN holds tree/ (the shipped tree), path (a PATH prefix the coordinator
 # writes from the host file), out/ (each unit's .log, .rc, .secs, .load-start
 # and .load-end, written by run-all.sh --unit, and its .pid and .run, written
-# here, and the run's locale), held-K, queue-K.pid, heartbeat and release.
+# here, the LANG and LC_* it started under in .locale, and the run's locale in
+# locale), held-K, queue-K.pid, heartbeat and release.
 set -uo pipefail
 
 HEARTBEAT_MINUTES=10
@@ -113,6 +115,11 @@ use_locale() {
   unset "${!LC_@}"
   export LANG="${value}"
 }
+
+# The LANG and LC_* a process has, one per line. The build and each unit write
+# theirs as they start, so run.txt says what they ran under, not only what the
+# host picked.
+locale_env() { env | grep -E '^(LANG|LC_[A-Za-z_]*)=' | LC_ALL=C sort; }
 
 load_now() { uptime | sed -E 's/.*load averages?: *//; s/,//g'; }
 
@@ -246,6 +253,7 @@ case "${action}" in
     host_path
     use_locale
     cd "${RUN}/tree" || exit 2
+    locale_env > "${PREP}/build.locale"
     load_now > "${PREP}/load-start"
     ps -o ni= -p "$$" > "${PREP}/nice"
     start=$(date +%s)
@@ -279,6 +287,7 @@ case "${action}" in
     host_path
     use_locale
     cd "${RUN}/tree" || exit 2
+    locale_env > "${OUT}/${unit}.locale"
     # Appended, not truncated: the watch below writes to the same file, and
     # run-all.sh writing at its own offset overwrote that line (measured).
     ps -o ni= -p "$$" > "${OUT}/${unit}.nice"

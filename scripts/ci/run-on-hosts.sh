@@ -43,7 +43,8 @@
 # warning ahead of the output a row read. So no ssh of the run carries the
 # caller's LANG or LC_*, and each host runs the build and every unit under a
 # UTF-8 locale it has, or C when it has none (scripts/ci/remote.sh). run.txt
-# names that locale for each host.
+# names that locale for each host, against what the build and each unit there
+# recorded as they started.
 #
 # A run is red when any unit failed, printed `not ok`, skipped a row the
 # verdict does not allow, or never ran; when the shards of a battery
@@ -509,6 +510,30 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   fi
 done
 
+# The locale a host picked for the run (remote.sh prepare writes it) set
+# against what the build and each unit there started under: each writes its
+# LANG and LC_* as it starts. The line says the pick when every record is LANG
+# set to it and nothing else, and names each record that is not.
+locale_line() { # index
+  local dir="${logs}/hosts/${H_NAME[$1]}" pick f started=0 other=""
+  pick=$(cat "${dir}/locale" 2>/dev/null) || { printf 'none recorded'; return 0; }
+  for f in "${dir}/core-prepare/build.locale" "${dir}"/*.locale; do
+    [[ -e "${f}" ]] || continue
+    if [[ "$(cat "${f}")" == "LANG=${pick}" ]]; then
+      started=$(( started + 1 ))
+    else
+      other+="${other:+; }${f#"${dir}/"} [$(paste -sd ' ' "${f}")]"
+    fi
+  done
+  if [[ -n "${other}" ]]; then
+    printf 'picked LANG=%s, but these started otherwise: %s' "${pick}" "${other}"
+  elif (( started == 0 )); then
+    printf 'picked LANG=%s; neither the build nor a unit recorded what it started under' "${pick}"
+  else
+    printf 'LANG=%s and no LC_*, as all %s records of the build and the units say' "${pick}" "${started}"
+  fi
+}
+
 # The run's own time starts at the first queue slot; before it the run waited
 # for other suites. A run that never got a slot ran nothing and is red anyway.
 [[ -n "${first_held}" ]] || first_held="${suite_end}"
@@ -522,14 +547,7 @@ waited=$(( first_held - suite_start ))
       "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" "${H_HOLDS[h]}" "${H_LOAD0[h]:-?}" "${H_LOADH[h]:-never}" "${H_LOAD1[h]:-?}"
     printf 'host %s preparation exit %s receipt hosts/%s/core-prepare/receipt.json\n' \
       "${H_NAME[h]}" "$(cat "${logs}/hosts/${H_NAME[h]}/core-prepare/exit" 2>/dev/null || printf 'none')" "${H_NAME[h]}"
-    # The locale the host picked for the build and the units (remote.sh
-    # prepare writes it), and what the caller had and did not send.
-    if host_locale=$(cat "${logs}/hosts/${H_NAME[h]}/locale" 2>/dev/null); then
-      host_locale="LANG=${host_locale} and no LC_*"
-    else
-      host_locale="none recorded"
-    fi
-    printf 'host %s locale %s (not sent from here: %s)\n' "${H_NAME[h]}" "${host_locale}" "${caller_locale:-nothing}"
+    printf 'host %s locale %s (not sent from here: %s)\n' "${H_NAME[h]}" "$(locale_line "${h}")" "${caller_locale:-nothing}"
   done
 } >> "${work}/run.txt"
 
