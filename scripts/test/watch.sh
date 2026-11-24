@@ -1217,13 +1217,16 @@ row "other bytes under an accepted URL, and an entry revoked, are findings as be
 # holds a byte. The other one, and one with no byte in it, is `ignored`: no
 # finding comes from it, it is no gap in the run, and a finding an earlier run
 # made of it is stale for that reason. Each row names the file the findings
-# come from and whether the accepted source still takes its advisory out.
+# come from and whether the accepted source still takes its advisory out. A
+# full scan always lists the hosts it does not measure (`other_hosts`), so a
+# run with no gap here is one whose only gap is that one (`no_gap_here`).
 site_lock_at() { # FILE INTEGRITY
   jq -n --arg url "${site_url}" --arg integrity "$2" '{name: "fixture", lockfileVersion: 3, packages: {
     "": {name: "fixture"},
     "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity},
     "node_modules/left": {version: "1.0.0"}}}' > "$1"
 }
+no_gap_here='.summary.unmeasured_by_kind == {"other_hosts": 1}'
 npm_rows() { jq -c '[.roots[] | .lockfiles[]? | select(.kind == "npm") | {path, status}] | sort_by(.path)' "${home}/watch/state.json"; }
 both_rows() { # SHRINKWRAP_STATUS LOCK_STATUS
   printf '[{"path":"./npm-shrinkwrap.json","status":"%s"},{"path":"./package-lock.json","status":"%s"}]' "$1" "$2"
@@ -1237,7 +1240,7 @@ row_shrinkwrap_beside_empty_lock() {
   scan_ok
   [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and the empty package-lock.json ignored: $(npm_rows)"
   [[ "$(npm_findings)" == "[]" ]] || no "the shrinkwrap's accepted advisory is a finding: $(npm_findings)"
-  st '.summary.accepted_sources == 1 and .summary.complete == true and .summary.unmeasured == 0' \
+  st ".summary.accepted_sources == 1 and ${no_gap_here}" \
     'the accepted source counts and the empty file is no gap' '.unmeasured'
 }
 row "npm-shrinkwrap.json beside an empty package-lock.json: the shrinkwrap is measured and its accepted source takes the advisory out; the empty file is ignored and no gap" row_shrinkwrap_beside_empty_lock
@@ -1268,7 +1271,7 @@ row_empty_shrinkwrap_beside_lock() {
   scan_ok
   [[ "$(npm_rows)" == "$(both_rows ignored measured)" ]] || no "package-lock.json is measured and the empty shrinkwrap ignored: $(npm_rows)"
   [[ "$(npm_findings)" == "[]" ]] || no "the accepted advisory is a finding: $(npm_findings)"
-  st '.summary.accepted_sources == 1 and .summary.complete == true and .summary.unmeasured == 0' \
+  st ".summary.accepted_sources == 1 and ${no_gap_here}" \
     'the accepted source counts and the empty shrinkwrap is no gap' '.unmeasured'
 }
 row "an empty npm-shrinkwrap.json beside package-lock.json: package-lock.json is measured and its accepted source takes the advisory out; the empty shrinkwrap is ignored and no gap" row_empty_shrinkwrap_beside_lock
@@ -1287,7 +1290,8 @@ row_lock_npm_stops_reading() {
   [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and package-lock.json ignored: $(npm_rows)"
   npm_findings | jq -e 'length == 1 and .[0].lockfile == "./package-lock.json" and .[0].stale_measurement == true and .[0].unmeasured_reason == "ignored"' > /dev/null \
     || no "the finding of a lockfile npm no longer reads is stale, for that reason: $(npm_findings)"
-  st '.summary.accepted_sources == 1 and .summary.complete == true' 'the shrinkwrap'"'"'s accepted source counts'
+  st ".summary.accepted_sources == 1 and ${no_gap_here}" \
+    'the shrinkwrap'"'"'s accepted source counts, and the package-lock.json npm stopped reading is no gap' '.unmeasured'
 }
 row "a finding of a package-lock.json npm stops reading, when a shrinkwrap appears, is stale for that reason and not closed" row_lock_npm_stops_reading
 
