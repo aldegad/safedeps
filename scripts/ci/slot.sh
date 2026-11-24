@@ -21,6 +21,12 @@
 # is a label, "<owner> since <time>", which no verdict reads. The watch lock,
 # lib/watch/lock.sh, is the same primitive.
 #
+# A slot's path is one array element from where it is named to its open. A
+# list joined into one string and split again names other files when the
+# home's name holds a blank, a tab or a glob. HOME is a full path, one that
+# starts with /: a relative one names the slot files from wherever a run
+# starts, so this run does not queue under it (exit 2).
+#
 # A waiter takes a ticket in ~/safedeps-runs/.queue, named by time, then pid,
 # that holds its owner and then its identity, and removes it when it ends.
 # Only a run among the first N live tickets asks for a slot, so a poller
@@ -58,6 +64,10 @@ set -o pipefail
 B="$HOME/safedeps-runs"; Q="$B/.queue"; owner="$1"; shift
 nl=$'\n'
 refuse() { echo "slot.sh: $1; not queueing" >&2; exit 2; }
+case "$HOME" in
+  /*) ;;
+  *) refuse "HOME ($HOME) is not a full path, so the slot files it names depend on where a run starts" ;;
+esac
 src=$(dirname "${BASH_SOURCE[0]}") && HERE=$(cd "$src" && pwd) ||
   refuse "its own directory could not be read, so the reader beside it is not known"
 LIB=""
@@ -102,7 +112,7 @@ case "$nl$listing$nl" in
   *) N=2 ;;
 esac
 case "$N" in 1|2) ;; *) N=2 ;; esac
-SLOTS="$B/.slot.lock"; [ "$N" = 2 ] && SLOTS="$B/.slot.lock $B/.slot2.lock"
+SLOTS=("$B/.slot.lock"); [ "$N" = 2 ] && SLOTS+=("$B/.slot2.lock")
 printf -v t '%s/%s-%07d' "$Q" "$now" "$$" || refuse "the name of this run's ticket could not be made"
 trap 'rm -f "$t" "$B/.ticket-$$"' EXIT
 printf '%s\n%s\n' "$owner" "$ME" > "$B/.ticket-$$" && mv "$B/.ticket-$$" "$t" ||
@@ -157,12 +167,12 @@ while [ -z "$MYL" ]; do
     told=$passed
   fi
   if [ -n "$pos" ] && [ "$pos" -le "$N" ]; then
-    for L in $SLOTS; do
+    for L in "${SLOTS[@]}"; do
       if take "$L"; then MYL="$L"; break; fi
     done
   fi
   [ -n "$MYL" ] && break
-  msg="slots busy: $(for L in $SLOTS; do cat "$L" 2>/dev/null; done | tr '\n' ';'); queue position ${pos:-?} of $(ls "$Q" | wc -l | tr -d ' ')${why:+;$why}"
+  msg="slots busy: $(for L in "${SLOTS[@]}"; do cat "$L" 2>/dev/null; done | tr '\n' ';'); queue position ${pos:-?} of $(ls "$Q" | wc -l | tr -d ' ')${why:+;$why}"
   [ "$msg" = "$announced" ] || { echo "$msg — $(date +%T)" >&2; announced="$msg"; }
   sleep 10
 done
