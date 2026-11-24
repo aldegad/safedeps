@@ -120,7 +120,7 @@ When Claude Code or Codex CLI is about to run `npm install`, `pip install`, `car
 4. **Fast-checks the approved-spec ledger** for explicit `pkg@version` install commands.
 5. **Runs pre-flight checks** and **blocks** the command entirely if it detects:
    - Typosquatting package names (`lod_sh`, `reacct`, `axois`, etc.)
-   - A non-standard registry (anything outside `registry.npmjs.org` and `registry.yarnpkg.com`) named on the command line with `--registry`. A registry npm reads from an `.npmrc` or `npm_config_registry` is not blocked, because a company registry, a mirror or a proxy is set up that way and there is no way yet to approve one. npm is asked which registry it fetches from, with the install's own arguments and environment, and the post-install hook keeps what such a registry serves under a public-registry URL, but safedeps does not run `npm rebuild` for it. A new package recorded from the registry's own URL is a non-standard source and is rolled back (the table below). safedeps records the bytes it kept, so no other project on this machine that receives them rebuilds them either, and this version has no way to release that record (see the boundaries)
+   - A non-standard registry (anything outside `registry.npmjs.org` and `registry.yarnpkg.com`) named on the command line with `--registry`. A registry npm reads from an `.npmrc` or `npm_config_registry` is not blocked, because a company registry, a mirror or a proxy is set up that way and there is no way yet to approve one. npm is asked which registry it fetches from, with the install's own arguments and environment, and the post-install hook keeps what such a registry serves under a public-registry URL, but safedeps does not run `npm rebuild` for it. A new package recorded from the registry's own URL is a non-standard source and is rolled back (the table below). safedeps records the bytes it kept, so no other project on this machine that receives them rebuilds them either. An accepted-source entry releases that record only for a package whose own lock record names the entry's URL off the public registry; for bytes served by a company registry or mirror under a public-registry URL, this version still has no way to release that record (see the boundaries).
    - Piped remote execution patterns (`curl ... | bash`)
    - Explicit disabling of install script safety (`npm config set ignore-scripts false`)
 
@@ -272,9 +272,79 @@ The agent receives the following message lines in order:
 | `Audit record: <path of accepted-risk.jsonl>` | Path to the audit record file. |
 | `Details log: <path of reorg.log>` | Path to the reorg log file. |
 
-The override never covers packages listed in CISA KEV. It never covers an unreadable closure, a KEV catalog that cannot be read, a ledger check that cannot run, or an OSV batch that cannot run. It never covers suspicious install scripts, non-standard or insecure resolved sources, unusually large lockfile additions, or native binary findings. These always roll the install back. When the override was set and an install is rolled back anyway, the problems line ends with: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. The problems the override would have covered are listed there too.
+The override never covers packages listed in CISA KEV. It never covers an unreadable closure, a KEV catalog that cannot be read, a ledger check that cannot run, or an OSV batch that cannot run. It never covers suspicious install scripts, non-standard or insecure resolved sources, unusually large lockfile additions, or native binary findings. A source off the public registry is accepted with `SAFEDEPS_ACCEPT_SOURCE` instead (below). These always roll the install back. When the override was set and an install is rolled back anyway, the problems line ends with: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. The problems the override would have covered are listed there too.
 
 The override applies to one command only. The reason lives only in that call's own pending record, keyed by `tool_use_id`. Nothing persists: no ledger entry and no approval. A subsequent install in the same project without the override is judged as before, so an unapproved closure is rolled back again. Accepting a risk is not approving a package; `safedeps check` and the ledger are unchanged. The override applies exclusively to the npm effect gate. It does not exist for pip, cargo, go, gem, maven, nuget, pnpm, yarn, or bun. Commands that the pre-install hook did not read as an install reach the post-install backstop with no record, so no override applies there.
+
+### Accepting a source off the public registry: `SAFEDEPS_ACCEPT_SOURCE`
+
+A project sometimes installs an npm tarball from an HTTPS URL outside the public npm registry, such as `https://example.test/pkg/-/pkg-1.0.0.tgz`. safedeps' post-install gate treats any package resolved outside the public registry as a non-standard source and rolls the install back. `SAFEDEPS_ACCEPT_SOURCE` lets a person's recorded decision accept that URL once, and writes the accepted bytes to a ledger file so later installs of those same bytes pass without the override.
+
+The override takes the form of an assignment placed in front of each npm install statement in the command, whose value is the URL, one space, and who decided and why:
+
+```sh
+SAFEDEPS_ACCEPT_SOURCE='https://example.test/pkg/-/pkg-1.0.0.tgz <who decided and why>' npm install https://example.test/pkg/-/pkg-1.0.0.tgz
+```
+
+It also works in front of `npm ci` or a bare `npm install` when the lockfile names the URL.
+
+The override counts under the exact same conditions as `SAFEDEPS_ACCEPT_RISK` above: every npm install statement carries it among its leading assignments with one identical value, read as written across bash, zsh, and dash readings, with no control characters, only the same permitted shell builtins, no `sh -c`, `eval`, or command substitutions, and every npm install landing where npm records it in a lockfile (not global). `export SAFEDEPS_ACCEPT_SOURCE=...`, `env SAFEDEPS_ACCEPT_SOURCE=...`, and the environment of the agent or the hook never count; safedeps reads only the command text.
+
+Before the install runs, the pre-install hook applies these rules:
+- When `SAFEDEPS_ACCEPT_SOURCE` appears in the command and does not count, when the URL is not one safedeps can accept, or when no reason follows the URL, the pre-install hook denies the install before it runs. The denial starts with `safedeps: SAFEDEPS_ACCEPT_SOURCE is in this command and does not count:` followed by why, then `The install was not run.` safedeps never falls back to running the install without the override.
+- A URL safedeps can accept starts with `https://`, names a non-empty host with no user name or password part, uses printable ASCII with no space, and is not a public registry URL (`https://registry.npmjs.org/` or `https://registry.yarnpkg.com/`, in any letter case). `http://`, `git+https://`, `git://`, `file:`, and public registry URLs are never accepted.
+- On Claude Code, the install runs with `--ignore-scripts`, as every npm install does, and `~/.safedeps/advisory.log` receives a `pre-guard: SAFEDEPS_ACCEPT_SOURCE is set for this npm install` line.
+- On Codex CLI, the pre-install hook denies the override before the install runs: `safedeps: SAFEDEPS_ACCEPT_SOURCE does not count on Codex.` Codex cannot withhold install scripts, so the scripts of bytes no check has cleared would run before any check. Accept the source on Claude Code, where the install runs with `--ignore-scripts`. Once the ledger holds the entry, a later install from the lockfile on Codex, such as `npm ci`, installs the same bytes as an approved package.
+
+In the install that uses the override, it covers each lock record whose `resolved` is byte for byte the named URL and that has an `integrity`. For a package whose every record in `package-lock.json` and `node_modules/.package-lock.json` is covered: it is not counted as unapproved, every advisory OSV names for it now is accepted, and its source is not a reason to roll back.
+
+The override never covers a CISA KEV listing, a closure, KEV catalog, ledger check, or OSV batch that cannot be read or run, suspicious install scripts (the heuristics), an unusually large number of new lockfile entries, native binary findings, insecure `http://` or `git://` sources, any other URL outside the public registry, or a record of the URL with no integrity.
+
+When every problem the checks found is one the override covers:
+1. safedeps first writes the entries to `~/.safedeps/accepted-sources.jsonl`, one per URL, integrity, name, and version. If they cannot be written, safedeps rolls the install back.
+2. The install is then confirmed like a clean one: the verified baseline moves and `npm rebuild` runs, because a covered package counts as an approved one in the rebuild check. Heuristics still apply to it.
+3. The accepting install still records the bytes it brought in under `~/.safedeps/npm-withheld`, so after a revoke they are withheld again.
+4. `~/.safedeps/advisory.log` receives a `post-verify ACCEPTED SOURCE in <project>: ...` line with the reason and the command.
+
+The agent receives these message lines only in the install that writes the entry:
+
+| Message line | Meaning |
+|---|---|
+| `safedeps: this install was not rolled back.` | The post-install gate confirmed the install using `SAFEDEPS_ACCEPT_SOURCE`. |
+| `Accepted source: <URL> for <name>@<version> (advisories accepted: <ids>), recorded in <path of accepted-sources.jsonl>` | Lists each accepted package and its accepted OSV advisory IDs, or `(no advisory)` when there are none; several packages are joined by `; `. |
+
+When the install is rolled back anyway, the problems line ends with `SAFEDEPS_ACCEPT_SOURCE was set for this install, and it accepts a source only for an install no other check rolls back, so no entry was written`. When neither npm record holds the named URL, it ends with `SAFEDEPS_ACCEPT_SOURCE was set for this install and names <URL>, which neither npm record holds, so it accepted nothing`.
+
+Both `SAFEDEPS_ACCEPT_SOURCE` and `SAFEDEPS_ACCEPT_RISK` may appear in one command. The `SAFEDEPS_ACCEPT_RISK` keep path also writes the accepted-source entries; it still runs no rebuild and does not move the verified baseline.
+
+Accepted sources are stored in `~/.safedeps/accepted-sources.jsonl`, whose path is derived from `SAFEDEPS_HOME` and nothing else. It is an append-only JSON lines file:
+- An accept line has exactly the keys `at`, `op` (`"accept"`), `url`, `integrity`, `package`, `version`, `advisories`, `reason`, `project`, and `tool_use_id`.
+- A revoke line has exactly the keys `at`, `op` (`"revoke"`), and `url`. It takes back every earlier entry of that URL.
+- Writers take an exclusive `flock(2)` on the file itself and end each write with a sync; readers take a shared `flock(2)`. A last line that a writer did not finish is sealed by the next writer and read as broken. Any line that is not one of the two forms stands for nothing and is counted as broken.
+- The core is its only reader and writer (`safedeps-core sources index`, `safedeps-core sources revoke <url>`). The CLI and the watch read it through the core.
+- Several entries may stand for one URL, for example after other bytes under the URL are accepted again.
+- Like the approval ledger, it is a same-user convenience record, not a security boundary against a same-user attacker.
+
+On later installs, an entry covers a lock record when all four values are byte for byte the entry's: `resolved` URL, `integrity`, package name (the record's `name`, or the name its key gives), and `version`. A package is covered when every record of it in both npm records is covered. A covered package installs as an approved package, without the override and with no extra output: it is not counted as unapproved, the advisories its entries name do not count, its source is not a reason to roll back, no `Accepted source` line is printed, and `npm rebuild` runs over it. A withheld-bytes record does not hold it back, and later installs covered by an entry do not record those bytes as withheld again.
+
+Later installs are still rolled back as before in these cases:
+- An advisory the entries do not name (a new one), or a CISA KEV listing.
+- Other bytes under the URL: `... has an integrity no accepted-source entry of that URL names, so its bytes are not the ones accepted`.
+- A record with no integrity: `... has no integrity, so no accepted source can cover it`.
+- The same bytes under another package name or version: `... has the integrity an accepted-source entry names under another package or version, and an entry covers only the package and version it names`.
+- The URL spelled differently (other letter case, a query, or another path), which is a non-standard source as before.
+- An unreadable ledger when the ledger is needed: `the accepted-source ledger <path> could not be read (...), so no accepted source covers what this install brought from outside the public registry`.
+
+The same bytes under another URL are not covered. If a public-registry record names them, the install is kept and `npm rebuild` is held back because they are recorded as withheld.
+
+To inspect or revoke entries:
+- `safedeps sources` lists each active entry: the URL, `<name>@<version> <integrity>`, `advisories when accepted: <ids or none>`, and `accepted <at> in <project>: <reason>`. With no entries it prints `safedeps: no accepted source.` `--json` prints the core's index. Broken lines print a `WARNING` on stderr.
+- `safedeps sources revoke <URL>` takes back every entry of that URL: `safedeps: revoked <N> accepted-source entr(y|ies) for <URL>. The next install that brings those bytes is judged as before.` With none it says nothing was revoked and exits 1.
+- There is no command that adds an entry: only an install run with the override writes one.
+
+In watch, a covered package in a lockfile is listed as `accepted` on that lockfile's status row, the summary counts them (`accepted_sources`, adding `; accepted sources <N>` to the summary line), and an advisory its entries name with KEV answering that it is not listed is closed as `source_accepted` rather than raised as a finding. A new advisory, a KEV listing, or an unreadable KEV catalog remains a finding, and an unreadable ledger covers nothing and emits an `accepted_sources_unreadable` error row. In `safedeps audit` (npm only), a covered vulnerable package whose every npm-reported advisory is named in its entries is taken out of npm's counts and named on a non-warning line `npm: accepted sources (safedeps sources), not counted: <name>@<version> (<ids>); ...`, while any package listed in KEV or that cannot be checked against OSV and KEV stays counted with a note; a package counted only for its dependencies is taken out once all of those are, and an unreadable ledger takes nothing out and says so.
+
+Binding the integrity in the ledger is enough because npm checks the bytes it fetches against the lockfile's `integrity` before extracting them. A test battery (`scripts/test/effect-trace-grid.sh`, rows NI0 and NI1) measures this with a real npm from a cold cache: with the tarball's own integrity, npm installs it and runs its scripts; with another integrity, npm fails with `EINTEGRITY`, extracts nothing, and runs no script.
 
 ## Why "reorg"?
 
@@ -755,6 +825,7 @@ Two things went the other way. A script handed to `sh -c`, `bash -c`, `zsh -c`, 
 | `~/.safedeps/confirmed` | Current confirmed (safe) snapshot ID |
 | `~/.safedeps/snapshots/` | All snapshot files (lock files, package.json copies, metadata) |
 | `~/.safedeps/accepted-risk.jsonl` | Audit record of installs kept by `SAFEDEPS_ACCEPT_RISK` with timestamps, reasons, problems, and packages |
+| `~/.safedeps/accepted-sources.jsonl` | Append-only ledger of sources off the public registry accepted via `SAFEDEPS_ACCEPT_SOURCE` and their revocations |
 | `~/.safedeps/advisory.log` | Audit record of what the gate decided and every bypass and failure it saw, bounded by rotation (below) |
 
 ```bash
