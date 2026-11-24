@@ -408,4 +408,22 @@ mod tests {
         assert_eq!(fresh_names(&store),vec![b"brought".to_vec(),b"kept".to_vec()],"a record with no hash of its own counts for nothing");
         let _=fs::remove_dir_all(&root);
     }
+
+    // A lockfile that cannot be read names no byte here, and the effect gate
+    // rolls the install back for it. The tree record read beside it still
+    // names the bytes this install brought, and they are recorded as
+    // withheld, since an entry there only adds a restriction.
+    #[test]
+    fn a_lockfile_that_cannot_be_read_leaves_the_tree_records_bytes_to_record(){
+        let root=sh::mktemp_dir(&cat(&[sh::bytes(&std::env::temp_dir()),b"/safedeps-unread-lock."])).unwrap();
+        let (home,project)=(root.join("home"),root.join("project"));
+        for dir in [home.join("snapshots"),project.join(rec::LOCKFILES[1]),project.join("node_modules")] {fs::create_dir_all(dir).unwrap();}
+        let store=Store::new(home.clone(),project.clone(),b"call".to_vec());
+        fs::write(project.join(rec::HIDDEN),record(&["brought"])).unwrap();
+        assert!(Records::read(&store.project).unread.is_some(),"a package-lock.json that is a directory is a record that could not be read");
+        let names=Npm::fresh_integrities(&store,&Records::read(&store.project),&Sources::default())
+            .map(|found|found.iter().map(|v|strval(field(v,"name").unwrap())).collect::<Vec<_>>());
+        assert_eq!(names,Ok(vec![b"brought".to_vec()]),"the tree record still names the bytes this install brought");
+        let _=fs::remove_dir_all(&root);
+    }
 }
