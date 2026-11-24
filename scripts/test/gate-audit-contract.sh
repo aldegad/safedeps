@@ -246,9 +246,9 @@ printf '%s\n' '{"kev":["site@1.0.0"]}' > "${site_state}"
 assert_audit 1 "npm: an accepted package that KEV lists counts, and so does its dependent" "${site_fixture}" FAKE_NPM_MODE=site-nested "${site_env[@]}"
 site_said 'npm: site@1.0.0 has an accepted source, and CISA KEV lists one of its advisories, so it is counted.' "npm: the KEV listing is said"
 printf '%s\n' '{"vulnerable":["site@1.0.0"]}' > "${site_state}"
+site_lock sha512-siteBytes100
 assert_audit 1 "npm: an accepted package OSV cannot be asked about counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" SAFEDEPS_OSV_API_URL=http://127.0.0.1:9/osv/v1/query
 site_said 'npm: site@1.0.0 has an accepted source, and OSV or the KEV catalog could not be asked about it, so it is counted.' "npm: the provider that did not answer is said"
-site_lock sha512-siteBytes100
 site_entry GHSA-site-cccc-dddd
 assert_audit 1 "npm: an advisory no accepted-source entry names counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
 site_entry GHSA-site-aaaa-bbbb

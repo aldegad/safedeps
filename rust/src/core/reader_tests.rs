@@ -295,7 +295,7 @@ fn accept_source_counts_only_in_front_of_each_npm_install_and_apart_from_accept_
         answer
     };
     let url = "https://example.test/x/-/x-1.0.1.tgz";
-    let value = format!("{url} owner: the fixed release is on the maker's site only");
+    let value = format!("{url} owner: the fixed release is on the maker site only");
     let counted = [
         format!("SAFEDEPS_ACCEPT_SOURCE='{value}' npm install {url}"),
         format!("cd sub && SAFEDEPS_ACCEPT_SOURCE='{value}' npm install {url}"),
