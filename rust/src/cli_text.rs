@@ -12,8 +12,7 @@
 //!
 //! Prose is the text the CLI leaves as written: comments, log lines and
 //! what it prints for a person. A line is taken as prose from its shape,
-//! which does not prove that no code reads it back: the compaction of
-//! `advisory.log` reads each line's level back, any output can be
+//! which does not prove that no code reads it back: any output can be
 //! captured, and so can a function that runs the help. A word that code
 //! reads back from such text is out of reach of these readings.
 //!
@@ -29,11 +28,10 @@
 
 /// The CLI and every file it sources: the files these tests read.
 /// `cli_files_are_what_the_cli_sources` closes the set.
-pub const CLI_FILES: [(&str, &str); 9] = [
+pub const CLI_FILES: [(&str, &str); 8] = [
     ("bin/safedeps", include_str!("../../bin/safedeps")),
     ("lib/providers/providers.sh", include_str!("../../lib/providers/providers.sh")),
     ("lib/truth-sources.sh", include_str!("../../lib/truth-sources.sh")),
-    ("lib/advisory-log-rotate.sh", include_str!("../../lib/advisory-log-rotate.sh")),
     ("lib/ledger/ledger.sh", include_str!("../../lib/ledger/ledger.sh")),
     ("lib/ledger/context-kinds.sh", include_str!("../../lib/ledger/context-kinds.sh")),
     ("lib/ledger/recheck-report.sh", include_str!("../../lib/ledger/recheck-report.sh")),
@@ -328,7 +326,7 @@ fn cli_files_are_what_the_cli_sources() {
             }
         }
     }
-    assert_eq!(read, 9, "the CLI's source lines");
+    assert_eq!(read, 8, "the CLI's source lines");
     assert_eq!(sources_of("lib/x/a.sh", ". \"${BASH_SOURCE[0]%/*}/../b.sh\"\n"), Ok(vec![Some("lib/b.sh".into())]));
     for unplaced in ["source \"${HOME}/b.sh\"", "source b.sh", ". ./b.sh", "[[ -r x ]] && source \"${SAFEDEPS_REPO_DIR}/b.sh\"",
                      "builtin source \"${SAFEDEPS_REPO_DIR}/b.sh\"", "source\t\"${SAFEDEPS_REPO_DIR}/b.sh\"", "if source \"x\"; then :; fi",

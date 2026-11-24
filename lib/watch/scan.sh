@@ -95,7 +95,7 @@ safedeps_watch_new_run_id() {
 # This machine's core as a path under a runtime or its checkout:
 # bin/native/<os>-<arch>/safedeps-core, the platform read from the machine bash
 # was built for, as the CLI reads it when it looks for its core beside itself
-# (sf_core in bin/safedeps). Prints nothing and returns 1 for a machine no core
+# (sf_core in lib/providers/providers.sh). Prints nothing and returns 1 for a machine no core
 # is built for. The installer asks this for the core it copies and counts
 # (machineCore in scripts/install/install-safedeps-recheck-agent.mjs), so the
 # two digests count one file.

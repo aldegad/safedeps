@@ -63,7 +63,8 @@
 //!       Known answers from the modules the hooks share (the digests, the
 //!       JSON writer, how a file's times and inodes are spelled).
 //!
-//! The CLI's one entry, which is on no hook's path either:
+//! The CLI's two entries. The approvals store's is on no hook's path; the
+//! rotation's is the one the post hook runs from provider initialization.
 //!
 //!   safedeps-core approvals commit <hash> <staged> <entry> | revoke <hash> <staged> <entry> <seen> | index | migrate [--json] [--] [<archive>...]
 //!       The approvals store `re-check` reads for provenance
@@ -74,6 +75,12 @@
 //!       same write as a commit's store line, the approve lines of
 //!       advisory.log and its archives that their ledger entries confirm.
 //!       `commit` and `migrate` are the two that write a store line.
+//!   safedeps-core advisory-log rotate
+//!       The rotation of advisory.log in SAFEDEPS_HOME (state/log.rs), run
+//!       by the CLI once its own look at the size says the file is at the
+//!       bound. Exit 0 where the file was rotated, under the bound or held by
+//!       another rotation; exit 1, and the reason on stderr, where it was not
+//!       rotated.
 //!
 //! `pre-probe`, `post-probe`, `ask-probe`, `ledger`, `state-rotate` and
 //! `json-stream` are measurement entries: each takes data on stdin and calls
@@ -498,6 +505,19 @@ fn main() {
             Some(input) => ask::probe(&input),
             None => 2,
         },
+        Some("advisory-log") if args.len() == 3 && args[2] == "rotate" => {
+            os::set_umask(0o077);
+            match state::advisory_rotate_once(&state::advisory_path(&state::guard_dir())) {
+                state::Rotation::Failed(said) => {
+                    let mut line = b"safedeps-core advisory-log: ".to_vec();
+                    line.extend_from_slice(&said);
+                    line.push(b'\n');
+                    let _ = std::io::stderr().write_all(&line);
+                    1
+                }
+                _ => 0,
+            }
+        }
         Some("state-rotate") => {
             os::set_umask(0o077);
             let path = state::guard_dir().join("advisory.log");
@@ -542,7 +562,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals commit <hash> <staged> <entry> | approvals revoke <hash> <staged> <entry> <seen> | approvals index | approvals migrate [--json] [--] [<archive>...] | kat [<path>] | stamp [--check] | version");
+            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals commit <hash> <staged> <entry> | approvals revoke <hash> <staged> <entry> <seen> | approvals index | approvals migrate [--json] [--] [<archive>...] | advisory-log rotate | kat [<path>] | stamp [--check] | version");
             2
         }
     };

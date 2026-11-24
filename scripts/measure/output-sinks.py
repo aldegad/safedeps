@@ -71,7 +71,7 @@ CHAR = re.compile(r"(?:b)?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|[^\n])|[^'
 HUMAN = set('log_advisory log_command raw_log log say warn'.split())
 WRITES = set('write write_all write_fmt write_vectored write_all_vectored write_at write_all_at '
              'write_state_file write_renamed append'.split())
-COPIES = set('copy copy_file copy_state_file renamed_file rename'.split())
+COPIES = set('copy copy_file copy_state_file renamed_file rename hard_link'.split())
 CAPABILITIES = set('stdout stderr File OpenOptions Stdio Command create create_new open '
                    'truncate flush set_len spawn status output from_raw_fd from_raw_handle'.split())
 MACROS = set('print println eprint eprintln write writeln dbg panic assert assert_eq assert_ne '

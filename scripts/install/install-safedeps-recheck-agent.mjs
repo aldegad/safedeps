@@ -429,15 +429,15 @@ function buildRuntime(dir, core) {
   // each other. A hand-kept list of them missed one twice, and each time the
   // copied bin aborted at source time, so the daily re-check never ran: first
   // lib/npm/closure.sh (finding #6), then lib/truth-sources.sh from v2.15.8 and
-  // lib/advisory-log-rotate.sh and lib/npm/ask.sh from v2.18.0. So the whole
-  // lib/ tree is copied, and there is no list to keep in step.
+  // two more lib files from v2.18.0. So the whole lib/ tree is copied, and
+  // there is no list to keep in step.
   copyRuntimeTree(dir, 'lib');
   copyRuntimeFile(dir, 'scripts/safedeps-recheck-alert.sh', 0o755);
   // The CLI finds its core beside itself and nowhere else, so the core goes
   // where it is in the checkout. Only this machine's: the CLI runs no other.
   // The runtime has no rust/ for the core's stamp check to read, and needs
   // none: that check runs on the hook path (pre, post), and the runtime's CLI
-  // runs the core's `approvals` only.
+  // runs the core's `approvals` and `advisory-log rotate` only.
   copyRuntimeFile(dir, core);
   fs.writeFileSync(path.join(dir, MARKER), 'built by install-safedeps-recheck-agent.mjs; the runtime is replaced as a whole\n', { mode: 0o644 });
 }

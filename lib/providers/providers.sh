@@ -27,10 +27,11 @@ SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-8640
 # compared against is the value it was assigned.
 # shellcheck source=../truth-sources.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/truth-sources.sh"
-# Retention for that same file. Sourced here because this is where the advisory
-# log's path is decided — the policy and the path stay in one place.
-# shellcheck source=../advisory-log-rotate.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/advisory-log-rotate.sh"
+# The size at which advisory.log rotates. The core rotates it
+# (rust/src/state/log.rs, through `safedeps-core advisory-log rotate`) and holds
+# the same default (rotation_bound_matches_cli). The CLI only looks at the size
+# first, so a run under the bound starts no core.
+SAFEDEPS_ADVISORY_LOG_MAX_BYTES="${SAFEDEPS_ADVISORY_LOG_MAX_BYTES:-67108864}"
 
 SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-${SAFEDEPS_DEFAULT_OSV_API_URL}}"
 SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-${SAFEDEPS_DEFAULT_OSV_BATCH_API_URL}}"
@@ -60,6 +61,44 @@ SAFEDEPS_STATUS_JQ="def status_hard_block: \"${SAFEDEPS_STATUS_HARD_BLOCK}\"; de
 # rust/src/post/providers.rs, held equal by provider_cache_constants_match_cli).
 SAFEDEPS_OSV_PAGE_LIMIT=20
 
+# The core binary beside this CLI, bin/native/<os>-<arch>/safedeps-core, into
+# SF_CORE. The platform is read from bash the way the hook entry reads it
+# (scripts/safedeps-hook-entry.sh), and nothing in the environment chooses the
+# binary. The approvals store is the core's (rust/src/approvals.rs), so an
+# approval is written with it and a cache hit is read with it, each time in the
+# SAFEDEPS_HOME this CLI writes the ledger and advisory.log in. The rotation of
+# advisory.log is the core's too, and the watch rotates it as the CLI does, so
+# the lookup is here, where both find it. Where the core is not there,
+# SF_CORE_MISSING says where it was looked for.
+SF_CORE=""
+SF_CORE_MISSING=""
+sf_core() {
+  local machine="${BASH_VERSINFO[5]:-}" native="${SAFEDEPS_REPO_DIR}/bin/native" os="" arch="" repair
+
+  if [[ -d "${SAFEDEPS_REPO_DIR}/rust" ]]; then
+    repair="build it from this checkout with ${SAFEDEPS_REPO_DIR}/scripts/build-core.sh"
+  else
+    repair="reinstall the package"
+  fi
+  case "${machine}" in
+    *-darwin*) os=darwin ;;
+    *-linux*) os=linux ;;
+  esac
+  case "${machine%%-*}" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  if [[ -z "${os}" || -z "${arch}" ]]; then
+    SF_CORE_MISSING="no safedeps-core binary is built for this machine (bash was built for ${machine:-an unnamed machine}), so none was found under ${native}"
+    return 1
+  fi
+  SF_CORE="${native}/${os}-${arch}/safedeps-core"
+  if [[ ! -f "${SF_CORE}" || ! -x "${SF_CORE}" ]]; then
+    SF_CORE_MISSING="the safedeps-core binary is missing: ${SF_CORE} is not an executable file. Repair: ${repair}"
+    return 1
+  fi
+}
+
 safedeps_providers_init() {
   umask 077
   mkdir -p \
@@ -76,11 +115,29 @@ safedeps_providers_init() {
 # one run's worth of lines. Checking at the first write of each process bounds
 # the file to (threshold + one run) — measured, a run appends single-digit MB —
 # which is what a size bound is for.
+# The look only spares the core a start. The core rotates, and looks again
+# under its lock. A size or a bound that is not a number is not read as under
+# the bound: the core reads both again. With no core the file is not rotated,
+# and the run says so on stderr, once. It writes no line to the log for that: a
+# line there is one more in the file that is not bounded, and nobody reads it.
 SAFEDEPS_ADVISORY_LOG_ROTATE_CHECKED=""
 safedeps_advisory_log_rotate_once() {
+  local size=""
   [[ -n "${SAFEDEPS_ADVISORY_LOG_ROTATE_CHECKED}" ]] && return 0
   SAFEDEPS_ADVISORY_LOG_ROTATE_CHECKED=1
-  safedeps_advisory_log_rotate_if_needed "${SAFEDEPS_ADVISORY_LOG}" || true
+  [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] || return 0
+  size=$(wc -c < "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null) || size=""
+  size="${size//[[:space:]]/}"
+  if [[ "${size}" =~ ^[0-9]+$ && "${SAFEDEPS_ADVISORY_LOG_MAX_BYTES}" =~ ^[0-9]+$ ]] \
+    && (( 10#${size} < 10#${SAFEDEPS_ADVISORY_LOG_MAX_BYTES} )); then
+    return 0
+  fi
+  if ! sf_core; then
+    printf 'safedeps: %s is not rotated: %s. It holds %s bytes, and it rotates at %s.\n' \
+      "${SAFEDEPS_ADVISORY_LOG}" "${SF_CORE_MISSING}" "${size:-an unread number of}" "${SAFEDEPS_ADVISORY_LOG_MAX_BYTES}" >&2
+    return 0
+  fi
+  SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" advisory-log rotate || true
 }
 
 # Say once per process when the run is judging against something other than the

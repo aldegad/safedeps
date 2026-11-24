@@ -14,7 +14,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 mod log;
-pub use log::advisory_rotate_once;
+pub use log::{advisory_rotate_once, Rotation};
 
 /// `GUARD_DIR="${SAFEDEPS_HOME:-${HOME}/.safedeps}"`. An empty
 /// `SAFEDEPS_HOME` counts as unset, and an unset `HOME` leaves the path

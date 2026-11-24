@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.25.0"
+SAFEDEPS_VERSION="2.26.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -358,41 +358,9 @@ sf_check_not_written() {
 
 # ---- the core and the approvals store ----------------------------------------
 
-# The core binary beside this CLI, bin/native/<os>-<arch>/safedeps-core, into
-# SF_CORE. The platform is read from bash the way the hook entry reads it
-# (scripts/safedeps-hook-entry.sh), and nothing in the environment chooses the
-# binary. The approvals store is the core's (rust/src/approvals.rs), so an
-# approval is written with it and a cache hit is read with it, each time in the
-# SAFEDEPS_HOME this CLI writes the ledger and advisory.log in. Where it is not
-# there, SF_CORE_MISSING says where it was looked for.
-SF_CORE=""
-SF_CORE_MISSING=""
-sf_core() {
-  local machine="${BASH_VERSINFO[5]:-}" native="${SAFEDEPS_REPO_DIR}/bin/native" os="" arch="" repair
-
-  if [[ -d "${SAFEDEPS_REPO_DIR}/rust" ]]; then
-    repair="build it from this checkout with ${SAFEDEPS_REPO_DIR}/scripts/build-core.sh"
-  else
-    repair="reinstall the package"
-  fi
-  case "${machine}" in
-    *-darwin*) os=darwin ;;
-    *-linux*) os=linux ;;
-  esac
-  case "${machine%%-*}" in
-    arm64|aarch64) arch=arm64 ;;
-    x86_64|amd64) arch=x64 ;;
-  esac
-  if [[ -z "${os}" || -z "${arch}" ]]; then
-    SF_CORE_MISSING="no safedeps-core binary is built for this machine (bash was built for ${machine:-an unnamed machine}), so none was found under ${native}"
-    return 1
-  fi
-  SF_CORE="${native}/${os}-${arch}/safedeps-core"
-  if [[ ! -f "${SF_CORE}" || ! -x "${SF_CORE}" ]]; then
-    SF_CORE_MISSING="the safedeps-core binary is missing: ${SF_CORE} is not an executable file. Repair: ${repair}"
-    return 1
-  fi
-}
+# sf_core, the lookup of the core beside this CLI, is in
+# lib/providers/providers.sh: the rotation of advisory.log runs the core too,
+# and the watch sources that file without this one.
 
 # What `safedeps-core approvals index` prints, as jq: an object whose `present`
 # is a boolean, `hashes` an object keyed by hash and `broken` a number
@@ -1398,8 +1366,9 @@ cmd_watch() {
 # {present, hashes:{"sha256:<hex>":true}, broken}. A store line vouches for an
 # entry by its hash alone, the hash recomputed from the entry's own fields: an
 # ecosystem, a package and a version would vouch for an entry of another
-# project context. advisory.log is not read. It is rotated and compacted, so
-# what it holds is no record of which approvals were made. A store that is not
+# project context. advisory.log is not read. It is rotated, and retention
+# removes its oldest archives, so what it holds is no record of which approvals
+# were made. A store that is not
 # there is an answer, `present: false`, and vouches for nothing.
 # Returns 0, or 1 with SF_RECHECK_FAILURE naming what could not be read:
 # core_missing (no core to read the store with; SF_CORE_MISSING says where it
@@ -1900,7 +1869,8 @@ safedeps approvals migrate [<archive>...] [--json]
 
   Move into the approvals store the approvals that checks made before it.
   The migration reads the approve lines of ~/.safedeps/advisory.log and of
-  each archive named: a rotated advisory.log.<stamp>.gz, or a plain file. For
+  each archive named: a rotated advisory.log.<stamp> or its .gz, or another
+  file. A name that ends in .gz is read through gzip. For
   each hash a ledger entry confirms, it writes one store line. An entry
   confirms a hash when it stands at the hash's path and its own fields give
   that hash again.

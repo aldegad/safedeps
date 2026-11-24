@@ -1,10 +1,10 @@
 //! The approvals store: the record `re-check` reads to tell an approval that
 //! `safedeps check` made from a ledger entry nobody approved.
 //!
-//! advisory.log is not that record. It is rotated and compacted, so what it
-//! holds depends on which rotation read it last. The store is a file of its
-//! own, and nothing in safedeps rotates, compacts, truncates, renames or
-//! rewrites it: it only grows, by one line per approval.
+//! advisory.log is not that record. It is rotated, and retention removes its
+//! oldest archives, so what it holds is bounded, not whole. The store is a
+//! file of its own, and nothing in safedeps rotates, compacts, truncates,
+//! renames or rewrites it: it only grows, by one line per approval.
 //!
 //! Where: `approvals.jsonl` in `SAFEDEPS_HOME`, derived from it and from
 //! nothing else, as advisory.log is. No variable of its own names it, and the

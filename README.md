@@ -755,6 +755,7 @@ Two things went the other way. A script handed to `sh -c`, `bash -c`, `zsh -c`, 
 | `~/.safedeps/confirmed` | Current confirmed (safe) snapshot ID |
 | `~/.safedeps/snapshots/` | All snapshot files (lock files, package.json copies, metadata) |
 | `~/.safedeps/accepted-risk.jsonl` | Audit record of installs kept by `SAFEDEPS_ACCEPT_RISK` with timestamps, reasons, problems, and packages |
+| `~/.safedeps/advisory.log` | Audit record of what the gate decided and every bypass and failure it saw, bounded by rotation (below) |
 
 ```bash
 # View reorg history
@@ -768,6 +769,37 @@ ls -la ~/.safedeps/snapshots/
 ```
 
 Old unconfirmed snapshots are automatically pruned (keeping the 10 most recent), while the confirmed snapshot chain is always preserved. A run that was killed before it finished writing a snapshot leaves its files behind. They are never used as a baseline, and they are not pruned, because they look the same as a snapshot another run is still writing.
+
+### How `advisory.log` is kept
+
+`advisory.log` is a bounded record. No verdict and no approval provenance is read from it: cache hits and `re-check` read `approvals.jsonl` (see Approvals Store and Migration). When the live file reaches its bound, a rotation renames the whole file to an archive beside it, and the next line written makes a new live file. Nothing rewrites or truncates the live file. Lines that are not `INFO` go to the archive with every other line. Before 2.26.0 they stayed in the live file without end.
+
+| Variable | Default | What it sets |
+|---|---|---|
+| `SAFEDEPS_ADVISORY_LOG_MAX_BYTES` | 67108864 | The size at which the live file rotates |
+| `SAFEDEPS_ADVISORY_LOG_KEEP` | 5 | How many archives are kept, plain and gzip counted together |
+| `SAFEDEPS_ADVISORY_LOG_ARCHIVE_TOTAL_BYTES` | 536870912 | How many bytes all archives together may hold |
+| `SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS` | 3600 | How long a plain archive waits after its modification time before a rotation compresses it |
+
+- **Archives.** An archive is `advisory.log.<UTC stamp>`, such as `advisory.log.20261124T061500Z`, with `.1`, `.2` and so on after the stamp for later archives of the same second. A new archive stays plain, because a process that opened the log before the rename may still write to it. A later rotation compresses it to `<archive>.gz` once the quiet window has passed since its modification time. A rotation compresses at most one archive.
+- **Retention.** Past either bound, the oldest archives are removed first. The archive just made is always kept.
+- **The lock.** `advisory.log.rotate.lock` is the rotation's lock file. It stays in place. The kernel releases the lock when the rotating process exits, however it ends, so a killed rotation does not block the next one. A temporary `advisory.log.compressing` exists while a compression runs.
+- **Who rotates.** The core rotates (`safedeps-core advisory-log rotate`). The CLI and the watch look at the size first and start the core only at the bound. The post hook rotates when it starts its provider queries. Each process looks once.
+- **Without the core, no rotation.** The CLI and the watch then say on stderr, once per run, that the log is not rotated, with its path, its size and the bound. They write no line to the log for it.
+- **What a rotation says.** A rotation writes one line to the new live file: `WARN advisory log rotated: <bytes> bytes moved to <archive>`, followed by any archive name it passed over, its compression and its removals. A rotation that could not rotate writes `ERROR advisory log not rotated: <reason>`.
+
+Limits:
+
+- A line leaves the record by retention. It can also be lost when its process writes to an archive after a later rotation's compression read that archive. The quiet window counts from the archive's modification time. Just before it renames the log, a rotation touches it, setting its modification time to now. The window starts at that touch, not at the rename, and a later write starts it again. A process that opened the log before the touch can lose a line this way when it held the log open for longer than the quiet window. A process that opened the log between the touch and the rename has less of the window, because the window has run since the touch. So it can lose a line even though it held the log open for less than the window. If the rotation paused there for longer than the window, such a process can have none left.
+- A rotation that ends between creating an archive name and the rename leaves that name as an empty archive. The next rotation reads it as the newest archive, and retention counts it.
+- Two versions of safedeps writing to one `SAFEDEPS_HOME` at the same time were not measured.
+
+Upgrading from an earlier version:
+
+- Refresh the watch runtime, as 2.25.0 asked: run `install` with the same `--times` on a LaunchAgent host, or `install --runtime-only` elsewhere (see Re-checking What Is Already Installed). Until then it runs the old log code and reports `agent_runtime_stale: true`. A runtime from 2.21.0 to 2.24.0 reads approval provenance from the live `advisory.log`. After a rotation, its `re-check` can report honest approvals under `suspected_forgery` with reason `missing_advisory_log_approval`. This was read from the code, not measured.
+- Earlier versions locked the rotation with a directory at `advisory.log.rotate.lock`. The new lock file at that path keeps them from rotating, so a copy that was not refreshed leaves the log to this version. This was read from the code.
+- If you have not migrated your approvals yet, run `safedeps approvals migrate` before retention removes the archives that hold your earlier approve lines. Once a rotation has run, name those archives, for example `safedeps --json approvals migrate ~/.safedeps/advisory.log.[0-9]*`.
+- To go back to a version before 2.26.0, remove `~/.safedeps/advisory.log.rotate.lock`. Otherwise that version never rotates the log.
 
 ## Security Hardening
 
