@@ -157,7 +157,7 @@ After the install command completes, the verify hook analyzes what changed. For 
 3. **Lock file diff analysis** -- Compares the lock files with the copies taken before the command. For npm, the sources come from both records, and a source counts only when no record held it before the command:
    - Resolved URLs pointing to non-standard registries. Only a URL that starts with `https://registry.npmjs.org/` or `https://registry.yarnpkg.com/` is the public registry, and only where npm says it fetched it from there (npm fetches such a URL from its configured registry unless `replace-registry-host` is `never`). A directory dependency the install linked is a non-standard source too, unless it is one of the project's declared workspaces
    - Insecure protocols (`http://`, `git://`) in resolved URLs
-   - Unusually large dependency additions (>50 new resolved entries in `package-lock.json`, indicating potential dependency confusion)
+   - Unusually large dependency additions, which may indicate dependency confusion: more than 50 package names in `package-lock.json` that its copy from before the command does not hold. A name is the one a package is installed under in `node_modules`, or the `name` its entry gives. The folder of a workspace member or a linked directory is not a name: npm writes the `name` there once it differs from the folder, so moving the folder adds none. A package already there at another version, place or source adds no name. The closure check judges that version, and the source and install-script checks read it. A `package-lock.json` that cannot be read is a reason, not a count of zero
 
 4. **Binary inspection** -- Inspects up to 20 newly added `.bin` names sorted against snapshot, reading regular targets and symlinks directly for coherent image headers rather than `file` command prose, ignoring scripts and ordinary text. The native scanner excludes .bin names beginning with a dot, matching pre-install snapshots and trace listings. Identifies ELF (`ET_EXEC`/`ET_DYN`), Mach-O (executable/dylib/bundle/dyld, not object/core/dSYM; Fat32/Fat64 big-endian with 16 KiB prefix, max 818/127 architectures, and hidden ARM64 extra fat32 slot), and PE executable images including DLLs. Format mismatches (including impossible fat counts and Java) are `NotNative`; skips if prior rejection reasons exist. Strictly reads candidates without executing them (no package execution or loader emulation); native identification is no loadability, execution, or safety guarantee. Coherent ELF header validation is stricter than Linux's loader, so a malformed ELF header that Linux accepts can be classified NotNative; this is a classification limitation, not a claim of Linux execution testing. Bounded by supervised core child: `min(scan start + 1s, post start + 25s)`, 64 KiB per file, 20 * 64 KiB total, shared baseline/directory 1 MiB and 16,384 entries (this inspection limit is no overall hook termination or rollback time guarantee). Incomplete inspection (I/O, deadline, budget, invalid child result) fails closed as an independent rollback reason preventing rebuild/`CONFIRM`.
 
@@ -745,7 +745,7 @@ Two things went the other way. A script handed to `sh -c`, `bash -c`, `zsh -c`, 
 - **`ua-parser-js` hijack (2021)** -- Compromised package added a `preinstall` script that downloaded and executed cryptominers. Caught by: install script analysis (network access + code execution).
 - **`colors` / `faker` sabotage (2022)** -- While these were author-initiated, the abnormal dependency behavior would trigger the dependency explosion check.
 - **Typosquatting campaigns** -- Ongoing campaigns publishing packages like `crossenv` (instead of `cross-env`) or `babelcli` (instead of `babel-cli`). Caught by: pre-flight typosquatting pattern matching.
-- **Dependency confusion attacks** -- Internal package names published to the public registry with higher version numbers. Caught by: non-standard registry detection + large dependency count changes.
+- **Dependency confusion attacks** -- Internal package names published to the public registry with higher version numbers. Caught by: the closure check, because no approval names the higher version, + non-standard registry detection.
 
 ## Logs and Snapshots
 
@@ -755,6 +755,7 @@ Two things went the other way. A script handed to `sh -c`, `bash -c`, `zsh -c`, 
 | `~/.safedeps/confirmed` | Current confirmed (safe) snapshot ID |
 | `~/.safedeps/snapshots/` | All snapshot files (lock files, package.json copies, metadata) |
 | `~/.safedeps/accepted-risk.jsonl` | Audit record of installs kept by `SAFEDEPS_ACCEPT_RISK` with timestamps, reasons, problems, and packages |
+| `~/.safedeps/advisory.log` | Audit record of what the gate decided and every bypass and failure it saw, bounded by rotation (below) |
 
 ```bash
 # View reorg history
@@ -768,6 +769,37 @@ ls -la ~/.safedeps/snapshots/
 ```
 
 Old unconfirmed snapshots are automatically pruned (keeping the 10 most recent), while the confirmed snapshot chain is always preserved. A run that was killed before it finished writing a snapshot leaves its files behind. They are never used as a baseline, and they are not pruned, because they look the same as a snapshot another run is still writing.
+
+### How `advisory.log` is kept
+
+`advisory.log` is a bounded record. No verdict and no approval provenance is read from it: cache hits and `re-check` read `approvals.jsonl` (see Approvals Store and Migration). When the live file reaches its bound, a rotation renames the whole file to an archive beside it, and the next line written makes a new live file. Nothing rewrites or truncates the live file. Lines that are not `INFO` go to the archive with every other line. Before 2.26.0 they stayed in the live file without end.
+
+| Variable | Default | What it sets |
+|---|---|---|
+| `SAFEDEPS_ADVISORY_LOG_MAX_BYTES` | 67108864 | The size at which the live file rotates |
+| `SAFEDEPS_ADVISORY_LOG_KEEP` | 5 | How many archives are kept, plain and gzip counted together |
+| `SAFEDEPS_ADVISORY_LOG_ARCHIVE_TOTAL_BYTES` | 536870912 | How many bytes all archives together may hold |
+| `SAFEDEPS_ADVISORY_LOG_QUIET_SECONDS` | 3600 | How long a plain archive waits after its modification time before a rotation compresses it |
+
+- **Archives.** An archive is `advisory.log.<UTC stamp>`, such as `advisory.log.20261124T061500Z`, with `.1`, `.2` and so on after the stamp for later archives of the same second. A new archive stays plain, because a process that opened the log before the rename may still write to it. A later rotation compresses it to `<archive>.gz` once the quiet window has passed since its modification time. A rotation compresses at most one archive.
+- **Retention.** Past either bound, the oldest archives are removed first. The archive just made is always kept.
+- **The lock.** `advisory.log.rotate.lock` is the rotation's lock file. It stays in place. The kernel releases the lock when the rotating process exits, however it ends, so a killed rotation does not block the next one. A temporary `advisory.log.compressing` exists while a compression runs.
+- **Who rotates.** The core rotates (`safedeps-core advisory-log rotate`). The CLI and the watch look at the size first and start the core only at the bound. The post hook rotates when it starts its provider queries. Each process looks once.
+- **Without the core, no rotation.** The CLI and the watch then say on stderr, once per run, that the log is not rotated, with its path, its size and the bound. They write no line to the log for it.
+- **What a rotation says.** A rotation writes one line to the new live file: `WARN advisory log rotated: <bytes> bytes moved to <archive>`, followed by any archive name it passed over, its compression and its removals. A rotation that finds the lock held writes no line. A rotation that fails writes `ERROR advisory log not rotated: <reason>`.
+
+Limits:
+
+- A line leaves the record by retention. It can also be lost when its process writes to an archive after a later rotation's compression read that archive. The quiet window counts from the archive's modification time. Just before it renames the log, a rotation touches it, setting its modification time to now. The window starts at that touch, not at the rename, and a later write starts it again. A process that opened the log before the touch can lose a line this way when it held the log open for longer than the quiet window. A process that opened the log between the touch and the rename has less of the window, because the window has run since the touch. So it can lose a line even though it held the log open for less than the window. If the rotation paused there for longer than the window, such a process can have none left.
+- A rotation that ends between creating an archive name and the rename leaves that name as an empty archive. The next rotation reads it as the newest archive, and retention counts it.
+- Two versions of safedeps writing to one `SAFEDEPS_HOME` at the same time were not measured.
+
+Upgrading from an earlier version:
+
+- Refresh the watch runtime, as 2.25.0 asked: run `install` with the same `--times` on a LaunchAgent host, or `install --runtime-only` elsewhere (see Re-checking What Is Already Installed). Until then it runs the old log code and reports `agent_runtime_stale: true`. A runtime from 2.21.0 to 2.24.0 reads approval provenance from the live `advisory.log`, and the provenance code in 2.24.0 is the same as in 2.21.0. On macOS, a 2.21.0 watch runtime was measured after `safedeps approvals migrate` and a 2.26.0 rotation. Its `re-check` reported honest approvals under `suspected_forgery` with reason `missing_advisory_log_approval`, including approvals made by 2.26.0 after the upgrade. `re-check` did not revoke them, and the daily alert named them. Refreshing the runtime with `install --runtime-only` from 2.26.0 cleared the report.
+- Earlier versions locked the rotation with a directory at `advisory.log.rotate.lock`. The new lock file at that path keeps them from rotating, so a copy that was not refreshed leaves the log to this version. Those earlier versions take a lock whose modification time is more than 300 seconds old for one its holder left. In measurements on macOS, neither 2.21.0's CLI nor `safedeps-core state-rotate` rotated with a 2.26.0 lock file whose modification time was 0 or 3600 seconds old. The lock file stayed untouched, no log line was lost, and 2.26.0 rotated afterward. The lock code is the same from 2.21.0 to 2.25.0.
+- If you have not migrated your approvals yet, run `safedeps approvals migrate` before retention removes the archives that hold your earlier approve lines. Once a rotation has run, name those archives, for example `safedeps --json approvals migrate ~/.safedeps/advisory.log.[0-9]*`.
+- To go back to a version before 2.26.0, remove `~/.safedeps/advisory.log.rotate.lock`. Otherwise that version never rotates the log.
 
 ## Security Hardening
 

@@ -214,7 +214,7 @@
     },
     {
       "path": "scripts/measure/core-log-differential.py",
-      "consumer": "native state-rotate; fixed retained bytes, gzip contents, inode and pruning expectations"
+      "consumer": "native state-rotate; fixed archive bytes and inode, rotation line, lock file and pruning expectations"
     },
     {
       "path": "scripts/measure/core-pre-context-probe.py",
