@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.25.0).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.26.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - watch 는 LLM 토큰을 쓰지 않으며 opt-in 이다: 호스트가 고른 스케줄러가 `safedeps --json watch scan` 을 기본값으로 하루 두 번(현지 시각 09:00 과 21:00) 실행한다. macOS 에서는 `safedeps` 가 `install-safedeps-recheck-agent.mjs` 로 설치하는 사용자별 `launchd` 에이전트 하나를 제공한다. 어느 시스템에서나 에이전트의 로컬 루틴이 같은 scan 을 실행할 수 있으며, Linux 에서는 systemd 사용자 타이머나 cron 이, Windows 에서는 Task Scheduler 가 실행할 수 있다(README, "Re-checking What Is Already Installed"). ledger re-check 에 더해, 등록된 프로젝트 root 아래의 lockfile 을 판정하고 host JDK 의 업데이트 상태를 보고한다. `~/.safedeps/watch/state.json`, `~/.safedeps/recheck.log`, `~/.safedeps/recheck-alerts.jsonl` 를 쓴다. macOS 에서는 wrapper 가 새 event, fresh 가 아닌 population, error 가 있는 실행, stale 인 agent runtime, 그리고 re-check 에서 유지한 ledger 알림(새 CVE/KEV/revoke/provider-skip/위조-의심) 시 macOS notification 을 띄운다. Linux 와 Windows 에서는 wrapper 가 `~/.safedeps/recheck-alerts.jsonl` 에 레코드만 기록한다. busy 인 scan 은 notification 없이 `recheck-alerts.jsonl` 에만 기록한다. 네트워크는 OSV / CISA KEV / GHSA query, OpenJDK Vulnerability Group advisory, Adoptium API, 그리고 npm registry 의 advisory database 에 대한 pnpm, yarn, bun 의 native audit 에만 쓴다.
 

@@ -16,7 +16,7 @@
 #       could be deleted and the suite stayed green
 #
 # The runtime's re-check reads the approvals store with the core it finds
-# beside its own bin (sf_core in bin/safedeps), and a runtime the installer
+# beside its own bin (sf_core in lib/providers/providers.sh), and a runtime the installer
 # built without one failed every daily re-check with core_missing. So the
 # runtime carries this machine's core, both digests count it, and a checkout
 # without it is refused by name. A fixture's core is a stand-in script: these
@@ -69,7 +69,7 @@ row() {
 new_dir() { mktemp -d "${tmp_root}/row.XXXXXX"; }
 
 # This machine's core under a checkout or a runtime, where the CLI looks for
-# its own (sf_core in bin/safedeps): bin/native/<os>-<arch>/safedeps-core, the
+# its own (sf_core in lib/providers/providers.sh): bin/native/<os>-<arch>/safedeps-core, the
 # platform read from the machine bash was built for. Written here again, so the
 # rows hold the installer to the CLI's place and not to its own answer.
 core_file() {

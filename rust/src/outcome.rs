@@ -14,9 +14,11 @@ pub enum Outcome {
 // Two phrasings stand for a write and a rename, each pinned by its own rows:
 // Write and Rename say "the write to" and "the rename to" a path (an
 // approval's commit and the migration); WriteOf and RenameOf say "the write
-// of" and "the rename of" a path (a post run's judgment mark).
+// of" and "the rename of" a path (a post run's judgment mark). Touch is
+// setting a path's modification time. Link is link(2) to a path, the name
+// it makes.
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal, Gzip, Read(&'a Path), Create(&'a Path), Open(&'a Path), Write(&'a Path), Sync(&'a Path), Rename(&'a Path), Lock(&'a Path), WriteOf(&'a Path), RenameOf(&'a Path) }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Curl, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal, Gzip, Read(&'a Path), Create(&'a Path), Open(&'a Path), Write(&'a Path), Sync(&'a Path), Rename(&'a Path), Link(&'a Path), Lock(&'a Path), Touch(&'a Path), WriteOf(&'a Path), RenameOf(&'a Path) }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -40,7 +42,9 @@ impl Outcome {
             Action::Write(path)=>{named=[b"the write to ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Sync(path)=>{named=[b"the sync of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Rename(path)=>{named=[b"the rename to ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Link(path)=>{named=[b"the link to ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::Lock(path)=>{named=[b"the lock of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::Touch(path)=>{named=[b"the touch of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::WriteOf(path)=>{named=[b"the write of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
             Action::RenameOf(path)=>{named=[b"the rename of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
@@ -88,7 +92,9 @@ mod tests {
             (Action::Write(path), b"the write to "),
             (Action::Sync(path), b"the sync of "),
             (Action::Rename(path), b"the rename to "),
+            (Action::Link(path), b"the link to "),
             (Action::Lock(path), b"the lock of "),
+            (Action::Touch(path), b"the touch of "),
             (Action::WriteOf(path), b"the write of "),
             (Action::RenameOf(path), b"the rename of "),
         ] {
