@@ -28,6 +28,8 @@ rust/src/approvals.rs	open_for_append	boundary	capability	create	-	2
 rust/src/approvals.rs	open_for_append	boundary	capability	fs::OpenOptions::new	-	1
 rust/src/approvals.rs	open_for_append	boundary	capability	open	-	1
 rust/src/approvals.rs	open_for_append	boundary	file-mode	append	-	1
+rust/src/approvals.rs	read_turn	boundary	capability	fs::OpenOptions::new	-	1
+rust/src/approvals.rs	read_turn	boundary	capability	open	-	1
 rust/src/approvals.rs	rename	data	copy-or-publish	fs::rename	-	1
 rust/src/approvals.rs	report	human	log-or-report	say	data-field	1
 rust/src/approvals.rs	report	human	log-or-report	say	data-field+result-renderer	2
@@ -37,6 +39,11 @@ rust/src/approvals.rs	revoke_with	human	log-or-report	say	fixed-literal+other+re
 rust/src/approvals.rs	say_undone	human	log-or-report	say	fixed-literal+result-renderer	1
 rust/src/approvals.rs	write_locked	boundary	capability	fs::File	-	1
 rust/src/approvals.rs	write_then_sync	data	raw-or-serialized	write_all	-	1
+rust/src/approvals.rs	write_turn	boundary	capability	create	-	1
+rust/src/approvals.rs	write_turn	boundary	capability	fs::OpenOptions::new	-	1
+rust/src/approvals.rs	write_turn	boundary	capability	open	-	1
+rust/src/approvals.rs	write_turn	boundary	file-mode	write	-	1
+rust/src/approvals.rs	write_turn	data	raw-or-serialized	write_all_at	-	1
 rust/src/approvals/migrate.rs	<module>	boundary	import	std::fs	-	1
 rust/src/approvals/migrate.rs	<module>	boundary	import	std::io	-	1
 rust/src/approvals/migrate.rs	<module>	boundary	import	std::io::Write	-	1
@@ -151,6 +158,7 @@ rust/src/main.rs	mark_failed	data	raw-or-serialized	write_all	-	1
 rust/src/manager.rs	npm_read_args	boundary	capability	truncate	-	1
 rust/src/manager.rs	npx_first_pass	boundary	capability	truncate	-	1
 rust/src/os.rs	<module>	boundary	foreign-function	access	-	1
+rust/src/os.rs	<module>	boundary	foreign-function	clock_gettime	-	1
 rust/src/os.rs	<module>	boundary	foreign-function	flock	-	1
 rust/src/os.rs	<module>	boundary	foreign-function	freelocale	-	1
 rust/src/os.rs	<module>	boundary	foreign-function	isprint_l	-	1
@@ -168,10 +176,12 @@ rust/src/os.rs	bash_quote_units	boundary	foreign-call	iswprint_l	-	1
 rust/src/os.rs	bash_quote_units	boundary	foreign-call	newlocale	-	1
 rust/src/os.rs	child_exited_unreaped	boundary	foreign-call	waitid	-	1
 rust/src/os.rs	flock_within	boundary	foreign-call	flock	-	1
+rust/src/os.rs	host_clock	boundary	foreign-call	clock_gettime	-	1
 rust/src/os.rs	kill_group	boundary	foreign-call	kill	-	1
 rust/src/os.rs	scratch_dir	boundary	foreign-call	mkdtemp	-	1
 rust/src/os.rs	set_umask	boundary	foreign-call	umask	-	1
 rust/src/os.rs	stat_clock	boundary	foreign-call	localtime_r	-	1
+rust/src/os.rs	try_flock	boundary	foreign-call	flock	-	1
 rust/src/outcome.rs	<module>	boundary	import	std::io	-	1
 rust/src/post.rs	main	boundary	capability	create	-	1
 rust/src/post.rs	main	human	diagnostic	eprintln!	data-field+fixed-literal	1
