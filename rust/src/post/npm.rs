@@ -89,8 +89,9 @@ impl Npm{
         let ok=state::write_state_file(&dir.join(format!("{}.json",store.hash)),&jv::dump(&v)).is_ok();
         if !ok{state::log_advisory(&store.home,&cat(&[b"post-verify: could not keep the hash of the tree record judged in ",sh::bytes(&store.project),b" (",sh::bytes(&dir),b"), so the next install there counts every integrity in it as new."]));}
     }
+    /// The integrities the install brought, from the records read. A record
+    /// that could not be read names none here (`record_inner` answers for it).
     fn fresh_integrities(store:&Store,records:&Records,accepted:&Sources)->Result<Vec<Value>,()>{
-        if records.unread.is_some(){return Err(())}
         if records.each().next().is_none(){return Ok(Vec::new())}
         let before=store.path(&store.id,b"npm-tree-record.json");
         let mut judged=None;
@@ -165,13 +166,23 @@ impl Npm{
             if let Some(tree)=&records.tree{Self::observe(store,&tree.bytes);}
         }
     }
+    /// A record that could not be read is the effect gate's reason, and the
+    /// install is rolled back for it (`effect::check`). The bytes only that
+    /// record names cannot be recorded, and advisory.log says so. The bytes
+    /// the records read beside it name are recorded, since a withheld entry
+    /// only adds a restriction, and the record is not whole: the tree record
+    /// is not kept as one safedeps judged.
     fn record_inner(&mut self,store:&Store,records:&Records,current:&Value,report:&mut Report,until:Instant,accepted:&Sources)->bool{
         let project=sh::bytes(&store.project);
+        let whole=match &records.unread{
+            Some(unread)=>{state::log_advisory(&store.home,&cat(&[b"post-verify: npm record ",&unread.text(&store.project),b", so the bytes only it names were not recorded as withheld."]));false}
+            None=>true,
+        };
         let found=match Self::fresh_integrities(store,records,accepted){Ok(f)=>f,Err(_)=>{
             state::log_advisory(&store.home,&cat(&[b"post-verify: the npm records in ",project,b" could not be read for the bytes this install brought in, so none of them were recorded as withheld."]));
             report.say(cat(&[b"safedeps could not read which bytes this install brought into ",project,b", so if npm fetched any of them from a registry that is not the public npm registry, it has not recorded them, and another project that receives the same bytes may rebuild them"]));return false;
         }};
-        if found.is_empty(){return true}
+        if found.is_empty(){return whole}
         let mut facts=self.facts(store,current,until).clone();
         if sourced(current){
             if let Value::Arr(fs)=&mut facts{fs.retain(|f|!matches!(field(f,"cause"),Ok(Value::Str(c)) if c==b"sourced"));}
@@ -181,7 +192,7 @@ impl Npm{
             state::log_advisory(&store.home,&cat(&[b"post-verify: safedeps could not tell where npm fetched the bytes this install brought into ",project,b", so none of them were recorded as withheld."]));
             report.say(cat(&[b"safedeps could not tell where npm fetched the bytes this install brought into ",project,b", so it has not recorded them as withheld, and another project that receives the same bytes may rebuild them"]));return false;
         }};
-        let Value::Obj(rows)=&recorded else{return false};if rows.is_empty(){return true}
+        let Value::Obj(rows)=&recorded else{return false};if rows.is_empty(){return whole}
         let mut descriptions=Vec::new();let mut packages=Vec::new();
         for(_,v)in rows{
             let name=field(v,"package").unwrap_or(&jv::NULL);packages.push(name.clone());
@@ -201,7 +212,7 @@ impl Npm{
             report.say(cat(&[b"safedeps could not record the bytes this install fetched from a registry that is not the public npm registry (",sh::bytes(&dir),b"), so another project that receives the same bytes may rebuild them"]));return false;
         }
         self.recorded.extend(jv::unique(packages).iter().map(strval).filter(|s|!s.is_empty()));
-        state::log_advisory(&store.home,&cat(&[b"post-verify: recorded as withheld on this machine, by integrity: ",&summary,b" (into ",project,b")."]));true
+        state::log_advisory(&store.home,&cat(&[b"post-verify: recorded as withheld on this machine, by integrity: ",&summary,b" (into ",project,b")."]));whole
     }
 }
 

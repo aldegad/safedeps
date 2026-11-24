@@ -116,7 +116,11 @@ pub struct Records {
     /// The installed tree's record, where it is there.
     pub tree: Option<Record>,
     /// A record that could not be read. Nothing is judged as read beside it:
-    /// whoever reads the records answers for this one first.
+    /// whoever reads the records answers for this one first. The effect gate
+    /// rolls the install back for it (`effect::check`). The record of withheld
+    /// bytes, which only adds a restriction, says in advisory.log that the
+    /// bytes only this record names were not recorded, and records the bytes
+    /// the records read beside it name (`Npm::record`).
     pub unread: Option<Unread>,
 }
 
