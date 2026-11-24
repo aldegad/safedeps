@@ -29,22 +29,10 @@ SAFEDEPS_NPM_SOURCE_JQ='def source_deny_only($reason; $deny_only): if $reason ==
 # version, byte for byte. The advisories are those every record's entries
 # name. The watch (lib/watch/lockfiles.sh) and the audit (lib/gates/audit.sh)
 # read it; $root and $rel only label the row. A rust-core unit holds it to
-# the core's judgment (accepted::coverage_matches_cli).
-SAFEDEPS_NPM_ACCEPTED_JQ='
-  def record_name($k; $v):
-    if (($v.name // null) | type) == "string" and $v.name != "" then $v.name
-    else ($k | split("node_modules/") | last | split("/") | if ((.[0] // "") | startswith("@")) then .[0:2] | join("/") else (.[0] // "") end) end;
-  [(.packages // {}) | to_entries[]
-   | select((.key | test("(^|/)node_modules/")) and (.value | type) == "object" and .value.link != true)
-   | {package: record_name(.key; .value), version: (.value.version // ""), url: (.value.resolved // ""), integrity: (.value.integrity // "")}]
-  | group_by([.package, .version])[]
-  | . as $records
-  | [$records[] | . as $r | [$entries[] | select(.url == $r.url and .integrity == $r.integrity and .package == $r.package and .version == $r.version)]] as $matched
-  | select(all($matched[]; length > 0))
-  | {root: $root, rel: $rel, package: $records[0].package, version: $records[0].version,
-     urls: ($records | map(.url) | unique),
-     advisories: (($matched | map(map(.advisories[]) | unique)) as $per
-                  | reduce $per[1:][] as $ids ($per[0]; map(select(. as $i | $ids | index([$i]) != null))))}'
+# the core's judgment (accepted::coverage_matches_cli). It is one line, as
+# every SAFEDEPS_NPM_ declaration is: ledger::context_kinds_match_cli reads
+# each declaration as its line.
+SAFEDEPS_NPM_ACCEPTED_JQ='def record_name($k; $v): if (($v.name // null) | type) == "string" and $v.name != "" then $v.name else ($k | split("node_modules/") | last | split("/") | if ((.[0] // "") | startswith("@")) then .[0:2] | join("/") else (.[0] // "") end) end; [(.packages // {}) | to_entries[] | select((.key | test("(^|/)node_modules/")) and (.value | type) == "object" and .value.link != true) | {package: record_name(.key; .value), version: (.value.version // ""), url: (.value.resolved // ""), integrity: (.value.integrity // "")}] | group_by([.package, .version])[] | . as $records | [$records[] | . as $r | [$entries[] | select(.url == $r.url and .integrity == $r.integrity and .package == $r.package and .version == $r.version)]] as $matched | select(all($matched[]; length > 0)) | {root: $root, rel: $rel, package: $records[0].package, version: $records[0].version, urls: ($records | map(.url) | unique), advisories: (($matched | map(map(.advisories[]) | unique)) as $per | reduce $per[1:][] as $ids ($per[0]; map(select(. as $i | $ids | index([$i]) != null))))}'
 
 
 safedeps_npm_require_jq() {
