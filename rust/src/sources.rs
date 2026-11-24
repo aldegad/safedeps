@@ -52,10 +52,12 @@
 //! The file only grows. Nothing in safedeps rotates, compacts, truncates or
 //! rewrites it; a revoke is a line, like an acceptance.
 //!
-//! Isolation: flock(2) on the file itself. A writer holds LOCK_EX for its
-//! whole write and a reader holds LOCK_SH for its whole read, so a reader
-//! never sees a line half written and two writers never write at once. A
-//! revoke reads and appends under one LOCK_EX. The lock belongs to the open
+//! Isolation: flock(2)'s exclusive lock on the file itself, the one kind of
+//! lock the core takes (`os::flock_within`). A writer holds it for its whole
+//! write and a reader for its whole read, so a reader never sees a line half
+//! written and two writers never write at once; the cost is that reads wait
+//! for each other. A revoke reads and appends under one hold. The lock
+//! belongs to the open
 //! file, so a process that dies holding it leaves nothing to clean up. A lock
 //! another process holds past the wait is an error: nothing is written or
 //! read without the lock.
@@ -249,7 +251,7 @@ fn read(bytes: &[u8]) -> Index {
     Index { present: true, entries, broken }
 }
 
-/// The ledger, read under LOCK_SH within `wait`.
+/// The ledger, read under the lock taken within `wait`.
 pub fn index(home: &Path, wait: Duration) -> Result<Index, Fault> {
     let at = path(home);
     let file = match fs::File::open(&at) {
@@ -257,19 +259,27 @@ pub fn index(home: &Path, wait: Duration) -> Result<Index, Fault> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Index::default()),
         Err(e) => return Err(Fault::Operation { outcome: Outcome::Io(Err(e)), path: at, action: |p| Action::Open(p) }),
     };
-    os::flock_within(&file, os::FileLock::Shared, wait).map_err(|o| Fault::Operation { outcome: o, path: at.clone(), action: |p| Action::Lock(p) })?;
+    lock(&file, &at, wait)?;
     let mut bytes = Vec::new();
     let mut f: &fs::File = &file;
     observed(f.read_to_end(&mut bytes), &at, |p| Action::Read(p))?;
     Ok(read(&bytes))
 }
 
-/// The file, opened to be appended to and locked LOCK_EX within `wait`.
+/// flock(2)'s exclusive lock on `file`, taken within `wait`, counted from
+/// this call. A reader takes it too: the core's lock has one kind.
+fn lock(file: &fs::File, at: &Path, wait: Duration) -> Result<(), Fault> {
+    os::flock_within(file, wait, os::host_clock, |_| None)
+        .map(|_| ())
+        .map_err(|o| Fault::Operation { outcome: o, path: at.to_owned(), action: |p| Action::Lock(p) })
+}
+
+/// The file, opened to be appended to and locked within `wait`.
 fn locked(home: &Path, wait: Duration) -> Result<(fs::File, PathBuf), Fault> {
     let at = path(home);
     let file = observed(fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(&at), &at, |p| Action::Open(p))?;
     let file = regular(file, &at)?;
-    os::flock_within(&file, os::FileLock::Exclusive, wait).map_err(|o| Fault::Operation { outcome: o, path: at.clone(), action: |p| Action::Lock(p) })?;
+    lock(&file, &at, wait)?;
     Ok((file, at))
 }
 
@@ -281,7 +291,7 @@ fn whole(file: &fs::File, at: &Path) -> Result<Vec<u8>, Fault> {
     Ok(bytes)
 }
 
-/// Under LOCK_EX: seals a torn last line, appends `lines` in the same write,
+/// Under the lock: seals a torn last line, appends `lines` in the same write,
 /// and syncs them. A failed sync is a line a reader sees, and it is said as
 /// the sync's outcome.
 fn append(file: &fs::File, at: &Path, lines: &[u8]) -> Result<(), Fault> {
@@ -328,8 +338,8 @@ fn accept_line(at: &str, a: &Accept) -> Vec<u8> {
     ]))
 }
 
-/// Appends one accept line for each of `accepts`, in one write, under LOCK_EX
-/// taken within `wait`. An entry that would stand for nothing (a URL
+/// Appends one accept line for each of `accepts`, in one write, under the
+/// lock taken within `wait`. An entry that would stand for nothing (a URL
 /// `url_acceptable` refuses, an empty value or advisory id) is refused before
 /// the file is opened, and nothing is written.
 pub fn accept(home: &Path, accepts: &[Accept], wait: Duration) -> Result<(), Fault> {
@@ -349,8 +359,8 @@ pub fn accept(home: &Path, accepts: &[Accept], wait: Duration) -> Result<(), Fau
     append(&file, &at_path, &lines)
 }
 
-/// Takes back every entry of `url` under one LOCK_EX: reads the ledger, and
-/// where any entry of that URL stands, appends one revoke line. The answer is
+/// Takes back every entry of `url` under one hold of the lock: reads the
+/// ledger, and where any entry of that URL stands, appends one revoke line. The answer is
 /// how many entries it took back; with none, nothing is written.
 pub fn revoke(home: &Path, url: &[u8], wait: Duration) -> Result<usize, Fault> {
     url_acceptable(url).map_err(|_| Fault::Judgment(b"the URL is not one an entry can name"))?;
@@ -532,7 +542,7 @@ mod tests {
         fs::remove_dir(path(&d.0)).unwrap();
         fs::write(path(&d.0), b"").unwrap();
         let holder = fs::OpenOptions::new().read(true).open(path(&d.0)).unwrap();
-        os::flock_within(&holder, os::FileLock::Exclusive, LOCK_WAIT).unwrap();
+        assert!(os::try_flock(&holder).unwrap(), "the row holds the lock");
         let short = Duration::from_millis(50);
         assert!(matches!(index(&d.0, short), Err(Fault::Operation { outcome: Outcome::Deadline, .. })));
         assert!(matches!(accept(&d.0, &[Accept { entry: &entry(URL, "sha512-one"), tool_use_id: None }], short), Err(Fault::Operation { outcome: Outcome::Deadline, .. })));

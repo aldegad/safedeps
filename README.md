@@ -322,7 +322,7 @@ Both `SAFEDEPS_ACCEPT_SOURCE` and `SAFEDEPS_ACCEPT_RISK` may appear in one comma
 Accepted sources are stored in `~/.safedeps/accepted-sources.jsonl`, whose path is derived from `SAFEDEPS_HOME` and nothing else. It is an append-only JSON lines file:
 - An accept line has exactly the keys `at`, `op` (`"accept"`), `url`, `integrity`, `package`, `version`, `advisories`, `reason`, `project`, and `tool_use_id`.
 - A revoke line has exactly the keys `at`, `op` (`"revoke"`), and `url`. It takes back every earlier entry of that URL.
-- Writers take an exclusive `flock(2)` on the file itself and end each write with a sync; readers take a shared `flock(2)`. A last line that a writer did not finish is sealed by the next writer and read as broken. Any line that is not one of the two forms stands for nothing and is counted as broken.
+- Writers and readers take an exclusive `flock(2)` on the file itself for the whole write or read, so reads wait for each other; writers end each write with a sync. A last line that a writer did not finish is sealed by the next writer and read as broken. Any line that is not one of the two forms stands for nothing and is counted as broken.
 - The core is its only reader and writer (`safedeps-core sources index`, `safedeps-core sources revoke <url>`). The CLI and the watch read it through the core.
 - Several entries may stand for one URL, for example after other bytes under the URL are accepted again.
 - Like the approval ledger, it is a same-user convenience record, not a security boundary against a same-user attacker.

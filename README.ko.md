@@ -322,7 +322,7 @@ SAFEDEPS_ACCEPT_SOURCE='https://example.test/pkg/-/pkg-1.0.0.tgz <who decided an
 수용된 출처는 `~/.safedeps/accepted-sources.jsonl`에 저장되며, 경로는 오직 `SAFEDEPS_HOME`에서만 파생됩니다. 이 파일은 추가 전용 JSON 라인 파일입니다:
 - 수용 라인은 정확히 `at`, `op`(`"accept"`), `url`, `integrity`, `package`, `version`, `advisories`, `reason`, `project`, `tool_use_id` 키를 가집니다.
 - 철회 라인은 정확히 `at`, `op`(`"revoke"`), `url` 키를 가지며, 해당 URL의 이전 항목을 모두 되돌립니다.
-- 작성자는 파일 자체에 배타적 `flock(2)`을 걸고 각 쓰기를 sync로 마무리하며, 읽기 작업은 공유 `flock(2)`을 사용합니다. 작성자가 끝마치지 못한 마지막 라인은 다음 작성자가 마감하고 손상된 라인으로 읽힙니다. 두 형식 중 어느 것에도 해당하지 않는 라인은 아무 효력도 가지지 않으며 손상된 라인으로 집계됩니다.
+- 작성자와 읽는 쪽 모두 쓰기나 읽기 내내 파일 자체에 배타적 `flock(2)`을 걸므로 읽기끼리도 서로 기다리며, 작성자는 각 쓰기를 sync로 마무리합니다. 작성자가 끝마치지 못한 마지막 라인은 다음 작성자가 마감하고 손상된 라인으로 읽힙니다. 두 형식 중 어느 것에도 해당하지 않는 라인은 아무 효력도 가지지 않으며 손상된 라인으로 집계됩니다.
 - 코어가 유일한 읽기 및 쓰기 주체입니다(`safedeps-core sources index`, `safedeps-core sources revoke <url>`). CLI와 watch는 코어를 통해 이 파일을 읽습니다.
 - 예를 들어 같은 URL 아래의 다른 바이트를 다시 수용한 경우 등 하나의 URL에 대해 여러 항목이 유효할 수 있습니다.
 - 승인 원장과 마찬가지로, 동일 사용자 공격자에 대한 보안 경계가 아니라 동일 사용자를 위한 편의 기록입니다.

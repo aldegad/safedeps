@@ -306,10 +306,10 @@ fn take(lock: &Path) -> Result<Option<fs::File>, Vec<u8>> {
         Err(e) if e.raw_os_error() == Some(EISDIR) => return Ok(None),
         Err(e) => return Err(io_said(e, Action::Open(lock))),
     };
-    match os::flock_within(&file, os::FileLock::Exclusive, Duration::ZERO) {
-        Ok(()) => Ok(Some(file)),
-        Err(Outcome::Deadline) => Ok(None),
-        Err(outcome) => Err(outcome.describe(Action::Lock(lock), Form::Action)),
+    match os::try_flock(&file) {
+        Ok(true) => Ok(Some(file)),
+        Ok(false) => Ok(None),
+        Err(e) => Err(io_said(e, Action::Lock(lock))),
     }
 }
 
@@ -624,7 +624,7 @@ mod tests {
         let (d, log) = dir();
         fs::write(&log, vec![b'x'; 200]).unwrap();
         let held = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(d.0.join("advisory.log.rotate.lock")).unwrap();
-        os::flock_within(&held, os::FileLock::Exclusive, Duration::ZERO).unwrap();
+        assert!(os::try_flock(&held).unwrap(), "another held the lock");
         assert_eq!(rotate(&log, &knobs(100)), Rotation::Held);
         assert_eq!(listing(&d.0), ["advisory.log", "advisory.log.rotate.lock"]);
         drop(held);
