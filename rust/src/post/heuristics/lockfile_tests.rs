@@ -77,9 +77,13 @@ fn v1(deps: &[Dep]) -> String {
 /// of the same top-level packages.
 fn v2(entries: &[Entry]) -> String {
     let deps: Vec<Dep> = entries.iter().map(|e| dep(e.key.trim_start_matches("node_modules/"), &e.version)).collect();
+    v2_with(entries, &deps)
+}
+/// A lockfileVersion 2 lock whose tree is the one given, whatever its map holds.
+fn v2_with(entries: &[Entry], deps: &[Dep]) -> String {
     let packages = v3(entries);
     let packages = packages.trim_end().trim_end_matches('}').trim_end().replacen("\"lockfileVersion\": 3", "\"lockfileVersion\": 2", 1);
-    format!("{packages},\n  \"dependencies\": {{\n{}\n  }}\n}}\n", tree(&deps, 4))
+    format!("{packages},\n  \"dependencies\": {{\n{}\n  }}\n}}\n", tree(deps, 4))
 }
 
 /// A project and a home whose snapshot holds `before` as the copy of
@@ -287,4 +291,19 @@ fn a_package_recorded_in_both_maps_of_a_version_2_lock_is_one_name() {
     assert!(reasons.is_empty(), "30 new names: {:?}", shown(&reasons));
     after.extend(tops(&names("more-", 0..21), "1.0.0"));
     assert_eq!(shown(&judge(Some(v2(&tops(&held, "1.0.0")).as_bytes()), v2(&after).as_bytes())), shown(&counted(51)), "51 new names");
+}
+
+/// The copy from before the command holds what npm reads of it: its
+/// `packages` map where it has one, as the effect gate reads a record. A
+/// name only its `dependencies` tree lists is not held there. After the
+/// command, a name either map lists counts.
+#[test]
+fn a_name_only_the_unread_tree_of_the_copy_lists_is_not_held() {
+    let held = names("pkg-", 0..5);
+    let new = names("new-", 0..51);
+    let both: Vec<Dep> = held.iter().chain(new.iter()).map(|n| dep(n, "1.0.0")).collect();
+    let mut after = tops(&held, "1.0.0");
+    after.extend(tops(&new, "1.0.0"));
+    assert_eq!(shown(&judge(Some(v2_with(&tops(&held, "1.0.0"), &both).as_bytes()), v3(&after).as_bytes())), shown(&counted(51)), "names only the copy's tree lists");
+    assert_eq!(shown(&judge(Some(v3(&tops(&held, "1.0.0")).as_bytes()), v2_with(&tops(&held, "1.0.0"), &both).as_bytes())), shown(&counted(51)), "names only the tree after the command lists");
 }

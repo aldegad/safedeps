@@ -76,8 +76,9 @@ pub fn scripts(store: &Store, new_nodes: &[W], reasons: &mut Vec<W>) -> Result<(
 }
 
 /// What the count reads of an npm lockfile: no JSON text at all, or the
-/// package names of one JSON object.
-enum Lock { Blank, Names(HashSet<W>) }
+/// package names of one JSON object, those its `packages` map gives (None
+/// where it has no such map) and those its `dependencies` tree gives.
+enum Lock { Blank, Names(Option<HashSet<W>>, HashSet<W>) }
 
 /// `.[key]` where npm writes a map: None where it is absent or null, and Err
 /// where it is anything else.
@@ -118,7 +119,7 @@ fn tree(v: &Value, names: &mut HashSet<W>) -> Result<(), ()> {
     }
     Ok(())
 }
-/// Every name the lock gives a package, from both of npm's maps: a key of
+/// The names the lock gives a package, from each of npm's maps: a key of
 /// `packages` gives the name npm's closure reads there and the folder it is,
 /// a key of the tree is a name, and an entry adds the names it declares. A
 /// name is its bytes, so a scope or case alone makes another one. Err where
@@ -131,20 +132,32 @@ fn lock(text: &[u8]) -> Result<Lock, ()> {
         (false, [v @ Value::Obj(_)]) => v,
         _ => return Err(()),
     };
+    let packages = match map(v, "packages")? {
+        Some(entries) => {
+            let mut names = HashSet::new();
+            for (key, entry) in entries.iter().filter(|(key, _)| !key.is_empty()) {
+                if jv::in_tree(key) { if let Value::Str(name) = closure::name_from_path(key) { names.insert(name); } }
+                names.extend(folder(key));
+                declared(entry, &mut names)?;
+            }
+            names.remove(&W::new());
+            Some(names)
+        }
+        None => None,
+    };
     let mut names = HashSet::new();
-    for (key, entry) in map(v, "packages")?.unwrap_or_default().iter().filter(|(key, _)| !key.is_empty()) {
-        if jv::in_tree(key) { if let Value::Str(name) = closure::name_from_path(key) { names.insert(name); } }
-        names.extend(folder(key));
-        declared(entry, &mut names)?;
-    }
     tree(v, &mut names)?;
     names.remove(&W::new());
-    Ok(Lock::Names(names))
+    Ok(Lock::Names(packages, names))
 }
 /// The reason an install that brings more than 50 package names into
-/// package-lock.json is rolled back. It counts names the copy taken before
-/// the command does not hold. Another version, place or source of a name it
-/// holds is not a new name: the closure check judges that version against
+/// package-lock.json is rolled back. It counts the names the lock after the
+/// command lists in either map that the copy taken before the command does
+/// not hold. The copy holds what npm reads of it, as the effect gate reads a
+/// record (`closure::new_records`): its `packages` map where it has one, and
+/// its `dependencies` tree where it does not. So a name only the copy's
+/// unread tree lists is not held. Another version, place or source of a name
+/// it holds is not a new name: the closure check judges that version against
 /// the approvals and OSV, and the source and install-script checks read the
 /// record it is. Each file is read once, and the comparison and the count act
 /// on that one read.
@@ -163,12 +176,12 @@ pub fn lockfile(store: &Store, reasons: &mut Vec<W>) {
     let before = before.map_err(drop).and_then(|t| lock(&t));
     let after = after.map_err(drop).and_then(|t| lock(&t));
     const UNCOUNTED: &[u8] = b"New dependencies could not be counted: package-lock.json";
-    let (before, after) = match (before, after) {
-        (Ok(Lock::Blank), Ok(Lock::Names(after))) => (HashSet::new(), after),
-        (Ok(Lock::Names(before)), Ok(Lock::Names(after))) => (before, after),
+    let (before, after): (HashSet<W>, HashSet<W>) = match (before, after) {
+        (Ok(Lock::Blank), Ok(Lock::Names(packages, tree))) => (HashSet::new(), packages.unwrap_or_default().into_iter().chain(tree).collect()),
+        (Ok(Lock::Names(held, tree)), Ok(Lock::Names(packages, more))) => (held.unwrap_or(tree), packages.unwrap_or_default().into_iter().chain(more).collect()),
         (before, after) => {
             if before.is_err() { reasons.push(cat(&[UNCOUNTED, b" from before the command could not be read as a lockfile"])); }
-            if !matches!(after, Ok(Lock::Names(_))) { reasons.push(cat(&[UNCOUNTED, b" could not be read as a lockfile"])); }
+            if !matches!(after, Ok(Lock::Names(..))) { reasons.push(cat(&[UNCOUNTED, b" could not be read as a lockfile"])); }
             return
         }
     };
