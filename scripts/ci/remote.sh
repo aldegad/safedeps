@@ -93,10 +93,11 @@ host_path() {
 # the name as LC_ALL, not by its spelling: a UTF-8 locale may be listed as
 # sr_RS.UTF-8@latin, de_DE.utf8 or en_IN. An answer is clean when it is one
 # line that is not empty, with nothing on standard error and exit status 0.
-# Its codeset is the line up to an @, and a name is taken when its answer is
-# clean and the codeset is UTF-8. macOS answers with what follows the dot in
-# the name: UTF-8@latin for sr_RS.UTF-8@latin, and an empty line for en_NZ. It
-# answers US-ASCII, with no warning, for a name it cannot load.
+# Its codeset is the line up to an @. A name is taken when its answer is clean,
+# the codeset is UTF-8 and the run can carry the name (LOCALE_NAME, below).
+# macOS answers with what follows the dot in the name: UTF-8@latin for
+# sr_RS.UTF-8@latin, and an empty line for en_NZ. It answers US-ASCII, with no
+# warning, for a name it cannot load.
 #
 # en_US.UTF-8 and C.UTF-8 come first when the host lists them (en_US.utf8 and
 # C.utf8 are glibc's spellings): every macOS has en_US.UTF-8 and only recent
