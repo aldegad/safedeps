@@ -1,10 +1,12 @@
 //! The post hook's script, lockfile-change, and new-bin heuristics.
 use super::{jv, sh, snapshot::{self, Store}, trace, report::cat};
 use crate::{ere::Regex, json::Value, sha256};
-use std::{fs, path::Path, time::Instant};
+use std::{collections::HashSet, fs, path::Path, time::Instant};
 type W = Vec<u8>;
 
 pub(super) mod native;
+#[cfg(test)]
+mod lockfile_tests;
 
 fn raw_field(st: &jv::Stream, keys: &[&str], default: &[u8]) -> Result<W, i32> {
     let (lines, rc) = jv::each(st, |v| {
@@ -73,35 +75,158 @@ pub fn scripts(store: &Store, new_nodes: &[W], reasons: &mut Vec<W>) -> Result<(
     Ok(())
 }
 
-/// Count resolved lines inserted along a shortest edit path. No patch or
-/// subprocess is needed, and frontier storage is linear in the line count.
-pub fn added_resolved(before: &[u8], after: &[u8]) -> usize {
-    if before.contains(&0) || after.contains(&0) { return 0 }
-    let a: Vec<_> = before.split_inclusive(|b| *b == b'\n').collect();
-    let b: Vec<_> = after.split_inclusive(|b| *b == b'\n').collect();
-    let n = a.len(); let m = b.len(); let max = n + m;
-    let offset = max as isize + 1;
-    let mut frontier = vec![(0usize, 0usize); 2 * max + 3];
-    let index = |k: isize| (offset + k) as usize;
-    for distance in 0..=max {
-        let d = distance as isize;
-        for k in (-d..=d).step_by(2) {
-            let down = k == -d || (k != d && frontier[index(k-1)].0 < frontier[index(k+1)].0);
-            let (mut x, mut count) = if down { frontier[index(k+1)] } else { let (x,c) = frontier[index(k-1)]; (x+1,c) };
-            let mut y = (x as isize - k) as usize;
-            if distance > 0 && down && y > 0 && y <= m && b[y-1].windows(10).any(|s| s == b"\"resolved\"") { count += 1; }
-            while x < n && y < m && a[x] == b[y] { x += 1; y += 1; }
-            frontier[index(k)] = (x,count);
-            if x >= n && y >= m { return count }
+/// What the count reads of an npm lockfile: no JSON text at all, or the
+/// package names of one JSON object, those its `packages` map gives (None
+/// where it has no such map) and those its `dependencies` tree gives.
+enum Lock { Blank, Names(Option<HashSet<W>>, HashSet<W>) }
+
+/// `.[key]` where npm writes a map: None where it is absent or null, and Err
+/// where it is anything else.
+fn map<'a>(v: &'a Value, key: &str) -> Result<Option<&'a [(W, Value)]>, ()> {
+    match jv::field(v, key)? { Value::Null => Ok(None), Value::Obj(o) => Ok(Some(o.as_slice())), _ => Err(()) }
+}
+/// A key's folders, read as npm resolves a location from the project: an
+/// empty or `.` folder is none, and `..` takes away the folder before it. A
+/// `..` with no folder before it stays, as where a link points outside the
+/// project.
+fn folders(key: &[u8]) -> Vec<&[u8]> {
+    let mut out: Vec<&[u8]> = Vec::new();
+    for part in key.split(|b| *b == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." if out.last().is_some_and(|before| *before != b"..") => { out.pop(); }
+            _ => out.push(part),
         }
     }
-    0
+    out
 }
+/// The name a place gives the package npm installs there: the last folder,
+/// where it sits in a `node_modules` folder or in a scope folder there, with
+/// the scope in front of it. None where the key is no such place: the folder
+/// of a workspace member or of a linked directory, or a folder inside a
+/// package, where npm installs nothing.
+fn place(folders: &[&[u8]]) -> Option<W> {
+    match folders {
+        [.., modules, scope, name] if *modules == b"node_modules" && scope.starts_with(b"@") => Some(cat(&[*scope, b"/", *name])),
+        [.., modules, name] if *modules == b"node_modules" => Some(name.to_vec()),
+        _ => None,
+    }
+}
+/// The name npm gives the package in a folder whose entry gives none: the
+/// last folder, with the scope folder in front of it. npm writes an entry's
+/// `name` only where the package's own name is not this one.
+fn folder(folders: &[&[u8]]) -> Option<W> {
+    match folders {
+        [.., scope, name] if scope.starts_with(b"@") => Some(cat(&[*scope, b"/", *name])),
+        [.., name] => Some(name.to_vec()),
+        [] => None,
+    }
+}
+/// The names an entry gives beside its place: the package it is (`name`,
+/// where the place is an alias or no place at all) and the package an `npm:`
+/// version aliases (how the `dependencies` tree spells an alias). True where
+/// it gives a `name`.
+fn declared(entry: &Value, names: &mut HashSet<W>) -> Result<bool, ()> {
+    let named = match jv::field(entry, "name")? {
+        Value::Str(name) => { names.insert(name.clone()); !name.is_empty() }
+        other if jv::truthy(other) => return Err(()),
+        _ => false,
+    };
+    if let Value::Str(version) = jv::field(entry, "version")? {
+        if let Some(spec) = version.strip_prefix(b"npm:") {
+            let end = spec.iter().rposition(|b| *b == b'@').filter(|at| *at > 0).unwrap_or(spec.len());
+            names.insert(spec[..end].to_vec());
+        }
+    }
+    Ok(named)
+}
+/// The `dependencies` tree of lockfileVersion 1 and 2: each key is a name,
+/// and an entry nests its own tree.
+fn tree(v: &Value, names: &mut HashSet<W>) -> Result<(), ()> {
+    let Some(entries) = map(v, "dependencies")? else { return Ok(()) };
+    for (name, entry) in entries {
+        names.insert(name.clone());
+        declared(entry, names)?;
+        tree(entry, names)?;
+    }
+    Ok(())
+}
+/// The names the lock gives its packages, from each of npm's maps, read as
+/// npm reads them. A key of `packages` that is a place in a `node_modules`
+/// folder gives the name the package is installed under, and its entry adds
+/// the package's own name where that differs (an alias). Any other key, the
+/// folder of a workspace member or a linked directory or a folder inside a
+/// package, is no place: its name is the one its entry gives, or, where npm
+/// writes none, its folder's. So a folder that moves keeps its name, and the
+/// project's own entry gives none. A key of the tree is a name, and an entry
+/// adds the names it gives. A name is its bytes, so a scope or case alone
+/// makes another one. Err where the text is not one JSON object, or where a
+/// map npm writes, an entry, or a given name is there and is not one.
+fn lock(text: &[u8]) -> Result<Lock, ()> {
+    let st = jv::read(text);
+    let v = match (st.failed, st.values.as_slice()) {
+        (false, []) => return Ok(Lock::Blank),
+        (false, [v @ Value::Obj(_)]) => v,
+        _ => return Err(()),
+    };
+    let packages = match map(v, "packages")? {
+        Some(entries) => {
+            let mut names = HashSet::new();
+            for (key, entry) in entries.iter().filter(|(key, _)| !key.is_empty()) {
+                let parts = folders(key);
+                let named = declared(entry, &mut names)?;
+                match place(&parts) {
+                    Some(name) => { names.insert(name); }
+                    None if !named => names.extend(folder(&parts)),
+                    None => {}
+                }
+            }
+            names.remove(&W::new());
+            Some(names)
+        }
+        None => None,
+    };
+    let mut names = HashSet::new();
+    tree(v, &mut names)?;
+    names.remove(&W::new());
+    Ok(Lock::Names(packages, names))
+}
+/// The reason an install that brings more than 50 package names into
+/// package-lock.json is rolled back. It counts the names the lock after the
+/// command lists in either map that the copy taken before the command does
+/// not hold. The copy holds what npm reads of it, as the effect gate reads a
+/// record (`closure::new_records`): its `packages` map where it has one, and
+/// its `dependencies` tree where it does not. So a name only the copy's
+/// unread tree lists is not held. Another version, place or source of a name
+/// it holds is not a new name: the closure check judges that version against
+/// the approvals and OSV, and the source and install-script checks read the
+/// record it is. Each file is read once, and the comparison and the count act
+/// on that one read.
+///
+/// A copy with no JSON text held no names, as npm reads an empty lockfile, so
+/// every name after it counts. A lock that cannot be read is not counted as
+/// none: it is a reason. With no copy there was no lockfile before, and the
+/// count is not made: it would cross 50 on the first install of any project
+/// with more than 50 dependencies.
 pub fn lockfile(store: &Store, reasons: &mut Vec<W>) {
     let old = store.path(&store.id, b"package-lock.json");
     let now = store.project.join("package-lock.json");
-    if !sh::is_file(&old) || !sh::is_file(&now) || !snapshot::differs(&old, &now) { return }
-    let count = match (fs::read(old), fs::read(now)) { (Ok(a),Ok(b)) => added_resolved(&a,&b), _ => 0 };
+    if !sh::is_file(&old) || !sh::is_file(&now) { return }
+    let (before, after) = (fs::read(&old), fs::read(&now));
+    if matches!((&before, &after), (Ok(a), Ok(b)) if a == b) { return }
+    let before = before.map_err(drop).and_then(|t| lock(&t));
+    let after = after.map_err(drop).and_then(|t| lock(&t));
+    const UNCOUNTED: &[u8] = b"New dependencies could not be counted: package-lock.json";
+    let (before, after): (HashSet<W>, HashSet<W>) = match (before, after) {
+        (Ok(Lock::Blank), Ok(Lock::Names(packages, tree))) => (HashSet::new(), packages.unwrap_or_default().into_iter().chain(tree).collect()),
+        (Ok(Lock::Names(held, tree)), Ok(Lock::Names(packages, more))) => (held.unwrap_or(tree), packages.unwrap_or_default().into_iter().chain(more).collect()),
+        (before, after) => {
+            if before.is_err() { reasons.push(cat(&[UNCOUNTED, b" from before the command could not be read as a lockfile"])); }
+            if !matches!(after, Ok(Lock::Names(..))) { reasons.push(cat(&[UNCOUNTED, b" could not be read as a lockfile"])); }
+            return
+        }
+    };
+    let count = after.difference(&before).count();
     if count > 50 { reasons.push(cat(&[b"Unusually large number of new dependencies added: ", count.to_string().as_bytes()])); }
 }
 /// Keep the native heuristic out of an already rejected install's path.

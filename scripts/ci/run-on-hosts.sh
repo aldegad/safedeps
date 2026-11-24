@@ -36,6 +36,16 @@
 # slots. Only a successful build and source stamp check open that host to
 # units. The receipt and preparation log travel back with the unit logs.
 #
+# The runner sets the locale on the hosts, and the caller's stays here. ssh
+# sends LANG and LC_* to a host that accepts them (SendEnv on the client,
+# AcceptEnv on the host; macOS sets both). A host that did not have the
+# caller's locale ran the tests under it, and perl there (shasum) printed a
+# warning ahead of the output a row read. So no ssh of the run carries the
+# caller's LANG or LC_*, and each host runs the build and every unit under a
+# locale it has whose `locale charmap` is UTF-8, or C when none is
+# (scripts/ci/remote.sh). run.txt names that locale for each host, how the host
+# picked it, and what the build and each unit there recorded as they started.
+#
 # A run is red when any unit failed, printed `not ok`, skipped a row the
 # verdict does not allow, or never ran; when the shards of a battery
 # do not add up to the whole; and when a host failed. A host fails when
@@ -175,6 +185,16 @@ fail_unit() { # index reason
   event "FAIL ${U_NAME[$1]}: $2"
 }
 
+# The caller's locale is not sent (see the head of this file). Every ssh of the
+# run starts without LANG and LC_*, so SendEnv finds none of them to send.
+# caller_locale says, for run.txt, what stayed here.
+no_locale=(-u LANG) caller_locale=""
+for var in LANG "${!LC_@}"; do
+  [[ -n "${!var+set}" ]] || continue
+  [[ "${var}" == LANG ]] || no_locale+=(-u "${var}")
+  caller_locale+="${caller_locale:+ }${var}=${!var}"
+done
+
 # ssh_words INDEX: the host file's ssh options for a host, as words in the
 # array ssh_opts.
 ssh_words() {
@@ -195,7 +215,7 @@ ssh_words() {
 ssh_host() {
   local ssh_opts
   ssh_words "$1"
-  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+  env "${no_locale[@]}" ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
     -o ControlMaster=auto -o "ControlPath=${sock}/%C" -o ControlPersist=120 \
     ${ssh_opts[@]+"${ssh_opts[@]}"} "${H_DEST[$1]}" "$2"
 }
@@ -277,7 +297,7 @@ close_masters() {
   local h ssh_opts left
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
     ssh_words "${h}"
-    ssh -o BatchMode=yes -o "ControlPath=${sock}/%C" -O exit \
+    env "${no_locale[@]}" ssh -o BatchMode=yes -o "ControlPath=${sock}/%C" -O exit \
       ${ssh_opts[@]+"${ssh_opts[@]}"} "${H_DEST[h]}" >> "${work}/ssh-master-${H_NAME[h]}.out" 2>&1 || true
   done
   # The master removes its socket as it goes; give the last one a moment.
@@ -490,6 +510,40 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   fi
 done
 
+# The locale a host picked for the run, and how (remote.sh prepare writes
+# locale and locale.pick), set against what the build and each unit there
+# started under. The build writes core-prepare/build.locale as it starts, and
+# each unit started (it has a .run) writes <unit>.locale: its LANG and LC_*. The
+# line counts the records that are LANG set to the pick and nothing else, and
+# names each record that is not, or that is missing.
+locale_line() { # index
+  local dir="${logs}/hosts/${H_NAME[$1]}" pick how f record started=0 other=""
+  pick=$(cat "${dir}/locale" 2>/dev/null) || { printf 'none recorded'; return 0; }
+  how=$(cat "${dir}/locale.pick" 2>/dev/null) || how="picked ${pick}; how is not recorded"
+  for f in "${dir}/core-prepare" "${dir}"/*.run; do
+    [[ -e "${f}" ]] || continue
+    if [[ "${f}" == "${dir}/core-prepare" ]]; then
+      record="core-prepare/build.locale"
+    else
+      record="$(basename "${f}" .run).locale"
+    fi
+    if [[ ! -f "${dir}/${record}" ]]; then
+      other+="${other:+; }${record} missing"
+    elif [[ "$(cat "${dir}/${record}")" == "LANG=${pick}" ]]; then
+      started=$(( started + 1 ))
+    else
+      other+="${other:+; }${record} [$(paste -sd ' ' "${dir}/${record}")]"
+    fi
+  done
+  if [[ -n "${other}" ]]; then
+    printf '%s; but not every record is LANG=%s alone: %s' "${how}" "${pick}" "${other}"
+  elif (( started == 0 )); then
+    printf '%s; neither the build nor a unit recorded what it started under' "${how}"
+  else
+    printf '%s; all %s records of the build and the units say LANG=%s and no LC_*' "${how}" "${started}" "${pick}"
+  fi
+}
+
 # The run's own time starts at the first queue slot; before it the run waited
 # for other suites. A run that never got a slot ran nothing and is red anyway.
 [[ -n "${first_held}" ]] || first_held="${suite_end}"
@@ -503,6 +557,7 @@ waited=$(( first_held - suite_start ))
       "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" "${H_HOLDS[h]}" "${H_LOAD0[h]:-?}" "${H_LOADH[h]:-never}" "${H_LOAD1[h]:-?}"
     printf 'host %s preparation exit %s receipt hosts/%s/core-prepare/receipt.json\n' \
       "${H_NAME[h]}" "$(cat "${logs}/hosts/${H_NAME[h]}/core-prepare/exit" 2>/dev/null || printf 'none')" "${H_NAME[h]}"
+    printf 'host %s locale %s (not sent from here: %s)\n' "${H_NAME[h]}" "$(locale_line "${h}")" "${caller_locale:-nothing}"
   done
 } >> "${work}/run.txt"
 
