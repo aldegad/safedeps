@@ -30,6 +30,11 @@
 # GRID_REPORT_ONLY=1 prints the rows and exits 0 whatever they say. It exists
 # for the control run against a tree from before the repair, where the count is
 # the result; `npm test` never sets it.
+#
+# GRID_SAME_SECOND_START_MS=<0-999> starts each trial of the same-second row
+# (section 3) at that millisecond of a wall-clock second, as a host whose trial
+# interval is a whole number of seconds does. It shows whether the row depends
+# on when its trials happen to start; `npm test` never sets it.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -64,6 +69,9 @@ mkdir -p "${ALT}/sub"
 printf '{"name":"alt-sub","version":"1.0.0"}\n' > "${ALT}/sub/package.json"
 
 REPORT_ONLY="${GRID_REPORT_ONLY:-0}"
+SAME_SECOND_START="${GRID_SAME_SECOND_START_MS:-}"
+[[ -z "${SAME_SECOND_START}" || "${SAME_SECOND_START}" =~ ^[0-9]{1,3}$ ]] \
+  || fail "GRID_SAME_SECOND_START_MS is a millisecond of a second, 0 to 999 (got ${SAME_SECOND_START})"
 FAILURES=()
 SILENT_ROWS=()
 
@@ -1475,6 +1483,18 @@ record_same_second() {
     } catch (e) { process.stdout.write(`unreadable (${e.code}) same_second=no`); }
   ' "${baseline:-<none>}" "${lock}")
 }
+# second_phase_wait MS: waits until millisecond MS of a wall-clock second, at
+# least 50 ms from now, and prints the time it let go at, in milliseconds since
+# the epoch. node keeps the clock, as bash 3.2 has none finer than a second.
+second_phase_wait() {
+  node -e '
+    const at = Number(process.argv[1]), now = Date.now();
+    let wait = (((at - now % 1000) % 1000) + 1000) % 1000;
+    if (wait < 50) wait += 1000;
+    const until = now + wait;
+    setTimeout(() => { while (Date.now() < until) {} process.stdout.write(String(Date.now())); }, Math.max(0, wait - 20));
+  ' "$1"
+}
 # One row (scripts/test/lib/shard.sh), from here to its pass line.
 if shard_row "a no-op reinstall in the second the pre-guard ran in leaves a trace"; then
   same_second_seen=0
@@ -1483,6 +1503,7 @@ if shard_row "a no-op reinstall in the second the pre-guard ran in leaves a trac
     (cd "${CASE_PROJECT}" && npm install sd-approved --ignore-scripts >/dev/null 2>&1) || fail "the fixture installs sd-approved first"
     : > "${MARKS}"
     TRIAL=""
+    [[ -z "${SAME_SECOND_START}" ]] || second_phase_wait "${SAME_SECOND_START}" >/dev/null
     run_install "npm install sd-approved" claude record_same_second
     [[ "${TRIAL}" != *same_second=yes* ]] || same_second_seen=$(( same_second_seen + 1 ))
     printf '   trial %s: %s ungated=%s\n' "${trial}" "${TRIAL}" "$(ungated && echo yes || echo no)"
