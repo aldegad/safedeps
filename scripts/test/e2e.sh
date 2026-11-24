@@ -1837,6 +1837,21 @@ grep -q "package-lock.json: fixture-site@1.0.0 from ${src_url} has no integrity,
 [[ "$(src_entries)" == 0 ]] || fail "a record with no integrity writes no entry"
 pass "SAFEDEPS_ACCEPT_SOURCE does not cover a record with no integrity"
 
+# The entries are written before the install is kept, so an override whose
+# entries cannot be written keeps nothing; and a ledger that cannot be read
+# covers nothing. Here the ledger's path is a directory.
+mkdir "${src_ledger}"
+src_install src-unwritable "$(src_with "${src_url}")" "$(src_member "${src_url}" "${src_integrity}")"
+src_rolled_back || fail "an override whose entries cannot be written is rolled back: $(cat "${src_post}")"
+grep -q "SAFEDEPS_ACCEPT_SOURCE was set for this install, and the accepted-source ledger .*accepted-sources.jsonl could not take its entries" < "${src_post}" \
+  || fail "the rollback says the ledger could not take the entries: $(cat "${src_post}")"
+src_install src-unreadable "npm ci" "$(src_member "${src_url}" "${src_integrity}")"
+src_rolled_back || fail "an install the ledger cannot be read for is rolled back: $(cat "${src_post}")"
+grep -q "the accepted-source ledger .*accepted-sources.jsonl could not be read (.*), so no accepted source covers what this install brought from outside the public registry" < "${src_post}" \
+  || fail "the rollback says the ledger could not be read: $(cat "${src_post}")"
+rmdir "${src_ledger}"
+pass "an override whose entries cannot be written keeps nothing, and a ledger that cannot be read covers nothing"
+
 # The override keeps the install after a rollback in the same project, writes
 # the entry with the advisory OSV named, says so on one line, and the rebuild
 # runs: the tree holds approved and accepted packages only. The bytes the

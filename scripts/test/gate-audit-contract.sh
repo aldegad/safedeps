@@ -3,7 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/safedeps-gate-audit-contract.XXXXXX")"
-trap 'rm -rf -- "$tmp_root"' EXIT
+server_pid=""
+cleanup() {
+  if [ -n "${server_pid}" ]; then kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true; fi
+  rm -rf -- "$tmp_root"
+}
+trap cleanup EXIT
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -27,6 +32,9 @@ case "${FAKE_NPM_MODE:-clean}" in
   failed) printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}'; exit 5 ;;
   # One moderate advisory of a package from a site, as npm 7+ reports it.
   site) printf '%s\n' '{"vulnerabilities":{"site":{"name":"site","severity":"moderate","via":[{"source":1,"name":"site","url":"https://github.com/advisories/GHSA-site-aaaa-bbbb","severity":"moderate"}],"nodes":["node_modules/site"]}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":1,"high":0,"critical":0,"total":1}}}'; exit 1 ;;
+  # The same advisory where a public package brings the site package in: npm
+  # counts the parent too, for its dependency.
+  site-nested) printf '%s\n' '{"vulnerabilities":{"site":{"name":"site","severity":"moderate","via":[{"source":1,"name":"site","url":"https://github.com/advisories/GHSA-site-aaaa-bbbb","severity":"moderate"}],"nodes":["node_modules/parent/node_modules/site"]},"parent":{"name":"parent","severity":"moderate","via":["site"],"nodes":["node_modules/parent"]}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":2,"high":0,"critical":0,"total":2}}}'; exit 1 ;;
 esac
 exit 98
 FAKE
@@ -193,36 +201,59 @@ assert_audit 2 "yarn Berry: advisory lines jq failed on before printing are not 
 
 # An advisory of a package the accepted-source ledger covers is taken out of
 # npm's counts and named on one line; other bytes, an advisory no entry names
-# and no entry at all leave the count as npm gave it. The entry is written
-# here as an install would write it.
+# and no entry at all leave the count as npm gave it. Each covered package is
+# asked of OSV and the KEV catalog, here the fixture provider: a KEV listing,
+# or no answer, leaves it counted. The entry is written here as an install
+# would write it.
 site_fixture="${tmp_root}/site-repo"
 mkdir -p "${site_fixture}"
 git -C "${site_fixture}" init -q
 printf '%s\n' '{"name":"gate-audit-contract","private":true}' > "${site_fixture}/package.json"
 site_home="${tmp_root}/site-home"
 mkdir -p "${site_home}"
+site_state="${tmp_root}/site-provider.json"
+printf '%s\n' '{"vulnerable":["site@1.0.0"]}' > "${site_state}"
+( cd "${tmp_root}" && exec node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${tmp_root}/site-provider.port" "${site_state}" ) &
+server_pid=$!
+for _ in $(seq 50); do [ -s "${tmp_root}/site-provider.port" ] && break; sleep 0.1; done
+[ -s "${tmp_root}/site-provider.port" ] || fail "the fixture provider starts"
+site_osv="http://127.0.0.1:$(cat "${tmp_root}/site-provider.port")"
+site_env=(SAFEDEPS_HOME="${site_home}" SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=0
+  SAFEDEPS_OSV_API_URL="${site_osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${site_osv}/osv/v1/querybatch"
+  SAFEDEPS_KEV_CATALOG_URL="${site_osv}/kev.json" SAFEDEPS_GHSA_API_URL="${site_osv}/advisories")
 site_url='https://example.test/site/-/site-1.0.0.tgz'
-site_lock() {
-  jq -n --arg url "${site_url}" --arg integrity "$1" '{name: "gate-audit-contract", lockfileVersion: 3, packages: {
-    "": {name: "gate-audit-contract"}, "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity}}}' \
-    > "${site_fixture}/package-lock.json"
+site_lock() { # INTEGRITY [KEY]
+  jq -n --arg url "${site_url}" --arg integrity "$1" --arg key "${2:-node_modules/site}" '{name: "gate-audit-contract", lockfileVersion: 3, packages: ({
+    "": {name: "gate-audit-contract"},
+    "node_modules/parent": {version: "2.0.0", resolved: "https://registry.npmjs.org/parent/-/parent-2.0.0.tgz", integrity: "sha512-parentBytes200"}}
+    + {($key): {version: "1.0.0", resolved: $url, integrity: $integrity}})}' > "${site_fixture}/package-lock.json"
 }
 site_entry() {
   jq -nc --arg url "${site_url}" --arg id "$1" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url, integrity: "sha512-siteBytes100",
     package: "site", version: "1.0.0", advisories: [$id], reason: "owner: the fix is on the maker site only",
     project: "/work/site", tool_use_id: null}' > "${site_home}/accepted-sources.jsonl"
 }
+site_said() { grep -qxF "safedeps audit: $1" "${tmp_root}/audit.out" || fail "$2: $(cat "${tmp_root}/audit.out")"; }
 site_lock sha512-siteBytes100
-assert_audit 1 "npm: an advisory of a package from a site, with no accepted source, counts" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
+assert_audit 1 "npm: an advisory of a package from a site, with no accepted source, counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
 site_entry GHSA-site-aaaa-bbbb
-assert_audit 0 "npm: an advisory an accepted-source entry names is not counted" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
-grep -qxF 'safedeps audit: npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)' "${tmp_root}/audit.out" \
-  || fail "npm: the accepted advisory is named on one line: $(cat "${tmp_root}/audit.out")"
+assert_audit 0 "npm: an advisory an accepted-source entry names is not counted" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+site_said 'npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)' "npm: the accepted advisory is named on one line"
+site_lock sha512-siteBytes100 node_modules/parent/node_modules/site
+assert_audit 0 "npm: a package npm counts only for an accepted dependency is not counted" "${site_fixture}" FAKE_NPM_MODE=site-nested "${site_env[@]}"
+site_said 'npm: accepted sources (safedeps sources), not counted: parent@2.0.0; site@1.0.0 (GHSA-site-aaaa-bbbb)' "npm: the dependent package is named with it"
+printf '%s\n' '{"kev":["site@1.0.0"]}' > "${site_state}"
+assert_audit 1 "npm: an accepted package that KEV lists counts, and so does its dependent" "${site_fixture}" FAKE_NPM_MODE=site-nested "${site_env[@]}"
+site_said 'npm: site@1.0.0 has an accepted source, and CISA KEV lists one of its advisories, so it is counted.' "npm: the KEV listing is said"
+printf '%s\n' '{"vulnerable":["site@1.0.0"]}' > "${site_state}"
+assert_audit 1 "npm: an accepted package OSV cannot be asked about counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" SAFEDEPS_OSV_API_URL=http://127.0.0.1:9/osv/v1/query
+site_said 'npm: site@1.0.0 has an accepted source, and OSV or the KEV catalog could not be asked about it, so it is counted.' "npm: the provider that did not answer is said"
+site_lock sha512-siteBytes100
 site_entry GHSA-site-cccc-dddd
-assert_audit 1 "npm: an advisory no accepted-source entry names counts" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
+assert_audit 1 "npm: an advisory no accepted-source entry names counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
 site_entry GHSA-site-aaaa-bbbb
 site_lock sha512-siteBytes101
-assert_audit 1 "npm: other bytes under an accepted URL count" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
+assert_audit 1 "npm: other bytes under an accepted URL count" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
 
 # The release gate's two reads of the Python surface. A find that failed is no
 # "no surface", and a list it printed first may be missing what it could not read.
