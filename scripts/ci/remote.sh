@@ -24,7 +24,8 @@
 #                             Starts one detached build after the coordinator
 #                             has acquired the queue slots. Never retries a
 #                             build in this run. Picks the run's locale first
-#                             and writes it to out/locale; the build and every
+#                             and writes it to out/locale, and how it was
+#                             picked to out/locale.pick; the build and every
 #                             unit run under it. Writes out/core-prepare's
 #                             build.log, build.locale, receipt.json and exit
 #                             before units.
@@ -50,8 +51,9 @@
 # RUN holds tree/ (the shipped tree), path (a PATH prefix the coordinator
 # writes from the host file), out/ (each unit's .log, .rc, .secs, .load-start
 # and .load-end, written by run-all.sh --unit, and its .pid and .run, written
-# here, the LANG and LC_* it started under in .locale, and the run's locale in
-# locale), held-K, queue-K.pid, heartbeat and release.
+# here, the LANG and LC_* it started under in .locale, the run's locale in
+# locale, and how it was picked in locale.pick), held-K, queue-K.pid, heartbeat
+# and release.
 set -uo pipefail
 
 HEARTBEAT_MINUTES=10
@@ -85,25 +87,90 @@ host_path() {
 # caller's LANG, and on a host that did not have that locale perl (shasum)
 # printed a warning ahead of the output a row read. The session's own default
 # is no better, since nothing says the host has it either. So the host's list
-# decides: en_US.UTF-8, then C.UTF-8, then any other UTF-8 locale in the order
-# `locale -a` lists them, and C when there is none. en_US.UTF-8 comes first
-# because every macOS has it and only recent ones have C.UTF-8, so the hosts of
-# one platform run one locale. A name counts only when `locale charmap`, with
-# the name as LC_ALL, prints UTF-8 and nothing else: macOS answers US-ASCII,
-# with no warning, for a UTF-8 name it does not have. A `locale -a` that fails
-# is not an empty list, and the preparation fails with it.
+# decides.
+#
+# Every name `locale -a` lists is judged by what `locale charmap` answers with
+# the name as LC_ALL, not by its spelling: a UTF-8 locale may be listed as
+# sr_RS.UTF-8@latin, de_DE.utf8 or en_IN. An answer is clean when it is one
+# line that is not empty, with nothing on standard error and exit status 0.
+# Its codeset is the line up to an @, and a name is taken when its answer is
+# clean and the codeset is UTF-8. macOS answers with what follows the dot in
+# the name: UTF-8@latin for sr_RS.UTF-8@latin, and an empty line for en_NZ. It
+# answers US-ASCII, with no warning, for a name it cannot load.
+#
+# en_US.UTF-8 and C.UTF-8 come first when the host lists them (en_US.utf8 and
+# C.utf8 are glibc's spellings): every macOS has en_US.UTF-8 and only recent
+# ones have C.UTF-8, so the hosts of one platform run one locale. The other
+# names follow in the order `locale -a` gives them. A `locale -a` that fails is
+# not an empty list, and the preparation fails with it.
+LOCALE_PREFERRED=(en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8)
+
+# The characters of a locale name the run carries. The name goes into
+# out/locale, into LANG and into run.txt, and use_locale reads it back.
+LOCALE_NAME='^[A-Za-z0-9_.@-]+$'
+
+# Whether a codeset is UTF-8: UTF-8 or utf8 in any case, up to an @.
+utf8_codeset() {
+  case "${1%%@*}" in
+    [Uu][Tt][Ff]-8 | [Uu][Tt][Ff]8) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# pick_locale ERR: prints the run's locale, then one line that says how it was
+# picked, in one of three forms (N names listed, K of them examined):
+#
+#   picked NAME (locale charmap: ANSWER), after examining K of the N names locale -a lists
+#   C, since no name is UTF-8: all N names locale -a lists were examined, each
+#     answered another charmap, and none says UTF-8
+#   C, since none fit: all N names locale -a lists were examined and none was
+#     taken; S say UTF-8 but answered another charmap, U gave no single clean
+#     answer, X answered UTF-8 but have a name the run does not carry
+#
+# The last form is for a host that may have a UTF-8 locale the run did not
+# take, so that C is not read as a host without one. A name says UTF-8 when
+# the part after its dot is a UTF-8 codeset. That reading picks nothing. It
+# only keeps a name that says UTF-8 and was answered with US-ASCII, as macOS
+# answers a name it cannot load, from being counted as no UTF-8. ERR is a file
+# for each answer's standard error.
 pick_locale() {
-  local listed name charmap
+  local err="$1" listed name answer seen=$'\n' total=0 examined=0 says=0 unclear=0 uncarried=0
   listed=$(locale -a) || return 1
   while IFS= read -r name; do
-    [[ "${name}" =~ ^[A-Za-z0-9_.@-]+$ ]] || continue
-    grep -qxF -- "${name}" <<< "${listed}" || continue
-    charmap=$(LC_ALL="${name}" locale charmap 2>&1) || continue
-    [[ "${charmap}" == UTF-8 ]] || continue
-    printf '%s\n' "${name}"
-    return 0
-  done < <(printf '%s\n' en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; grep -iE '\.utf-?8$' <<< "${listed}")
-  printf 'C\n'
+    [[ -n "${name}" && "${seen}" != *$'\n'"${name}"$'\n'* ]] || continue
+    seen+="${name}"$'\n'
+    total=$(( total + 1 ))
+  done <<< "${listed}"
+  seen=$'\n'
+  while IFS= read -r name; do
+    [[ -n "${name}" && "${seen}" != *$'\n'"${name}"$'\n'* ]] || continue
+    seen+="${name}"$'\n'
+    examined=$(( examined + 1 ))
+    if ! answer=$(LC_ALL="${name}" locale charmap 2>"${err}") \
+      || [[ -s "${err}" || -z "${answer}" || "${answer}" == *$'\n'* ]]; then
+      unclear=$(( unclear + 1 ))
+    elif ! utf8_codeset "${answer}"; then
+      if [[ "${name}" == *.* ]] && utf8_codeset "${name#*.}"; then
+        says=$(( says + 1 ))
+      fi
+    elif [[ "${name}" =~ ${LOCALE_NAME} ]]; then
+      printf '%s\npicked %s (locale charmap: %s), after examining %s of the %s names locale -a lists\n' \
+        "${name}" "${name}" "${answer}" "${examined}" "${total}"
+      return 0
+    else
+      uncarried=$(( uncarried + 1 ))
+    fi
+  done < <(for name in "${LOCALE_PREFERRED[@]}"; do
+             grep -qxF -- "${name}" <<< "${listed}" && printf '%s\n' "${name}"
+           done
+           printf '%s\n' "${listed}")
+  if (( says + unclear + uncarried == 0 )); then
+    printf 'C\nC, since no name is UTF-8: all %s names locale -a lists were examined, each answered another charmap, and none says UTF-8\n' \
+      "${total}"
+  else
+    printf 'C\nC, since none fit: all %s names locale -a lists were examined and none was taken; %s say UTF-8 but answered another charmap, %s gave no single clean answer, %s answered UTF-8 but have a name the run does not carry\n' \
+      "${total}" "${says}" "${unclear}" "${uncarried}"
+  fi
 }
 
 # Puts the run's locale in place for the build or a unit: LANG alone, so a row
@@ -111,7 +178,7 @@ pick_locale() {
 use_locale() {
   local value
   value=$(cat "${OUT}/locale") || die "cannot read the run's locale"
-  [[ "${value}" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "not a locale name: ${value:0:60}"
+  [[ "${value}" =~ ${LOCALE_NAME} ]] || die "not a locale name: ${value:0:60}"
   unset "${!LC_@}"
   export LANG="${value}"
 }
@@ -243,8 +310,10 @@ case "${action}" in
     fi
     printf '%s\n' "${jobs}" > "${RUN}/jobs" || die "cannot record the jobs limit"
     # Picked once, here, before the build; the build and the units read it.
-    locale_name=$(pick_locale) || die "cannot list the host's locales: locale -a failed"
-    printf '%s\n' "${locale_name}" > "${OUT}/locale" || die "cannot record the run's locale"
+    pick=$(pick_locale "${PREP}/charmap.err") || die "cannot list the host's locales: locale -a failed"
+    rm -f "${PREP}/charmap.err"
+    printf '%s\n' "${pick%%$'\n'*}" > "${OUT}/locale" || die "cannot record the run's locale"
+    printf '%s\n' "${pick#*$'\n'}" > "${OUT}/locale.pick" || die "cannot record how the run's locale was picked"
     nohup nice -n 10 bash "${RUN}/tree/scripts/ci/remote.sh" prepare-run "${RUN}" \
       </dev/null >"${PREP}/runner.log" 2>&1 &
     printf '%s\n' "$!" > "${RUN}/prepare.pid"

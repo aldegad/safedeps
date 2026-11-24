@@ -108,6 +108,7 @@ ALL_BATTERIES=(
   "approvals-provenance|1|dev|1|1|15|scripts/test/approvals-provenance.sh"
   "hook-entry|1|dev|1|1|2|scripts/test/hook-entry.sh"
   "slot-queue|1|dev|1|1|30|scripts/test/slot-queue.sh"
+  "host-locale|1|dev|1|1|3|scripts/test/host-locale.sh"
   "lockless-forms|1|dev|2|1|509|scripts/test/lockless-forms.sh"
   "effect-trace-grid|2|release|2|1|803|scripts/test/effect-trace-grid.sh"
   "e2e|1|dev|1|1|351|scripts/test/e2e.sh"
