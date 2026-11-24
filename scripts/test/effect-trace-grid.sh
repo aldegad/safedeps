@@ -1511,20 +1511,24 @@ second_phase_wait() {
     setTimeout(() => { while (Date.now() < until) {} process.stdout.write(String(Date.now())); }, Math.max(0, wait - 20));
   ' "$1"
 }
+# median N...: the middle number, the lower of the two middles for an even count.
+median() { printf '%s\n' "$@" | sort -n | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'; }
 # One row (scripts/test/lib/shard.sh), from here to its pass line.
 if shard_row "a no-op reinstall in the second the pre-guard ran in leaves a trace"; then
   same_second_seen=0 same_second_unmet=0
   # Over the trials measured so far: the milliseconds from a trial's start to
-  # its baseline (lead), and from the baseline to the lockfile (gap). Until a
-  # trial is measured, lead is taken as 0 and gap as 500.
-  measured=0 lead_sum=0 gap_sum=0
+  # its baseline (leads), and from the baseline to the lockfile (gaps). The
+  # next trial aims with their medians, so one slow trial (a cold first run,
+  # a burst of load) does not move the aim. Until a trial is measured, lead is
+  # taken as 0 and gap as 500.
+  leads=() gaps=()
   for trial in 1 2 3 4 5 6 7 8 9 10 11 12; do
     new_project
     (cd "${CASE_PROJECT}" && npm install sd-approved --ignore-scripts >/dev/null 2>&1) || fail "the fixture installs sd-approved first"
     : > "${MARKS}"
     TRIAL=""
     lead=0 gap=500
-    (( measured == 0 )) || { lead=$(( lead_sum / measured )); gap=$(( gap_sum / measured )); }
+    (( ${#leads[@]} == 0 )) || { lead=$(median "${leads[@]}"); gap=$(median "${gaps[@]}"); }
     # The millisecond of its second the baseline is aimed at: the middle of
     # [0, 1000 - gap), the part in which a write gap later stays in the second.
     aim=$(( gap < 1000 ? (1000 - gap) / 2 : 0 ))
@@ -1534,7 +1538,7 @@ if shard_row "a no-op reinstall in the second the pre-guard ran in leaves a trac
     took="" trial_re='^baseline=([0-9]+)[^ ]* lock=([0-9]+)'
     if [[ "${TRIAL}" =~ ${trial_re} ]]; then
       lead=$(( BASH_REMATCH[1] - started )) gap=$(( BASH_REMATCH[2] - BASH_REMATCH[1] ))
-      measured=$(( measured + 1 )) lead_sum=$(( lead_sum + lead )) gap_sum=$(( gap_sum + gap ))
+      leads+=("${lead}") gaps+=("${gap}")
       took=" lead=${lead}ms gap=${gap}ms"
     fi
     if [[ "${TRIAL}" == *same_second=yes* ]]; then
@@ -1550,7 +1554,7 @@ if shard_row "a no-op reinstall in the second the pre-guard ran in leaves a trac
   done
   if (( same_second_seen == 0 )); then
     gap_said="no trial's lockfile could be read"
-    (( measured == 0 )) || gap_said="the lockfile came $(( gap_sum / measured ))ms after the baseline on average"
+    (( ${#gaps[@]} == 0 )) || gap_said="the median time from the baseline to the lockfile was $(median "${gaps[@]}")ms"
     note_failure "the same-second row could not make its condition: none of ${same_second_unmet} trials wrote the lockfile inside the baseline's second (${gap_said})"
   fi
   pass "a no-op reinstall in the second the pre-guard ran in leaves a trace (${same_second_seen} of $(( same_second_seen + same_second_unmet )) trials met the condition)"
