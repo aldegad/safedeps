@@ -101,9 +101,9 @@ install_runner() {
   set -e
   [[ "${install_rc[0]}" == 0 && "${install_rc[1]}" == 0 ]]
 }
-fresh() { # slots: a home with the runner installed and the queue empty
+fresh() { # slots [name]: a home with the runner installed and the queue empty, named name in tmp_root (home-<row> if not given)
   row=$((row + 1))
-  home="${tmp_root}/home-${row}"
+  home="${tmp_root}/${2:-home-${row}}"
   mkdir -p "${home}"
   install_runner || {
     fail "row ${row} installs the runner (installer exit ${install_rc[0]}, bash -s exit ${install_rc[1]})"
@@ -716,5 +716,147 @@ if [[ "$(sed -n 2p "${home}/safedeps-runs/slot-lib/native_budget_owners.py")" ==
 else
   fail "an installed copy holds its source's path and sha256 on line 2"
 fi
+
+# The rows below use no witness, so they come last: a trial whose rows above
+# run long, as a blocking lock call's does, cannot outlive the witness for them.
+
+# --- a slot's path is one word, whatever its home is called -----------------------------------
+# Bash splits a word it expands outside double quotes at blanks and expands
+# the globs in it, and a path that goes through such a word is not that path
+# any more. The slot files joined into one string and expanded in a for loop
+# sent a run whose home has a blank in its name to a file beside its home,
+# which the open made and the lock call took. scripts/test/lib/unquoted.py
+# lists every expansion of slot.sh outside double quotes, with what bash does
+# to it there. Those bash splits, globs or reads as a pattern are these two
+# and no more: $$, a pid, and $sorted, the queue's names one to a line under
+# noglob, each once. shellcheck does not list a for loop's words, so its
+# silence is no evidence. The lexer's own control is a file of shapes, so the
+# row can fail: a joined list in a for loop, a trap whose body splits a word,
+# an arithmetic expansion as an argument, a word after a $ that ends a double
+# quote, a here-string, the right side of == and a case pattern, which it
+# must list; and an assignment, local, the left side of == and the word after
+# case, which it must not. What the row names is each line of slot.sh outside
+# the list, and each entry of the list it did not find.
+row=$((row + 1))
+label="slot.sh splits or globs no expansion but its pid and the queue's names, so no slot path goes through a word bash splits"
+split_words() { # script: the expansions unquoted.py lists where bash splits, globs or matches them
+  python3 -B -I "${ROOT_DIR}/scripts/test/lib/unquoted.py" "$1" \
+    | awk '$2 ~ /^(arg|for-list|array|redirect|here-str|pattern|regex)$/'
+}
+cat > "${tmp_root}/control.sh" <<'EOF'
+L="$H/a $H/b"
+for f in $L; do :; done
+trap 'rm -f $T' EXIT
+n=$((n + 1)); take $((n))
+echo "cost 5$" $U "$'x" $V
+cat <<< $W
+[[ $A == $P ]]
+local v=$X
+case $C in $Q) ;; esac
+EOF
+want_control=$'2 for-list $L\n3 arg $T\n4 arg $((n))\n5 arg $U\n5 arg $V\n6 here-str $W\n7 pattern $P\n9 pattern $Q'
+got=""
+if ! control=$(split_words "${tmp_root}/control.sh" 2> "${tmp_root}/unquoted.err"); then
+  got="the lexer could not read its control: $(head -c 200 "${tmp_root}/unquoted.err" | tr '\n' ' ')"
+elif [[ "${control}" != "${want_control}" ]]; then
+  got="the lexer did not list its control as it must (it listed: $(printf '%s' "${control}" | tr '\n' ';'))"
+elif ! listed=$(split_words "${script}" 2> "${tmp_root}/unquoted.err"); then
+  got="the lexer could not read slot.sh: $(head -c 200 "${tmp_root}/unquoted.err" | tr '\n' ' ')"
+else
+  outside=$(printf '%s\n' "${listed}" | awk '
+    BEGIN { left["arg $$"] = 1; left["for-list $sorted"] = 1 }
+    NF == 0 { next }
+    { key = $0; sub(/^[0-9]+ /, "", key) }
+    (key in left) && left[key] > 0 { left[key]--; next }
+    { printf "%s; ", $0 }
+    END { for (key in left) if (left[key] > 0) printf "no %s; ", key }')
+  [[ -z "${outside}" ]] || got="slot.sh: ${outside}the list holds arg \$\$ and for-list \$sorted, once each"
+fi
+if [[ -z "${got}" ]]; then pass "${label}"; else fail "${label} (${got})"; fi
+
+# --- a home named with a blank, a tab, a glob or a leading dash --------------------------------
+# Each home is made directly in tmp_root, with the runner installed and two
+# slots. Three runs start one after another, each with a suite that runs
+# until the row ends it. Once A runs, the home's .slot.lock is held; once B
+# runs, its .slot2.lock is held too; and C, behind both, says the slots are
+# busy and does not run. A run that locked any other file fails the row.
+#   blank, tab: the first word of a split path names a file in the home's
+#     parent, which the open makes, so the home's parent is tmp_root. Its
+#     second word is relative, read from tmp_root, where the runs start.
+#   star, question mark, brackets: a glob of the home's name matches a
+#     sibling, the decoy, which holds safedeps-runs/.slot.lock. Without it
+#     the glob matches the home alone, or nothing and stays as written, and a
+#     runner that globs the path passes. Brackets never match their own name,
+#     so a glob of them gives the decoy alone.
+#   leading dash: the home is a full path, so its last name starts no word,
+#     and no runner before the fix fails this row. It holds what a dash would
+#     break if a path ever became a word of its own.
+# lock_state <file>: absent, held or free, read without making the file.
+lock_state() {
+  local rc=0
+  [[ -e "$1" ]] || { printf absent; return 0; }
+  ( exec 9>> "$1" || exit 3
+    exec perl -MFcntl=:flock -e 'open(my $h, ">>&=", 9) or exit 2; flock($h, LOCK_EX | LOCK_NB) or exit 1' ) 2> /dev/null \
+    || rc=$?
+  case "${rc}" in 0) printf free ;; 1) printf held ;; *) printf 'not read (%s)' "${rc}" ;; esac
+}
+# shaped: the three runs, in the row's home, with $H for their marks. It stops
+# at the first step that did not come, and what went wrong goes into $got.
+shaped() {
+  local s1 s2 i
+  launch A; A=${launched}
+  appeared "${H}/entered-A" || { got="A never ran: $(said A)"; return; }
+  s1=$(lock_state "${home}/safedeps-runs/.slot.lock")
+  [[ "${s1}" == held ]] || { got="A runs, and the home's .slot.lock is ${s1}"; return; }
+  launch B; B=${launched}
+  appeared "${H}/entered-B" || { got="B never ran: $(said B)"; return; }
+  s1=$(lock_state "${home}/safedeps-runs/.slot.lock")
+  s2=$(lock_state "${home}/safedeps-runs/.slot2.lock")
+  [[ "${s1} ${s2}" == "held held" ]] \
+    || { got="A and B run, and the home's .slot.lock is ${s1} and its .slot2.lock ${s2}"; return; }
+  launch C; C=${launched}
+  for (( i = 0; i < 600; i++ )); do
+    [[ ! -e "${H}/entered-C" ]] || break
+    ! grep -q 'slots busy' "${H}/C.err" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [[ -e "${H}/entered-C" ]]; then
+    got="C ran beside A and B, so three runs held two slots"
+  elif ! grep -q 'slots busy' "${H}/C.err" 2>/dev/null; then
+    got="C decided nothing within a minute: $(said C)"
+  fi
+}
+# shape_row <what the home's name holds> <name> [<decoy>]
+shape_row() {
+  local label="a home whose name $1: A and B hold its two slot files, and C waits" n p
+  fresh 2 "$2"
+  if [[ -n "${3:-}" ]]; then
+    mkdir -p "${tmp_root}/$3/safedeps-runs"
+    : > "${tmp_root}/$3/safedeps-runs/.slot.lock"
+  fi
+  H="${tmp_root}/shape-${row}"
+  rm -rf "${H}"; mkdir -p "${H}"
+  got=""; A=""; B=""; C=""
+  shaped
+  for n in A B C; do : > "${H}/end-${n}"; done
+  for p in "${C}" "${B}" "${A}"; do [[ -z "${p}" ]] || stop "${p}"; done
+  if [[ -z "${got}" ]]; then pass "${label}"; else fail "${label} (${got})"; fi
+}
+shape_row "holds a blank" "sp ace"
+shape_row "holds a tab" $'ta\tb'
+shape_row "holds a star a sibling matches" "st*ar" "stXar"
+shape_row "holds a question mark a sibling matches" "qu?st" "quXst"
+shape_row "holds brackets a sibling matches" "br[x]ck" "brxck"
+shape_row "starts with a dash" "-hyph"
+
+# --- a home that is not a full path ------------------------------------------------------------
+# A home that does not start with / names the slot files from wherever a run
+# starts, so two runs started in two directories would take two files for
+# one slot. The runner refuses it. The relative name here is the row's home
+# as read from tmp_root, where the runner starts.
+fresh 1
+refusal="is not a full path"
+refuses "a home that is not a full path names slot files that depend on where a run starts, so the runner refuses, and takes no ticket" \
+  HOME="home-${row}"
 
 (( failures == 0 )) || { printf '# %d row(s) failed\n' "${failures}"; exit 1; }
