@@ -76,7 +76,6 @@ pub fn probe(input: &[u8]) -> i32 {
             }
             Ok(reasons.join(&b'\n'))
         },
-        b"resolved-diff" => Ok(heuristics::added_resolved(bytes("before"), bytes("after")).to_string().into_bytes()),
         b"closure" => closure::lock_closure(&path).map(|cs| {
             let mut out = Vec::new();
             for c in cs { out.extend(jv::dump(&Value::Arr(c.iter().map(closure::Spec::to_value).collect()))); out.push(b'\n'); }
