@@ -427,9 +427,12 @@ safedeps_watch_scan() {
     SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${saved_ttl}"
   fi
 
-  # Lockfile statuses become measured scopes or unmeasured rows.
+  # Lockfile statuses become measured scopes or unmeasured rows. A lockfile
+  # npm does not read (`ignored`) is neither: it is no gap in what the run
+  # measured. Its scope still names why it was not measured, so a finding an
+  # earlier run made of it is stale for that reason.
   jq -r 'select(.status == "measured") | .root + "|" + .path' "${tmp}/status.jsonl" >> "${tmp}/scopes.txt"
-  jq -c 'select(.status != "measured")
+  jq -c 'select(.status != "measured" and .status != "ignored")
          | {kind: (if .status == "unmeasured" then .unmeasured_kind
                    elif .kind == "native" then "native_audit_unavailable"
                    elif .status == "unreadable" then "lockfile_unreadable"

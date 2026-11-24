@@ -133,13 +133,15 @@ fn read_bundles(dir: &Path, keys: &[W]) -> Result<Bundles, ()> {
     Ok(bundles)
 }
 
-fn records(dir: &Path) -> Result<Records, ()> {
+/// The package records of the records the post hook read once
+/// (post::lockfile): the lockfile npm reads and the tree record.
+fn records(read: &super::lockfile::Records) -> Result<Records, ()> {
+    if read.unread.is_some() { return Err(()) }
     let mut out=Records::new();
-    for name in super::trace::RECORDS {
-        let file=dir.join(name); if !sh::is_file(&file) { continue }
-        let st=jv::read_file(&file).ok_or(())?; if st.failed { return Err(()) }
-        for v in st.values {
-            match f(&v,"packages")? {
+    for record in read.each() {
+        let st=&record.stream; if st.failed { return Err(()) }
+        for v in &st.values {
+            match f(v,"packages")? {
                 Value::Null | Value::Bool(false) => {}
                 Value::Obj(o) => for (k,v) in o { if !k.is_empty() { out.entry(k.clone()).or_default().push(v.clone()); } },
                 Value::Arr(a) if a.is_empty() => {}
@@ -151,7 +153,7 @@ fn records(dir: &Path) -> Result<Records, ()> {
 }
 
 /// Every line of the bash tree judgment, before shell command substitution.
-pub fn judge(dir: &Path, home: &Path, query: &jv::Stream, withheld: &Value, problems: Fetch<'_>, origins: Fetch<'_>, accepted: Covered<'_>) -> Result<Vec<W>, ()> {
+pub fn judge(dir: &Path, home: &Path, read: &super::lockfile::Records, query: &jv::Stream, withheld: &Value, problems: Fetch<'_>, origins: Fetch<'_>, accepted: Covered<'_>) -> Result<Vec<W>, ()> {
     if query.failed || query.values.len()!=1 { return Err(()) }
     let Value::Arr(items)=&query.values[0] else { return Err(()) };
     let mut locations=Vec::new(); let mut nodes=Nodes::new();
@@ -162,7 +164,7 @@ pub fn judge(dir: &Path, home: &Path, query: &jv::Stream, withheld: &Value, prob
         let Value::Str(k)=loc else { return Err(()) };
         locations.push(k.clone()); nodes.insert(k.clone(),node.clone());
     }
-    let records=records(dir)?;
+    let records=records(read)?;
     let mut j=Judge{records:&records,nodes:&nodes,bundles:None,withheld,problems,accepted,memo:BTreeMap::new()};
     let mut nested=Vec::new();
     for loc in &locations { if j.verdict(loc)?.is_some_and(|l| l.starts_with(b"nested\t")) { nested.push(loc.clone()); } }

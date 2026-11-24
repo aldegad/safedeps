@@ -1,6 +1,6 @@
 //! The effect hook's call ordering. File selection and facts belong to the
 //! domain modules; this is where their ordering becomes a single judgment.
-use super::{accepted::{self, Sources}, call::{Call, Record}, effect, heuristics, journal::Journal, jv, mark,
+use super::{accepted::{self, Sources}, call::{Call, Record}, effect, heuristics, journal::Journal, jv, lockfile::Records, mark,
     npm::{self, Npm}, report::{self, Report, cat}, rollback::{Before, Rollback}, sh, snapshot,
     trace::{self, Install}};
 use crate::{callid::record as rec, os, state};
@@ -53,14 +53,15 @@ fn rollback(call: &mut Call, journal: &Journal, trace: &mut Install, report: &mu
 
 fn backstop(call: &mut Call, journal: &Journal, input: &[u8], until: Instant) -> Result<Option<W>, i32> {
     if !trace::RECORDS.iter().any(|rel| sh::is_file(&call.store.project.join(rel))) {
-        state::log_advisory(&call.store.home, &cat(&[b"post-verify UNVERIFIED: ", call.record.subject(), b" and no package-lock.json or node_modules/.package-lock.json in ", sh::bytes(&call.store.project), " — nothing to closure-check.".as_bytes()]));
+        state::log_advisory(&call.store.home, &cat(&[b"post-verify UNVERIFIED: ", call.record.subject(), b" and no npm-shrinkwrap.json, package-lock.json or node_modules/.package-lock.json in ", sh::bytes(&call.store.project), " — nothing to closure-check.".as_bytes()]));
         trace::drop_baseline(&call.store.home, &call.entry);
         return Ok(None)
     }
     if !call.backstop_trace() { return Ok(None) }
     let mut reasons = Vec::new();
-    let mut sources = Sources::read(&call.store.home, &call.store.project, None, until);
-    effect::check(&call.store, &mut reasons, None, &mut sources, until);
+    let records = Records::read(&call.store.project);
+    let mut sources = Sources::read(&call.store.home, &records, None, until);
+    effect::check(&call.store, &records, &mut reasons, None, &mut sources, until);
     sources.reasons(&mut reasons);
     if reasons.is_empty() {
         state::log_advisory(&call.store.home, &cat(&[b"post-verify BACKSTOP clean: ", call.record.subject(), b"; the npm closure in ", sh::bytes(&call.store.project), b" passed the command-independent npm closure check."]));
@@ -209,13 +210,16 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
     let mut confirm = Vec::new();
     let accept = accept_risk(call);
     let mut accepted = effect::Accepted::default();
-    let mut sources = Sources::read(&call.store.home, &call.store.project, accept_source(call), until);
-    npm.collect(&call.store, &mut reasons);
-    effect::check(&call.store, &mut reasons, accept.as_ref().map(|_| &mut accepted), &mut sources, until);
+    // npm's two records, read once: every judgment below takes these bytes,
+    // and none opens a record again (post::lockfile).
+    let records = Records::read(&call.store.project);
+    let mut sources = Sources::read(&call.store.home, &records, accept_source(call), until);
+    npm.collect(&call.store, &records, &mut reasons);
+    effect::check(&call.store, &records, &mut reasons, accept.as_ref().map(|_| &mut accepted), &mut sources, until);
     sources.reasons(&mut reasons);
     heuristics::scripts(&call.store, &npm.nodes, &mut reasons)?;
     heuristics::lockfile(&call.store, &mut reasons);
-    npm.record(&call.store, &call.current, &trace, &mut report, until, &sources);
+    npm.record(&call.store, &records, &call.current, &trace, &mut report, until, &sources);
     npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm, until, &sources);
     if reasons.is_empty() { heuristics::binaries(&call.store, &mut reasons, post_started); }
     let mut unrecorded = false;
@@ -251,7 +255,7 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
         return rollback(call, journal, &mut trace, &mut report, target, &reasons.join(b"; ".as_slice()), input, false).map(Some)
     }
     report.lines.extend(confirm);
-    npm.rebuild(&call.store, &call.current, &mut trace, input, &mut report, until, &sources);
+    npm.rebuild(&call.store, &records, &call.current, &mut trace, input, &mut report, until, &sources);
     call.store.confirm(&mut report).map_err(|_| 0)?;
     call.store.cleanup().map_err(|_| 0)?;
     if report.lines.is_empty() { return Ok(None) }

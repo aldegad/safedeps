@@ -259,12 +259,9 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     }
     state::sweep_day_old(&entry_dir);
     let d = os::path(&dir);
-    let lock = os::tree_inode(&d.join(rec::RECORDS[0]));
-    let hidden = os::tree_inode(&d.join(rec::RECORDS[1]));
-    let tree = os::tree_inode(&d.join(rec::TREE));
     let mut present = 0;
     let mut subsecond = 0;
-    for rel in [rec::RECORDS[0], rec::RECORDS[1], rec::TREE] {
+    for rel in rec::RECORDS.iter().copied().chain([rec::TREE]) {
         let path = d.join(rel);
         if std::fs::symlink_metadata(&path).is_err() {
             continue;
@@ -314,7 +311,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
         (rec::RESOLUTION, jq::s(resolution)),
         (
             rec::INODES,
-            jq::obj(vec![(rec::RECORDS[0], jq::s(&lock)), (rec::RECORDS[1], jq::s(&hidden)), (rec::TREE, jq::s(&tree))]),
+            jq::obj(rec::RECORDS.iter().copied().chain([rec::TREE]).map(|rel| (rel, jq::s(&os::tree_inode(&d.join(rel))))).collect()),
         ),
         (
             rec::CLOCKS,

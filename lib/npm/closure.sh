@@ -34,6 +34,51 @@ SAFEDEPS_NPM_SOURCE_JQ='def source_deny_only($reason; $deny_only): if $reason ==
 # each declaration as its line.
 SAFEDEPS_NPM_ACCEPTED_JQ='def record_name($k; $v): if (($v.name // null) | type) == "string" and $v.name != "" then $v.name else ($k | split("node_modules/") | last | split("/") | if ((.[0] // "") | startswith("@")) then .[0:2] | join("/") else (.[0] // "") end) end; [(.packages // {}) | to_entries[] | select((.key | test("(^|/)node_modules/")) and (.value | type) == "object" and .value.link != true) | {package: record_name(.key; .value), version: (.value.version // ""), url: (.value.resolved // ""), integrity: (.value.integrity // "")}] | group_by([.package, .version])[] | . as $records | [$records[] | . as $r | [$entries[] | select(.url == $r.url and .integrity == $r.integrity and .package == $r.package and .version == $r.version)]] as $matched | select(all($matched[]; length > 0)) | {root: $root, rel: $rel, package: $records[0].package, version: $records[0].version, urls: ($records | map(.url) | unique), advisories: (($matched | map(map(.advisories[]) | unique)) as $per | reduce $per[1:][] as $ids ($per[0]; map(select(. as $i | $ids | index([$i]) != null))))}'
 
+# The lockfile npm reads in DIR, chosen as npm chooses it (@npmcli/arborist,
+# Shrinkwrap.load). npm reads npm-shrinkwrap.json and package-lock.json, and
+# uses the shrinkwrap where it holds a byte, else package-lock.json where it
+# holds a byte, else neither. A file that is not there holds no byte. A file
+# that is there and cannot be read stops npm's load, and it stops this: a
+# directory, a FIFO and a read that fails each print the file's name and
+# return 1. Otherwise this prints the name of the file it chose, or nothing
+# where neither holds a byte, and returns 0. It returns 2, printing nothing,
+# where COPY cannot be written.
+#
+# A link that does not resolve is the one place this is stricter than npm.
+# npm's read of it fails with ENOENT, which npm takes for no file. A link
+# that loops fails with ELOOP, which stops npm's load. A test of the path
+# cannot tell the two apart, so this prints the name of either and returns 1.
+#
+# The chosen file is read once, into COPY, a file of the caller's own, and
+# every judgment of it reads COPY: what was chosen and what is judged are one
+# read. The other file is read too, as npm reads it, only to know that it can
+# be. The core chooses the same way (rust/src/post/lockfile.rs), and a
+# rust-core unit holds the two to one answer (lockfile::choice_matches_cli).
+safedeps_npm_project_lockfile() {
+  local dir="$1" copy="$2" name file chosen=""
+  : > "${copy}" 2>/dev/null || return 2
+  for name in npm-shrinkwrap.json package-lock.json; do
+    file="${dir%/}/${name}"
+    if [[ -L "${file}" ]]; then
+      [[ -e "${file}" ]] || { printf '%s\n' "${name}"; return 1; }
+    elif [[ ! -e "${file}" ]]; then
+      continue
+    fi
+    # A FIFO is never opened: an open of one waits for a writer.
+    if [[ ! -f "${file}" ]]; then
+      printf '%s\n' "${name}"
+      return 1
+    fi
+    if [[ -n "${chosen}" ]]; then
+      cat -- "${file}" > /dev/null 2>&1 || { printf '%s\n' "${name}"; return 1; }
+      continue
+    fi
+    cat -- "${file}" > "${copy}" 2>/dev/null || { printf '%s\n' "${name}"; return 1; }
+    [[ ! -s "${copy}" ]] || chosen="${name}"
+  done
+  [[ -z "${chosen}" ]] || printf '%s\n' "${chosen}"
+}
+
 
 safedeps_npm_require_jq() {
   if ! command -v jq >/dev/null 2>&1; then

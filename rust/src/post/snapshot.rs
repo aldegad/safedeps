@@ -4,7 +4,7 @@ use super::{jv, sh, report::{Report,cat}};
 use crate::{json::Value, state, md5, os, jq};
 use std::{fs,collections::HashSet,path::{Path,PathBuf},io::Write};
 
-pub const LOCKS:[&str;13]=["package-lock.json","pnpm-lock.yaml","yarn.lock","bun.lock","bun.lockb","poetry.lock","uv.lock","Pipfile.lock","requirements.txt","Cargo.lock","go.sum","Gemfile.lock","packages.lock.json"];
+pub const LOCKS:[&str;14]=["package-lock.json","npm-shrinkwrap.json","pnpm-lock.yaml","yarn.lock","bun.lock","bun.lockb","poetry.lock","uv.lock","Pipfile.lock","requirements.txt","Cargo.lock","go.sum","Gemfile.lock","packages.lock.json"];
 pub const MANIFESTS:[&str;7]=["package.json","pyproject.toml","Pipfile","Cargo.toml","go.mod","Gemfile","pom.xml"];
 pub const NODE_FILES:[&str;7]=["package.json","package-lock.json","npm-shrinkwrap.json","pnpm-lock.yaml","yarn.lock","bun.lock","bun.lockb"];
 

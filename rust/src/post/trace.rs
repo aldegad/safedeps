@@ -153,13 +153,21 @@ impl Install {
 pub fn backstop(project:&Path,entry:&[u8],none:&[u8],moved:bool)->(bool,Vec<u8>) {
     if entry.is_empty() {return (true,if none.is_empty(){b"the pre-guard left no trace entry for this call".to_vec()}else{none.to_vec()})}
     let st=jv::read(entry);
+    // The entry's fields in one order: the baseline, its resolution, the
+    // inode of each npm record and of the tree, then the clock of each
+    // record. An entry an older pre-guard wrote names no shrinkwrap, which
+    // reads as no inode recorded for it.
+    let traced:Vec<&str>=RECORDS.iter().copied().chain([rec::TREE]).collect();
+    let mut fields=vec![vec![rec::BASELINE],vec![rec::RESOLUTION]];
+    fields.extend(traced.iter().map(|rel|vec![rec::INODES,*rel]));
+    fields.extend(RECORDS.iter().map(|rel|vec![rec::CLOCKS,*rel]));
     let mut lines=Vec::new();
     for v in &st.values {
-        for keys in [vec![rec::BASELINE],vec![rec::RESOLUTION],vec![rec::INODES,RECORDS[0]],vec![rec::INODES,RECORDS[1]],vec![rec::INODES,rec::TREE],vec![rec::CLOCKS,RECORDS[0]],vec![rec::CLOCKS,RECORDS[1]]] {
-            match jv::path(v,&keys) {Ok(x)=>lines.extend(if jv::truthy(x) {jv::tostring(x)}else{Vec::new()}.split(|b|*b==b'\n').map(Vec::from)),Err(_)=>break}
+        for keys in &fields {
+            match jv::path(v,keys) {Ok(x)=>lines.extend(if jv::truthy(x) {jv::tostring(x)}else{Vec::new()}.split(|b|*b==b'\n').map(Vec::from)),Err(_)=>break}
         }
     }
-    lines.resize_with(lines.len().max(7),Vec::new);
+    lines.resize_with(lines.len().max(fields.len()),Vec::new);
     let baseline=sh::p(&lines[0]);
     if lines[0].is_empty(){return(true,b"the trace entry for this call names no baseline".to_vec())}
     if !sh::is_file(&baseline){return(true,cat(&[b"the trace baseline ",&lines[0],b" does not exist"]))}
@@ -174,15 +182,16 @@ pub fn backstop(project:&Path,entry:&[u8],none:&[u8],moved:bool)->(bool,Vec<u8>)
             }
         }
     } else {
-        for (i,rel) in [RECORDS[0],RECORDS[1],rec::TREE].iter().enumerate() {
+        for (i,rel) in traced.iter().enumerate() {
             let recorded=&lines[2+i];let file=project.join(rel);
             if !sh::present(&file) {
                 if !recorded.is_empty(){return(true,cat(&[sh::bytes(&file),b" existed before this command and does not exist now"]))} continue;
             }
             if recorded.is_empty(){return(true,cat(&[sh::bytes(&file),b" exists now, and the entry recorded no inode for it before this command"]))}
             if os::tree_inode(&file).as_bytes()!=recorded{return(true,cat(&[sh::bytes(&file),b" has another inode than before this command"]))}
-            if i==2 {continue}
-            if lines[5+i].is_empty() || os::tree_clock(&file).as_bytes()!=lines[5+i]{return(true,cat(&[sh::bytes(&file),b" has another status change time than the one recorded before this command"]))}
+            if *rel==rec::TREE {continue}
+            let clock=&lines[2+traced.len()+i];
+            if clock.is_empty() || os::tree_clock(&file).as_bytes()!=clock.as_slice(){return(true,cat(&[sh::bytes(&file),b" has another status change time than the one recorded before this command"]))}
             if lines[1]!=rec::SUBSECOND.as_bytes() && newer(&file,&baseline,true,true){return(true,cat(&[sh::bytes(&file),b" changed after the baseline taken before this command"]))}
         }
     }

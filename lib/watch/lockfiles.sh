@@ -18,6 +18,17 @@
 # A provider that fails leaves the lockfiles it would have judged
 # `provider_unavailable`: their findings are kept, not closed.
 #
+# Which npm lockfile. In a directory npm reads one lockfile, chosen as npm
+# chooses it (safedeps_npm_project_lockfile, lib/npm/closure.sh): the
+# shrinkwrap where it holds a byte, else package-lock.json where it holds a
+# byte. That file is measured, from one read: it is copied once into the
+# run's private directory, and every judgment of it reads the copy. The
+# other npm lockfile there, or one with no byte in it, is `ignored`: npm
+# installs nothing from it, so it is neither measured nor a gap, and a
+# finding an earlier run made of it is stale. A lockfile there that cannot be
+# read stops npm's load, so every npm lockfile of that directory is
+# unreadable.
+#
 # Accepted sources. A package whose every record in the lockfile names the
 # URL, integrity, name and version of an entry of the accepted-source ledger
 # (`safedeps-core sources index`, rust/src/sources.rs) is listed on its
@@ -136,6 +147,36 @@ def fixed_for($pkg): [.affected[]? | select((.package.ecosystem // "") == "npm" 
   | .ranges[]?.events[]? | .fixed // empty] | unique;
 '
 
+# Measures one npm lockfile from COPY, the one read of it: its type, its
+# packages, its closure and what the accepted-source entries (ENTRIES) cover
+# of it. ROOT and REL name it on its rows.
+safedeps_watch_measure_npm_file() {
+  local root="$1" rel="$2" copy="$3" entries="$4" status="$5" errors="$6" tmp="$7" specs
+  if ! jq -e 'type == "object"' "${copy}" >/dev/null 2>&1; then
+    jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"not a JSON lockfile"}' >> "${status}"
+    jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
+    return 0
+  fi
+  if ! jq -e '(.packages | type) == "object"' "${copy}" >/dev/null 2>&1; then
+    jq -nc --arg root "${root}" --arg rel "${rel}" --arg reason "$(safedeps_watch_unmeasured_reason npm_lock_v1)" \
+      '{root:$root, path:$rel, kind:"npm", status:"unmeasured", unmeasured_kind:"npm_lock_v1", reason:$reason}' >> "${status}"
+    return 0
+  fi
+  if ! specs=$(safedeps_npm_lock_closure "${copy}" 2>/dev/null) \
+    || ! jq -c --arg root "${root}" --arg rel "${rel}" '.[] | {root:$root, rel:$rel, package, version, direct}' <<< "${specs}" >> "${tmp}/npm-rows.jsonl"; then
+    jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"closure not read"}' >> "${status}"
+    jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
+    return 0
+  fi
+  if [[ "${entries}" != '[]' ]] \
+    && ! jq -c --arg root "${root}" --arg rel "${rel}" --argjson entries "${entries}" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "${copy}" >> "${tmp}/npm-covered.jsonl"; then
+    jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"accepted sources not read"}' >> "${status}"
+    jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
+    return 0
+  fi
+  printf '%s\t%s\n' "${root}" "${rel}" >> "${tmp}/npm-measured.txt"
+}
+
 # Judges every npm lockfile in LIST (lines: root<TAB>rel), writing findings to
 # FINDINGS (JSON lines), lockfile statuses to STATUS (JSON lines) and error rows
 # to ERRORS. TMP is a private directory.
@@ -151,33 +192,42 @@ safedeps_watch_measure_npm() {
     entries='[]'
     jq -nc '{kind:"accepted_sources_unreadable"}' >> "${errors}"
   fi
-  while IFS=$'\t' read -r root rel; do
+  # Each directory once, in the order the walk listed its first npm lockfile,
+  # with the names the walk listed there.
+  awk -F '\t' '$1 != "" { d = $2; n = $2; sub(/\/[^\/]*$/, "", d); sub(/^.*\//, "", n); k = $1 "\t" d
+      if (!(k in names)) order[++count] = k; names[k] = names[k] " " n }
+    END { for (i = 1; i <= count; i++) print order[i] "\t" names[order[i]] " " }' "${list}" > "${tmp}/npm-dirs.tsv"
+  local dir_n=0 reldir listed chosen found name
+  while IFS=$'\t' read -r root reldir listed; do
     [[ -n "${root}" ]] || continue
-    file="${root}/${rel#./}"
-    if ! jq -e 'type == "object"' "${file}" >/dev/null 2>&1; then
-      jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"not a JSON lockfile"}' >> "${status}"
-      jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
-      continue
-    fi
-    if ! jq -e '(.packages | type) == "object"' "${file}" >/dev/null 2>&1; then
-      jq -nc --arg root "${root}" --arg rel "${rel}" --arg reason "$(safedeps_watch_unmeasured_reason npm_lock_v1)" \
-        '{root:$root, path:$rel, kind:"npm", status:"unmeasured", unmeasured_kind:"npm_lock_v1", reason:$reason}' >> "${status}"
-      continue
-    fi
-    if ! specs=$(safedeps_npm_lock_closure "${file}" 2>/dev/null) \
-      || ! jq -c --arg root "${root}" --arg rel "${rel}" '.[] | {root:$root, rel:$rel, package, version, direct}' <<< "${specs}" >> "${tmp}/npm-rows.jsonl"; then
-      jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"closure not read"}' >> "${status}"
-      jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
-      continue
-    fi
-    if [[ "${entries}" != '[]' ]] \
-      && ! jq -c --arg root "${root}" --arg rel "${rel}" --argjson entries "${entries}" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "${file}" >> "${tmp}/npm-covered.jsonl"; then
-      jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"accepted sources not read"}' >> "${status}"
-      jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
-      continue
-    fi
-    printf '%s\t%s\n' "${root}" "${rel}" >> "${tmp}/npm-measured.txt"
-  done < "${list}"
+    dir_n=$((dir_n + 1))
+    file="${tmp}/npm-lock-${dir_n}.json"
+    found=0
+    chosen=$(safedeps_npm_project_lockfile "${root}/${reldir#./}" "${file}") || found=$?
+    for name in npm-shrinkwrap.json package-lock.json; do
+      rel="${reldir}/${name}"
+      # The chosen file is measured where the walk listed it or not: the walk
+      # lists regular files, and npm reads a link. Any other file has a row
+      # only where the walk listed it.
+      if [[ "${found}" -ne 0 || "${name}" != "${chosen}" ]] && [[ "${listed}" != *" ${name} "* ]]; then
+        continue
+      fi
+      if [[ "${found}" -ne 0 ]]; then
+        jq -nc --arg root "${root}" --arg rel "${rel}" \
+          --arg reason "$(if [[ "${found}" -eq 1 ]]; then printf '%s could not be read, so npm reads no lockfile here' "${reldir}/${chosen}"; else printf 'the copy of the lockfile could not be written'; fi)" \
+          '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:$reason}' >> "${status}"
+        jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
+        continue
+      fi
+      if [[ "${name}" != "${chosen}" ]]; then
+        jq -nc --arg root "${root}" --arg rel "${rel}" \
+          --arg reason "$(if [[ -n "${chosen}" ]]; then printf 'npm reads %s here' "${reldir}/${chosen}"; else printf 'it holds no byte, so npm reads no lockfile here'; fi)" \
+          '{root:$root, path:$rel, kind:"npm", status:"ignored", reason:$reason}' >> "${status}"
+        continue
+      fi
+      safedeps_watch_measure_npm_file "${root}" "${rel}" "${file}" "${entries}" "${status}" "${errors}" "${tmp}"
+    done
+  done < "${tmp}/npm-dirs.tsv"
   [[ -s "${tmp}/npm-measured.txt" ]] || return 0
 
   # Every distinct spec once, in chunks OSV takes in one request.

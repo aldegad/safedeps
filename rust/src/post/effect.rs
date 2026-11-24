@@ -1,5 +1,5 @@
 //! One closure over npm's two records, one ledger index, and one OSV batch.
-use super::{accepted::{Allowed, Sources}, closure, jv, providers::{Providers, Status, Unanswered}, report::cat, sh, snapshot::Store, trace};
+use super::{accepted::{Allowed, Sources}, closure, jv, lockfile::Records, providers::{Providers, Status, Unanswered}, report::cat, sh, snapshot::Store};
 use crate::{json::Value, ledger, os, state};
 use std::{io::Write, time::Instant};
 
@@ -23,17 +23,24 @@ pub struct Accepted { pub problems: Vec<Vec<u8>>, pub packages: Vec<Value> }
 /// advisory no entry names is a finding, as before, and so is a vulnerable
 /// answer that names no id: there is nothing to tell it from a new one. A
 /// KEV listing is never covered.
-pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mut Accepted>, sources: &mut Sources, until: Instant) {
-    let lockfiles: Vec<_> = trace::RECORDS.iter().filter(|rel| sh::is_file(&store.project.join(rel))).collect();
-    if lockfiles.is_empty() { return }
-    if sh::is_dir(&store.project.join("node_modules")) && !sh::is_file(&store.project.join(trace::RECORDS[1])) {
-        state::log_advisory(&store.home, &cat(&[b"post-verify: ", sh::bytes(&store.project), b"/node_modules has no .package-lock.json, so the installed tree was read from package-lock.json only."]));
+///
+/// The closure is that of `records`, the lockfile npm reads and the tree
+/// record as the post hook read them once (post::lockfile). A record that
+/// is there and could not be read is a reason: the gate does not judge a
+/// closure it could not read whole.
+pub fn check(store: &Store, records: &Records, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mut Accepted>, sources: &mut Sources, until: Instant) {
+    if let Some(unread) = &records.unread {
+        reasons.push(cat(&[b"npm record ", &unread.text(&store.project), b"; fail-closed"])); return
+    }
+    let Some(first) = records.each().next() else { return };
+    if records.tree.is_none() && sh::is_dir(&store.project.join("node_modules")) {
+        state::log_advisory(&store.home, &cat(&[b"post-verify: ", sh::bytes(&store.project), b"/node_modules has no .package-lock.json, so the installed tree was read from ", first.rel.as_bytes(), b" only."]));
     }
     let mut all = Vec::new();
-    for rel in lockfiles {
-        match closure::lock_closure(&store.project.join(rel)) {
+    for record in records.each() {
+        match closure::lock_closure_of(&record.stream) {
             Ok(parts) => all.extend(parts.into_iter().flatten()),
-            Err(_) => { reasons.push(cat(&[b"npm closure could not be parsed from ", rel.as_bytes()])); return }
+            Err(_) => { reasons.push(cat(&[b"npm closure could not be parsed from ", record.rel.as_bytes()])); return }
         }
     }
     let all = closure::unique_sorted(all);

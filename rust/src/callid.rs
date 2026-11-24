@@ -78,9 +78,16 @@ pub mod record {
     /// against hold fractions of a second.
     pub const SECONDS: &str = "seconds";
     pub const SUBSECOND: &str = "subsecond";
-    /// The two npm records, under which `inodes` and `clocks` are kept, and
-    /// the tree, whose inode the backstop entry also keeps.
-    pub const RECORDS: [&str; 2] = ["package-lock.json", "node_modules/.package-lock.json"];
+    /// The lockfiles npm reads in a project, in the order it prefers them:
+    /// the first that holds a byte is the one it reads (post::lockfile).
+    pub const LOCKFILES: [&str; 2] = ["npm-shrinkwrap.json", "package-lock.json"];
+    /// npm's record of the installed tree.
+    pub const HIDDEN: &str = "node_modules/.package-lock.json";
+    /// The npm records an install trace watches, under which `inodes` and
+    /// `clocks` are kept: npm writes the lockfile it reads, which may be
+    /// either one, and the tree record. The tree, whose inode the backstop
+    /// entry also keeps.
+    pub const RECORDS: [&str; 3] = [LOCKFILES[1], HIDDEN, LOCKFILES[0]];
     pub const TREE: &str = "node_modules";
 }
 
@@ -100,7 +107,7 @@ fn record_names_are_spelled_once() {
     let names = [record::SNAPSHOT_ID, record::PROJECT_DIR, record::DIR_HASH, record::PROJECT_DIR_FROM, record::NPM_INSTALL,
         record::RUNNER_ONLY, record::NPM_TRACE, record::NPM_UNATTRIBUTABLE, record::NPM_FETCH, record::ACCEPT_RISK, record::ACCEPT_SOURCE,
         record::BASELINE, record::INODES, record::KEY, record::RESOLUTION, record::CLOCKS, record::ENTRIES,
-        record::SECONDS, record::SUBSECOND, record::RECORDS[1]];
+        record::SECONDS, record::SUBSECOND, record::HIDDEN];
     for (file, text) in [("pre/pending.rs", include_str!("pre/pending.rs")), ("pre.rs", include_str!("pre.rs")),
                          ("post/call.rs", include_str!("post/call.rs")), ("post/trace.rs", include_str!("post/trace.rs")),
                          ("post/run.rs", include_str!("post/run.rs")), ("post/npm.rs", include_str!("post/npm.rs")),
@@ -111,6 +118,6 @@ fn record_names_are_spelled_once() {
             assert!(lines.is_empty(), "{file} spells {quoted} outside callid::record: {lines:?}");
         }
     }
-    let quoted = format!("\"{}\"", record::RECORDS[1]);
+    let quoted = format!("\"{}\"", record::HIDDEN);
     assert!(!include_str!("pre/snapshot.rs").contains(&quoted), "pre/snapshot.rs spells {quoted} outside callid::record");
 }

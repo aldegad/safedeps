@@ -18,7 +18,7 @@
 //! records, is covered. So a record of the same name and version from
 //! another source, the same URL with other bytes, and the same bytes under
 //! another URL or another name are each judged as before.
-use super::{closure, jv, report::cat, sh, trace};
+use super::{closure, jv, lockfile::Records, report::cat, sh};
 use crate::{json::Value, sources::{self, Entry, Index}};
 use std::{path::Path, time::{Duration, Instant}};
 type W = Vec<u8>;
@@ -88,16 +88,17 @@ pub fn wait(until: Instant) -> Duration {
 }
 
 impl Sources {
-    /// The ledger of `home` and the package records of `project`'s two npm
-    /// records. The ledger is read only where some record names a URL an
-    /// entry could name, or the call has an override: an install from the
-    /// public registry alone never waits on its lock.
-    pub fn read(home: &Path, project: &Path, bypass: Option<(W, W)>, until: Instant) -> Self {
-        let mut s = Sources { bypass, ..Default::default() };
-        for rel in trace::RECORDS {
-            let file = project.join(rel);
-            if !sh::is_file(&file) { continue }
-            let Some(st) = jv::read_file(&file) else { s.unread = true; continue };
+    /// The ledger of `home` and the package records of the project's two
+    /// npm records, as the post hook read them once (post::lockfile): the
+    /// lockfile npm reads and the tree record. A record that could not be
+    /// read leaves every record uncovered. The ledger is read only where
+    /// some record names a URL an entry could name, or the call has an
+    /// override: an install from the public registry alone never waits on
+    /// its lock.
+    pub fn read(home: &Path, records: &Records, bypass: Option<(W, W)>, until: Instant) -> Self {
+        let mut s = Sources { bypass, unread: records.unread.is_some(), ..Default::default() };
+        for record in records.each() {
+            let (rel, st) = (record.rel, &record.stream);
             if st.failed { s.unread = true; continue }
             for v in &st.values {
                 let Ok(Value::Obj(entries)) = jv::field(v, "packages") else { continue };
@@ -298,7 +299,7 @@ mod tests {
         ];
         let dir = crate::os::scratch_dir("safedeps-accepted").unwrap();
         std::fs::write(dir.join("package-lock.json"), &lock).unwrap();
-        let mut s = Sources::read(&dir.join("home"), &dir, None, Instant::now() + Duration::from_secs(5));
+        let mut s = Sources::read(&dir.join("home"), &Records::read(&dir), None, Instant::now() + Duration::from_secs(5));
         s.ledger = Some(Ok(Index { present: true, entries: entries.clone(), broken: 0 }));
         let mut names: Vec<(W, W)> = s.nodes.iter().map(|n| (n.name.clone(), n.version.clone())).collect();
         names.sort();
