@@ -103,10 +103,11 @@ pub fn scratch_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(std::ffi::OsString::from_vec(bytes).into())
 }
 
-/// flock(2)'s exclusive lock, and its flag not to block. The numbers are the
-/// same on macOS and Linux.
+/// flock(2)'s exclusive lock, its flag not to block, and its unlock. The
+/// numbers are the same on macOS and Linux.
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
+const LOCK_UN: i32 = 8;
 
 /// The host's monotonic clock: CLOCK_UPTIME_RAW on macOS (<time.h>: 8, the
 /// value mach_absolute_time gives, clock_gettime(3)), CLOCK_MONOTONIC on
@@ -143,43 +144,68 @@ pub fn host_clock() -> HostTime {
     HostTime((t.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(t.tv_nsec as u64))
 }
 
+/// One try for flock(2)'s exclusive lock on the open file description of
+/// `file`, which does not wait: true where the lock was granted, false where
+/// another description holds it.
+pub fn try_flock(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    loop {
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let e = std::io::Error::last_os_error();
+        match e.kind() {
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock => return Ok(false),
+            _ => return Err(e),
+        }
+    }
+}
+
+/// Whether `at` is past a wait of `wait` from `start`. The wait runs to its
+/// last nanosecond: `at` exactly `wait` after `start` is within it, and a
+/// nanosecond later is past it.
+fn past_the_wait(start: HostTime, wait: std::time::Duration, at: HostTime) -> bool {
+    at > start.after(wait)
+}
+
 /// flock(2)'s exclusive lock on the open file description of `file`, which
-/// may be open for reading alone, tried until it is granted, or until `wait`
-/// has passed from the wait's start. The wait starts when this call does.
-/// After each try the lock refused, `holder` is told the time and says when
-/// the hold that refused it began, or nothing where it cannot say: a start
-/// it gives starts the wait there, if that is later than this call's start,
-/// and nothing keeps the start the wait has. So a lock that changes hands is
-/// waited for however long it stays taken, and one hold that keeps it for
-/// `wait` is a deadline outcome, never a lock taken anyway. Answers the time
-/// read just before the try that was granted: the start of this hold, never
-/// later than the lock was taken. The lock goes when the file is closed, by a
-/// drop or by the end of the process, so a holder that dies leaves no lock
-/// behind, as a lock directory does.
+/// may be open for reading alone, tried until it is granted within `wait`.
+/// The wait starts when this call does. After every try, refused or granted,
+/// `holder` is told the time the try ended and says when the hold the wait
+/// is behind began: the one that refused the try, or, for a try that was
+/// granted, the last one, which just let the lock go. Where it cannot say it
+/// gives nothing. A start it gives starts the wait there, if that is later
+/// than this call's start, and nothing keeps the start the wait has. A try
+/// that ended past the wait from that start is a deadline outcome, whether
+/// the lock refused it or granted it, and a lock granted that late is let go
+/// first. So a lock that changes hands is waited for however long it stays
+/// taken, and one hold that keeps it for `wait` is a deadline outcome, never
+/// a lock taken anyway. Answers the time read just before the try that was
+/// granted: the start of this hold, never later than the lock was taken. The
+/// lock goes when the file is closed, by a drop or by the end of the process,
+/// so a holder that dies leaves no lock behind, as a lock directory does.
 pub fn flock_within(file: &std::fs::File, wait: std::time::Duration, mut holder: impl FnMut(HostTime) -> Option<HostTime>) -> Result<HostTime, crate::outcome::Outcome> {
     use std::os::unix::io::AsRawFd;
     let began = host_clock();
     let mut start = began;
     loop {
         let tried = host_clock();
-        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+        let granted = try_flock(file).map_err(|e| crate::outcome::Outcome::Io(Err(e)))?;
+        let ended = host_clock();
+        if let Some(held) = holder(ended) {
+            start = held.max(began);
+        }
+        if past_the_wait(start, wait, ended) {
+            if granted && unsafe { flock(file.as_raw_fd(), LOCK_UN) } != 0 {
+                return Err(crate::outcome::Outcome::Io(Err(std::io::Error::last_os_error())));
+            }
+            return Err(crate::outcome::Outcome::Deadline);
+        }
+        if granted {
             return Ok(tried);
         }
-        let e = std::io::Error::last_os_error();
-        match e.kind() {
-            std::io::ErrorKind::Interrupted => continue,
-            std::io::ErrorKind::WouldBlock => {
-                let now = host_clock();
-                if let Some(held) = holder(now) {
-                    start = held.max(began);
-                }
-                if now >= start.after(wait) {
-                    return Err(crate::outcome::Outcome::Deadline);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            }
-            _ => return Err(crate::outcome::Outcome::Io(Err(e))),
-        }
+        std::thread::sleep(std::time::Duration::from_millis(10))
     }
 }
 
@@ -220,6 +246,41 @@ mod lock_tests {
         assert!(matches!(answer, Err(Outcome::Deadline)), "{answer:?}");
         let other = File::open(&locked).unwrap();
         assert!(flock_within(&other, Duration::from_secs(10), |_| None).is_ok(), "the waiter kept the lock it was granted");
+    }
+
+    #[test]
+    fn a_granted_try_is_judged_from_the_start_the_holder_gives_for_it() {
+        // The hold that refused the first try began as that try ended, and
+        // lets the lock go then. Before the next try, another hold took the
+        // lock and let it go: the holder says it began a millisecond before
+        // that try ended. The wait counts from there, so the try is within
+        // it and the lock is taken, though the wait from the first hold's
+        // start ran out before the try ended. A granted try judged from the
+        // start the refused tries had was refused, for a hold it never waited
+        // behind.
+        let dir = Scratch(scratch_dir("safedeps-os-lock-test").unwrap());
+        let locked = dir.0.join("locked");
+        let held = File::create(&locked).unwrap();
+        assert!(flock_within(&held, Duration::from_secs(10), |_| None).is_ok(), "another held the lock");
+        let mut held = Some(held);
+        let waiter = File::open(&locked).unwrap();
+        let answer = flock_within(&waiter, Duration::from_millis(5), |now| match held.take() {
+            Some(_) => Some(now),
+            None => Some(HostTime(now.0.saturating_sub(1_000_000))),
+        });
+        assert!(answer.is_ok(), "{answer:?}");
+    }
+
+    #[test]
+    fn the_wait_runs_to_its_last_nanosecond() {
+        // The one comparison every try is judged by, refused or granted: a
+        // try that ends the wait after its start is within it, and one that
+        // ends a nanosecond later is past it.
+        let start = HostTime(1_000_000_000);
+        let wait = Duration::from_secs(10);
+        assert!(!past_the_wait(start, wait, start));
+        assert!(!past_the_wait(start, wait, start.after(wait)));
+        assert!(past_the_wait(start, wait, HostTime(start.after(wait).0 + 1)));
     }
 }
 

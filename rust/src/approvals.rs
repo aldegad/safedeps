@@ -46,16 +46,21 @@
 //! took the lock, so a turn never says a hold began later than it did. A
 //! waiter counts LOCK_WAIT from the later of two times: when it began to
 //! wait, and when the hold it waits behind began, as the turn says. After
-//! each try the lock refused it reads the turn and counts again. The first
-//! turn it reads whole can be older than its wait, so it never counts: a
-//! turn left from before the host started again can name a time the clock
-//! reaches only later. Only a turn other than the first counts.
+//! every try, refused or granted, it reads the turn and counts again, and a
+//! try that ended past LOCK_WAIT from that start is refused either way. Up to
+//! LOCK_WAIT exactly a try is within the wait. A waiter whose try the lock
+//! granted that late lets the lock go before anything is read or written,
+//! its own turn included. The first turn it reads whole can be older than its
+//! wait, so it never counts: a turn left from before the host started again
+//! can name a time the clock reaches only later. Only a turn other than the
+//! first counts.
 //! A turn that cannot be read, whose check is not its time's, as a line read
 //! while a hold writes over it can be, or that names a time later than now,
 //! counts for nothing, and the wait keeps the start it had. No two holds
 //! overlap, so commits that overlap wait their turn, however many there are,
-//! and none is refused for the crowd, while a waiter that waited LOCK_WAIT
-//! behind one hold is refused: nothing is written or read without the lock.
+//! and none is refused for the crowd, while a waiter that waited past
+//! LOCK_WAIT behind one hold is refused: nothing is written or read without
+//! the lock.
 //! A hold writes its turn after it took the lock, so for a moment the turn is
 //! still the last hold's, longer where a hold stalls between its lock and its
 //! turn, and a hold that cannot write its turn leaves the last one standing.
@@ -655,9 +660,12 @@ fn read_turn(dir: &Path) -> Option<Turn> {
 
 /// The store lock on `file`, the store in `dir`, then this hold's turn. The
 /// wait is counted from the later of the waiter's start and the start of the
-/// hold the turn names (the module's "The turn"). A turn names that hold only
-/// where it is read whole, is not the first turn this waiter read whole, and
-/// began no later than now.
+/// hold the turn names (the module's "The turn"), again after every try, the
+/// try the lock granted included. A turn names that hold only where it is
+/// read whole, is not the first turn this waiter read whole, and began no
+/// later than now. A lock granted after the wait ran out is let go before
+/// this hold's turn is written: the waiter is refused, and the turn stays the
+/// last hold's.
 fn lock_store(dir: &Path, file: &fs::File, wait: Duration) -> Result<(), Fault> {
     let mut first = None;
     let began = os::flock_within(file, wait, |now| {
@@ -1041,6 +1049,18 @@ mod tests {
         lock_store(dir, &f, Duration::from_secs(1)).unwrap();
         f
     }
+    /// One try for the store lock on `file`, which writes the turn where the
+    /// lock was granted, as `lock_store` writes it: false, and nothing
+    /// written, where another holds the lock. A wait of zero is no such try:
+    /// a try the lock granted ends after the wait began, so past it.
+    fn take_at_once(dir: &Path, file: &fs::File) -> bool {
+        let tried = os::host_clock();
+        let took = os::try_flock(file).unwrap();
+        if took {
+            write_turn(dir, tried).unwrap();
+        }
+        took
+    }
     fn ino(p: &Path) -> u64 {
         fs::metadata(p).unwrap().ino()
     }
@@ -1281,7 +1301,7 @@ mod tests {
                 drop(held);
                 // One try first: a refusal is another holder, which took the
                 // lock between the two holds.
-                if lock_store(&dir, &next, Duration::ZERO).is_err() {
+                if !take_at_once(&dir, &next) {
                     gap = true;
                     lock_store(&dir, &next, LOCK_WAIT).unwrap();
                 }
@@ -1436,7 +1456,7 @@ mod tests {
     /// turn.
     fn bare_hold(dir: &Path) -> fs::File {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
-        assert!(os::flock_within(&f, Duration::ZERO, |_| None).is_ok(), "another held the lock");
+        assert!(os::try_flock(&f).unwrap(), "another held the lock");
         f
     }
     /// The turn's bytes, as the last hold that wrote one left them.
@@ -1943,11 +1963,7 @@ mod tests {
     }
     fn held_elsewhere(home: &Path) -> bool {
         let other = fs::File::open(path(home)).unwrap();
-        match os::flock_within(&other, Duration::ZERO, |_| None) {
-            Ok(_) => false,
-            Err(Outcome::Deadline) => true,
-            Err(e) => panic!("the lock check failed: {e:?}"),
-        }
+        !os::try_flock(&other).expect("the lock check")
     }
 
     /// The kind of advisory.log line `text` is to a commit: its approve line,
