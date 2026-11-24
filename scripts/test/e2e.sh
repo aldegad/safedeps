@@ -1447,6 +1447,46 @@ grep -q 'ACCEPTED RISK$' "${SAFEDEPS_HOME}/reorg.log" || fail "reorg.log records
 assert_gives_no_command "$(post_message "${kept_post}" | grep -v 'did not run npm rebuild')" "the accepted-risk message gives no command"
 pass "SAFEDEPS_ACCEPT_RISK keeps an unapproved, vulnerable install, warns, and records it"
 
+# Moving 60 packages the lock already holds to another version brings in no
+# new dependency, so the lockfile heuristic gives no reason for it. Counted
+# as the resolved lines a diff inserts, it was 60 new dependencies, a reason
+# no override covers. Every moved version is unapproved, the override keeps
+# the install, and the entry names each of the 60 versions it accepted.
+accept_bumps() {
+  local i
+  for i in $(seq -w 0 59); do
+    printf ',\n    "node_modules/fixture-bump-%s": {"version": "%s", "resolved": "https://registry.npmjs.org/fixture-bump-%s/-/fixture-bump-%s-%s.tgz"}' \
+      "${i}" "$1" "${i}" "${i}" "$1"
+  done
+}
+accept_project "${tmp_root}/accept-bumps"
+accept_lock "${tmp_root}/accept-bumps" "$(accept_bumps 1.0.0)"
+accept_before=$(accept_entries)
+bumps_pre=$(accept_payload accept-bumps "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci" "${tmp_root}/accept-bumps" | pre_hook)
+[[ "$(hook_response_read decision "${bumps_pre}")" == allow ]] || fail "npm ci with the override runs"
+payload=$(accept_payload accept-bumps "$(hook_response_read required-rewrite "${bumps_pre}")" "${tmp_root}/accept-bumps")
+accept_lock "${tmp_root}/accept-bumps" "$(accept_bumps 1.0.1)"
+bumps_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+grep -qxF 'safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.' \
+  <<< "$(post_message "${bumps_post}")" || fail "60 version moves under the override are kept: $(cat "${bumps_post}")"
+grep -q 'new dependencies' < "${bumps_post}" && fail "60 version moves are no new dependencies: $(cat "${bumps_post}")"
+grep -q 'fixture-bump-59-1.0.1.tgz' "${tmp_root}/accept-bumps/package-lock.json" || fail "the kept install's lockfile is left as the install wrote it"
+[[ "$(accept_entries)" == "$((accept_before + 1))" ]] || fail "the kept version moves write one accepted-risk entry"
+tail -n 1 "${accept_audit}" | jq -e --arg r "${accept_reason}" '
+  .reason == $r and (.packages | length) == 60
+  and ([.packages[] | select(.problem == "unapproved") | .package] | sort)
+    == ([range(0; 60) | "fixture-bump-\(if . < 10 then "0" else "" end)\(.)@1.0.1"])
+  and (.problems | length) == 1
+  and (.problems[0] | startswith("npm closure contains 60 unapproved package(s): "))' >/dev/null \
+  || fail "the entry names each of the 60 accepted versions: $(tail -n 1 "${accept_audit}")"
+# The problem line, which the message and reorg.log show, gives the count and
+# names some of the versions; the entry's packages name every one. How many
+# the line names is printed, not judged.
+printf '# accept-bumps: the accepted problem line names %s of the 60 versions, and the entry names %s\n' \
+  "$(tail -n 1 "${accept_audit}" | jq -r '.problems[0] | [scan("fixture-bump-[0-9]+@1\\.0\\.1")] | length')" \
+  "$(tail -n 1 "${accept_audit}" | jq -r '.packages | length')"
+pass "SAFEDEPS_ACCEPT_RISK keeps 60 version moves, which are no new dependencies, and the entry names each version"
+
 # A KEV listing is rolled back whatever the override says.
 accept_project "${tmp_root}/accept-kev"
 accept_before=$(accept_entries)
