@@ -23,7 +23,9 @@
 #   remote.sh prepare RUN JOBS
 #                             Starts one detached build after the coordinator
 #                             has acquired the queue slots. Never retries a
-#                             build in this run. Writes out/core-prepare's
+#                             build in this run. Picks the run's locale first
+#                             and writes it to out/locale; the build and every
+#                             unit run under it. Writes out/core-prepare's
 #                             build.log, receipt.json and exit before units.
 #   remote.sh start RUN UNIT  Requires successful preparation, then starts one
 #                             unit detached and returns. The unit
@@ -47,7 +49,7 @@
 # RUN holds tree/ (the shipped tree), path (a PATH prefix the coordinator
 # writes from the host file), out/ (each unit's .log, .rc, .secs, .load-start
 # and .load-end, written by run-all.sh --unit, and its .pid and .run, written
-# here), held-K, queue-K.pid, heartbeat and release.
+# here, and the run's locale), held-K, queue-K.pid, heartbeat and release.
 set -uo pipefail
 
 HEARTBEAT_MINUTES=10
@@ -74,6 +76,42 @@ host_path() {
   prefix="${prefix//\$HOME/${HOME}}"
   [[ -z "${prefix}" ]] || PATH="${prefix}:${PATH}"
   export PATH
+}
+
+# The locale of the run's build and units is the host's to give. The
+# coordinator sends none (scripts/ci/run-on-hosts.sh). ssh used to carry the
+# caller's LANG, and on a host that did not have that locale perl (shasum)
+# printed a warning ahead of the output a row read. The session's own default
+# is no better, since nothing says the host has it either. So the host's list
+# decides: en_US.UTF-8, then C.UTF-8, then any other UTF-8 locale in the order
+# `locale -a` lists them, and C when there is none. en_US.UTF-8 comes first
+# because every macOS has it and only recent ones have C.UTF-8, so the hosts of
+# one platform run one locale. A name counts only when `locale charmap`, with
+# the name as LC_ALL, prints UTF-8 and nothing else: macOS answers US-ASCII,
+# with no warning, for a UTF-8 name it does not have. A `locale -a` that fails
+# is not an empty list, and the preparation fails with it.
+pick_locale() {
+  local listed name charmap
+  listed=$(locale -a) || return 1
+  while IFS= read -r name; do
+    [[ "${name}" =~ ^[A-Za-z0-9_.@-]+$ ]] || continue
+    grep -qxF -- "${name}" <<< "${listed}" || continue
+    charmap=$(LC_ALL="${name}" locale charmap 2>&1) || continue
+    [[ "${charmap}" == UTF-8 ]] || continue
+    printf '%s\n' "${name}"
+    return 0
+  done < <(printf '%s\n' en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; grep -iE '\.utf-?8$' <<< "${listed}")
+  printf 'C\n'
+}
+
+# Puts the run's locale in place for the build or a unit: LANG alone, so a row
+# that sets a category of its own still gets it, and no LC_* the session had.
+use_locale() {
+  local value
+  value=$(cat "${OUT}/locale") || die "cannot read the run's locale"
+  [[ "${value}" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "not a locale name: ${value:0:60}"
+  unset "${!LC_@}"
+  export LANG="${value}"
 }
 
 load_now() { uptime | sed -E 's/.*load averages?: *//; s/,//g'; }
@@ -197,12 +235,16 @@ case "${action}" in
       exit 0
     fi
     printf '%s\n' "${jobs}" > "${RUN}/jobs" || die "cannot record the jobs limit"
+    # Picked once, here, before the build; the build and the units read it.
+    locale_name=$(pick_locale) || die "cannot list the host's locales: locale -a failed"
+    printf '%s\n' "${locale_name}" > "${OUT}/locale" || die "cannot record the run's locale"
     nohup nice -n 10 bash "${RUN}/tree/scripts/ci/remote.sh" prepare-run "${RUN}" \
       </dev/null >"${PREP}/runner.log" 2>&1 &
     printf '%s\n' "$!" > "${RUN}/prepare.pid"
     ;;
   prepare-run)
     host_path
+    use_locale
     cd "${RUN}/tree" || exit 2
     load_now > "${PREP}/load-start"
     ps -o ni= -p "$$" > "${PREP}/nice"
@@ -235,6 +277,7 @@ case "${action}" in
     jobs=$(cat "${RUN}/jobs") || die "cannot read the host's jobs limit"
     [[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || die "invalid host jobs limit"
     host_path
+    use_locale
     cd "${RUN}/tree" || exit 2
     # Appended, not truncated: the watch below writes to the same file, and
     # run-all.sh writing at its own offset overwrote that line (measured).
