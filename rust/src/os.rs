@@ -93,28 +93,25 @@ pub fn scratch_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(std::ffi::OsString::from_vec(bytes).into())
 }
 
-/// The two locks flock(2) takes. The numbers are the same on macOS and Linux.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FileLock {
-    Shared = 1,
-    Exclusive = 2,
-}
+/// flock(2)'s exclusive lock, and its flag not to block. The numbers are the
+/// same on macOS and Linux.
+const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 
-/// flock(2) on the open file description of `file`, tried until it is
-/// granted, or until `wait` has passed with no move. After each try the lock
-/// refused, `moved` says whether its holders moved on since it last answered,
-/// and each time it answers true the wait starts again. So a lock that changes
-/// hands is waited for however long it stays taken, and a holder that keeps
-/// it for `wait` with no move is a deadline outcome, never a lock taken
-/// anyway. The lock goes when the file is closed, by a drop or by the end of
-/// the process, so a holder that dies leaves no lock behind, as a lock
-/// directory does.
-pub fn flock_within(file: &std::fs::File, lock: FileLock, wait: std::time::Duration, mut moved: impl FnMut() -> bool) -> Result<(), crate::outcome::Outcome> {
+/// flock(2)'s exclusive lock on the open file description of `file`, which
+/// may be open for reading alone, tried until it is granted, or until `wait`
+/// has passed with no move. After each try the lock refused, `moved` says
+/// whether its holder moved on since it last answered, and each time it
+/// answers true the wait starts again. So a lock that changes hands is waited
+/// for however long it stays taken, and a holder that keeps it for `wait`
+/// with no move is a deadline outcome, never a lock taken anyway. The lock
+/// goes when the file is closed, by a drop or by the end of the process, so a
+/// holder that dies leaves no lock behind, as a lock directory does.
+pub fn flock_within(file: &std::fs::File, wait: std::time::Duration, mut moved: impl FnMut() -> bool) -> Result<(), crate::outcome::Outcome> {
     use std::os::unix::io::AsRawFd;
     let mut until = std::time::Instant::now() + wait;
     loop {
-        if unsafe { flock(file.as_raw_fd(), lock as i32 | LOCK_NB) } == 0 {
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
             return Ok(());
         }
         let e = std::io::Error::last_os_error();

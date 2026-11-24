@@ -25,14 +25,17 @@
 //! ecosystem, package and version would vouch for an entry of another
 //! context, which no check approved.
 //!
-//! Isolation: the store lock, flock(2) on the store file itself. A writer
-//! holds LOCK_EX for its whole write and a reader holds LOCK_SH for its whole
-//! read, so a reader never sees a line half written and two writers never
-//! write at once. Under the lock a writer first seals a torn last line (below),
-//! then appends its own line in the same write and syncs it before it says
-//! the line is written. The lock belongs to the open file and goes when the
-//! file is closed, so a process that dies holding it leaves nothing to clean
-//! up: the next writer or reader takes it at once.
+//! Isolation: the store lock, flock(2) on the store file itself, and LOCK_EX
+//! for every hold. A writer holds it for its whole write and a reader for its
+//! whole read, on the read-only file it reads, so a reader never sees a line
+//! half written, two writers never write at once, and no two holds overlap.
+//! Under the lock a writer first seals a torn last line (below), then appends
+//! its own line in the same write and syncs it before it says the line is
+//! written. The lock belongs to the open file and goes when the file is
+//! closed, so a process that dies holding it leaves nothing to clean up: the
+//! next writer or reader takes it at once. Reads pay for one mode: they wait
+//! for each other, and a read that stalls under the lock has the reads behind
+//! it refused after LOCK_WAIT, as it has a commit.
 //!
 //! The turn. A waiter waits while the lock changes hands. Every hold of the
 //! lock, a writer's or a reader's, writes its turn as it takes the lock, in
@@ -41,14 +44,15 @@
 //! over the last. A process numbers its own holds, and a pid used again
 //! begins its holds at another time, so two holds write two turns. After each
 //! try the lock refused, a waiter reads the turn, and a turn other than the
-//! last one it read is the lock in a new hold: the wait starts again. So
-//! commits that overlap wait their turn, however many there are, and none is
-//! refused for the crowd, while one hold that keeps the lock for LOCK_WAIT is
-//! an error: nothing is written or read without the lock. A turn that cannot
-//! be read is the last one read, so it never lengthens a wait, and a hold that
-//! cannot write its turn leaves the last one standing: either costs a waiter
-//! its patience, never the lock. Readers that hold the lock together each
-//! write a turn, and the last write stands. A read that meets a write half
+//! last one it read is the lock in a new hold: the wait starts again. No two
+//! holds overlap, so a hold writes its turn only once the hold before it let
+//! the lock go, and a hold that keeps the lock writes no other turn beside
+//! it. So commits that overlap wait their turn, however many there are, and
+//! none is refused for the crowd, while one hold that keeps the lock for
+//! LOCK_WAIT is an error: nothing is written or read without the lock. A turn
+//! that cannot be read is the last one read, so it never lengthens a wait,
+//! and a hold that cannot write its turn leaves the last one standing: either
+//! costs a waiter its patience, never the lock. A read that meets a write half
 //! done reads a turn it has not seen, or none. The turn is no record: only a
 //! waiter reads it, and it vouches for nothing.
 //!
@@ -408,7 +412,7 @@ fn locked_for_reading(dir: &Path, wait: Duration) -> Result<Option<fs::File>, Fa
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Fault::operation(Outcome::Io(Err(e)), &store, |p| Action::Open(p))),
     };
-    lock_store(dir, &file, os::FileLock::Shared, wait)?;
+    lock_store(dir, &file, wait)?;
     Ok(Some(file))
 }
 
@@ -646,9 +650,9 @@ fn read_turn(dir: &Path) -> Option<Turn> {
 /// The store lock on `file`, the store in `dir`, then this hold's turn, with
 /// the wait started again each time the turn changed (the module's "The
 /// turn"). The first turn read is the one the wait started on.
-fn lock_store(dir: &Path, file: &fs::File, how: os::FileLock, wait: Duration) -> Result<(), Fault> {
+fn lock_store(dir: &Path, file: &fs::File, wait: Duration) -> Result<(), Fault> {
     let mut seen = None;
-    os::flock_within(file, how, wait, || {
+    os::flock_within(file, wait, || {
         let now = read_turn(dir);
         let handed_on = matches!((seen, now), (Some(was), Some(is)) if is != was);
         if now.is_some() {
@@ -667,7 +671,7 @@ fn lock_store(dir: &Path, file: &fs::File, how: os::FileLock, wait: Duration) ->
 /// the file.
 fn locked(dir: &Path, wait: Duration) -> Result<fs::File, Fault> {
     let file = open_for_append(dir)?;
-    lock_store(dir, &file, os::FileLock::Exclusive, wait)?;
+    lock_store(dir, &file, wait)?;
     Ok(file)
 }
 
@@ -1027,9 +1031,9 @@ mod tests {
         }
     }
     /// A hold of the store lock, taken as a writer or a reader takes it.
-    fn holder(dir: &Path, lock: os::FileLock) -> fs::File {
+    fn holder(dir: &Path) -> fs::File {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
-        lock_store(dir, &f, lock, Duration::from_secs(1)).unwrap();
+        lock_store(dir, &f, Duration::from_secs(1)).unwrap();
         f
     }
     fn ino(p: &Path) -> u64 {
@@ -1232,7 +1236,7 @@ mod tests {
     fn a_reader_waits_for_a_line_being_written() {
         let d = scratch();
         let whole = line("2026-11-19T08:00:00Z", &h(2), Via::Check, &rec(2));
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let mut w: &fs::File = &held;
         w.write_all(&whole[..25]).unwrap();
         let dir = d.0.clone();
@@ -1247,7 +1251,7 @@ mod tests {
     #[test]
     fn a_lock_held_past_the_wait_is_an_error_and_nothing_is_written() {
         let d = scratch();
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let e = not_written(append_within(&d.0, &h(1), &rec(1), Duration::from_millis(100)));
         assert_eq!(e, format!("the lock of {} did not finish before the deadline", path(&d.0).display()).as_bytes());
         assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap_err().text(), e);
@@ -1263,7 +1267,7 @@ mod tests {
     /// whether another took the lock between two holds.
     fn relay(dir: &Path, holds: u32, each: Duration, quiet: Duration) -> std::thread::JoinHandle<bool> {
         let dir = dir.to_owned();
-        let mut held = holder(&dir, os::FileLock::Exclusive);
+        let mut held = holder(&dir);
         std::thread::spawn(move || {
             let mut gap = false;
             for _ in 1..holds {
@@ -1272,9 +1276,9 @@ mod tests {
                 drop(held);
                 // One try first: a refusal is another holder, which took the
                 // lock between the two holds.
-                if lock_store(&dir, &next, os::FileLock::Exclusive, Duration::ZERO).is_err() {
+                if lock_store(&dir, &next, Duration::ZERO).is_err() {
                     gap = true;
-                    lock_store(&dir, &next, os::FileLock::Exclusive, LOCK_WAIT).unwrap();
+                    lock_store(&dir, &next, LOCK_WAIT).unwrap();
                 }
                 held = next;
             }
@@ -1405,7 +1409,7 @@ mod tests {
         // however often it looks: a holder that keeps the lock is waited for
         // the wait and no longer.
         let d = scratch();
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         fs::remove_file(d.0.join(TURN)).unwrap();
         fs::create_dir(d.0.join(TURN)).unwrap();
         let (staged, entry) = stage(&d.0, 1, "entry of 1");
@@ -1538,14 +1542,6 @@ mod tests {
     }
 
     #[test]
-    fn readers_share_the_lock() {
-        let d = scratch();
-        append(&d.0, &h(1), &rec(1)).unwrap();
-        let _held = holder(&d.0, os::FileLock::Shared);
-        assert_eq!(index_within(&d.0, Duration::from_millis(100)).unwrap().hashes, vec![h(1)]);
-    }
-
-    #[test]
     fn a_sync_that_fails_after_a_whole_write_is_unsynced_and_the_line_is_seen() {
         // No file system here fails a sync on demand, so the sync is the one
         // part a test puts in: the write and the store are the real ones.
@@ -1633,7 +1629,7 @@ mod tests {
     }
     fn held_elsewhere(home: &Path) -> bool {
         let other = fs::File::open(path(home)).unwrap();
-        match os::flock_within(&other, os::FileLock::Exclusive, Duration::ZERO, || false) {
+        match os::flock_within(&other, Duration::ZERO, || false) {
             Ok(()) => false,
             Err(Outcome::Deadline) => true,
             Err(e) => panic!("the lock check failed: {e:?}"),
@@ -1876,7 +1872,7 @@ mod tests {
         let before = ino(&entry);
         let (staged, _) = stage(&d.0, 1, "entry of 1");
         let (hash, r) = (h(1), rec(1));
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let steps = driven("", 0);
         let mut err = Vec::new();
         let answer = commit_with(&d.0, &approval(1, &staged, &entry, &r, &hash), Duration::from_millis(100), &steps, &mut err);
@@ -2228,7 +2224,7 @@ mod tests {
         let entry = stand(&d.0, 1, "the entry A approved");
         let (seen, staged) = seen_and_staged(&d.0, 1, &entry, "the entry A approved, revoked");
         let hash = h(1);
-        let held = holder(&d.0, os::FileLock::Exclusive);
+        let held = holder(&d.0);
         let mut err = Vec::new();
         let r = revocation(1, &hash, &staged, &entry, &seen);
         let answer = revoke_with(&d.0, &r, Duration::from_millis(100), |_, _| panic!("a revoke renamed without the lock"), &mut err);
