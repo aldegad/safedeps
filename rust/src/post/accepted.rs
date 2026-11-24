@@ -296,8 +296,7 @@ mod tests {
             entry(u, "sha512-ws", "ws", "1.0.0", &[]),
             entry(u, "sha512-cased", "cased", "1.0.0", &[]),
         ];
-        let dir = std::env::temp_dir().join(format!("safedeps-accepted-{}-{:?}", std::process::id(), std::time::SystemTime::now()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::os::scratch_dir("safedeps-accepted").unwrap();
         std::fs::write(dir.join("package-lock.json"), &lock).unwrap();
         let mut s = Sources::read(&dir.join("home"), &dir, None, Instant::now() + Duration::from_secs(5));
         s.ledger = Some(Ok(Index { present: true, entries: entries.clone(), broken: 0 }));
