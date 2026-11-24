@@ -2,13 +2,12 @@
 // Provider answers and the npm closure are the existing e2e fixtures. Each
 // row has its own temporary home, and every CLI runs outside the checkout.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Worker } from 'node:worker_threads';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 const root = path.resolve(process.argv[2]);
@@ -22,15 +21,23 @@ fs.writeFileSync(closureFile, JSON.stringify({
   'fixture-clean@1.0.0': [{ package: 'fixture-clean', version: '1.0.0', direct: true }],
 }));
 
-// A thread, not an independent server process: even SIGKILL of this suite
-// takes the provider with it. Finally terminates it on ordinary exits. No
-// row suspends a process, and there is no orphan server for a sweep to reap.
-const provider = new Worker(path.join(root, 'scripts/test/fixture-provider.mjs'), {
-  argv: [portFile, stateFile],
-});
+// What the provider gave this suite as a Worker, and gives it as a process:
+// the port file appears once it listens, an end before that fails the setup,
+// and it ends with the suite.
+// The last is a pipe. Only this process holds the other end of the
+// provider's standard input, and the kernel closes that end when the suite
+// ends, by SIGKILL too. --exit-on-stdin-eof (lib/fixture_http.py) then ends
+// the provider. Finally closes the same end on ordinary exits, so every run
+// takes the path a SIGKILL takes. The provider starts in the temporary root,
+// outside the checkout. No row suspends a process, and there is no orphan
+// server for a sweep to reap.
+const provider = spawn('python3', [path.join(root, 'scripts/test/fixture-provider.py'), '--exit-on-stdin-eof',
+  portFile, stateFile], { cwd: base, stdio: ['pipe', 'inherit', 'inherit'] });
 let providerError;
-provider.on('error', (error) => { providerError = error; });
-provider.on('exit', (code) => { providerError ??= new Error(`provider exited ${code}`); });
+const providerEnded = new Promise((resolve) => {
+  provider.on('error', (error) => { providerError ??= error; resolve(); });
+  provider.on('exit', (code, signal) => { providerError ??= new Error(`provider exited ${code ?? signal}`); resolve(); });
+});
 
 const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('SAFEDEPS_')));
 let env;
@@ -230,7 +237,16 @@ try {
   failed = true;
   console.log(`not ok - approvals provenance setup: ${error.stack}`);
 } finally {
-  await provider.terminate();
+  provider.stdin?.destroy();
+  // Unreferenced: a provider that ended leaves this timer nothing to hold
+  // up, and one that did not keeps the loop running until the timer fires.
+  const late = delay(5000, false, { ref: false });
+  if (!await Promise.race([providerEnded.then(() => true), late])) {
+    failed = true;
+    console.log('not ok - the provider ends at end of file on its standard input');
+    provider.kill('SIGKILL');
+    await providerEnded;
+  }
   if (failed) console.log(`# failed row artifacts: ${base}`);
   else fs.rmSync(base, { recursive: true });
 }

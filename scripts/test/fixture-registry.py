@@ -3,7 +3,7 @@
 answers through lib/fixture_http.py, which says why it reads with blocking
 recv().
 
-  fixture-registry.py <port-file> <tarball-dir> <request-log> [<trace-file>] [--mark <text>]
+  fixture-registry.py <port-file> <tarball-dir> <request-log> [<trace-file>] [--mark <text>] [--exit-on-stdin-eof]
 
 It serves a packument and a tarball for every `<name>-<version>.tgz` in a
 directory, next to the `<name>-<version>.tgz.json` manifest it was packed
@@ -15,7 +15,8 @@ ordinary lockfile rather than one pointing at a local port.
 
 Every request is appended to the request log as `<method> <url>`, so a test
 can show nothing left the machine. The trace file, if given, gets each
-connection's events (lib/fixture_http.py).
+connection's events, and --exit-on-stdin-eof ends the server at end of file
+on its standard input (lib/fixture_http.py).
 """
 import base64
 import hashlib
@@ -32,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
 import fixture_http  # noqa: E402
 
 args = fixture_http.arguments(
-    'fixture-registry.py <port-file> <tarball-dir> <request-log> [<trace-file>] [--mark <text>]',
+    'fixture-registry.py <port-file> <tarball-dir> <request-log> [<trace-file>] [--mark <text>] [--exit-on-stdin-eof]',
     ['port_file', 'tar_dir', 'log_file'], 'trace_file')
 
 TARBALL_NAME = re.compile(r'(.+)-([0-9]+\.[0-9]+\.[0-9]+)\.tgz')
@@ -80,4 +81,4 @@ def route(method, url, body):
     return fixture_http.Answer(404, '{}')
 
 
-fixture_http.serve(route, args.port_file, args.trace_file)
+fixture_http.serve(route, args.port_file, args.trace_file, args.exit_on_stdin_eof)

@@ -3,9 +3,11 @@
 file the battery rewrites between steps. It answers through lib/fixture_http.py,
 which says why it reads with blocking recv().
 
-  fixture-provider.py <port-file> <state-file> [<trace-file>] [--mark <text>]
+  fixture-provider.py <port-file> <state-file> [<trace-file>] [--mark <text>] [--exit-on-stdin-eof]
 
-The trace file, if given, gets each connection's events (lib/fixture_http.py).
+The trace file, if given, gets each connection's events, and
+--exit-on-stdin-eof ends the server at end of file on its standard input
+(lib/fixture_http.py).
 """
 import json
 import re
@@ -18,8 +20,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
 import fixture_http  # noqa: E402
 
-args = fixture_http.arguments('fixture-provider.py <port-file> <state-file> [<trace-file>] [--mark <text>]',
-                              ['port_file', 'state_file'], 'trace_file')
+args = fixture_http.arguments(
+    'fixture-provider.py <port-file> <state-file> [<trace-file>] [--mark <text>] [--exit-on-stdin-eof]',
+    ['port_file', 'state_file'], 'trace_file')
 
 
 def state():
@@ -281,4 +284,4 @@ def route(method, url, body):
     return fixture_http.Answer(404, 'not found')
 
 
-fixture_http.serve(route, args.port_file, args.trace_file)
+fixture_http.serve(route, args.port_file, args.trace_file, args.exit_on_stdin_eof)

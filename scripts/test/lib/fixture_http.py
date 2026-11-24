@@ -32,17 +32,24 @@ import traceback
 
 def arguments(usage, positional, optional):
     """The fixture's command line: the named positional arguments, then one
-    optional one, then `--mark <text>`.
+    optional one, then `--mark <text>` and `--exit-on-stdin-eof`.
 
     The mark only names the process to a sweep that reads `ps` (the child
     markers of e2e.sh and lib/npm-sandbox.sh); the server reads nothing from
     it. It is an argument because `exec -a` does not carry it: on macOS the
-    python3 on PATH starts another executable, which takes its own name."""
+    python3 on PATH starts another executable, which takes its own name.
+
+    `--exit-on-stdin-eof` ends the server when its standard input reaches end
+    of file (serve()). A suite that starts the server on a pipe and holds the
+    other end takes the server with it when it ends, by SIGKILL too, so no
+    sweep has to find it (lib/approvals-provenance.mjs). Without the option
+    the server never reads its standard input."""
     parser = argparse.ArgumentParser(usage=usage)
     for name in positional:
         parser.add_argument(name)
     parser.add_argument(optional, nargs='?')
     parser.add_argument('--mark')
+    parser.add_argument('--exit-on-stdin-eof', action='store_true')
     return parser.parse_args()
 
 
@@ -113,10 +120,29 @@ def _exchange_class(route, trace):
     return Exchange
 
 
-def serve(route, port_file, trace_file):
+def _exit_at_stdin_eof():
+    """Read standard input until end of file, then end the process. The read
+    blocks, like every read here. The kernel closes a process's descriptors
+    when it ends, however it ends, so the end of file comes once no process
+    holds the other end of the pipe. os._exit, because this is not the main
+    thread, and the main thread waits in accept(). A read that fails ends the
+    process too, and says why, since the server would then outlive its suite
+    without a word."""
+    status = 0
+    try:
+        while os.read(0, 65536):
+            pass
+    except OSError:
+        traceback.print_exc()
+        status = 1
+    os._exit(status)
+
+
+def serve(route, port_file, trace_file, exit_on_stdin_eof=False):
     """Listen on 127.0.0.1 at a port the kernel picks, write the port to
     port_file, and answer each request with route(method, url, body), which
-    returns an Answer. Runs until the process is killed."""
+    returns an Answer. Runs until the process is killed or, with
+    exit_on_stdin_eof, until its standard input reaches end of file."""
     trace = Trace(trace_file)
     exchange = _exchange_class(route, trace)
     held = [0]
@@ -153,6 +179,11 @@ def serve(route, port_file, trace_file):
                 with held_lock:
                     held[0] -= 1
                 trace.line('close', peer[1], 'clean' if clean else 'error')
+
+    # Started before the port file is written, so the server is bound to its
+    # suite's end by the time the suite can read the port.
+    if exit_on_stdin_eof:
+        threading.Thread(target=_exit_at_stdin_eof, daemon=True).start()
 
     # The port file appears whole: a battery reads it as soon as it is not
     # empty.
