@@ -231,7 +231,10 @@ oracle_trace_state() {
   [[ -n "${project}" ]] || project="${2:-}"
   [[ -n "${baseline}" ]] || { printf 'unset'; return; }
   [[ -f "${baseline}" ]] || { printf 'gone'; return; }
-  for rel in package-lock.json node_modules/.package-lock.json; do
+  # The npm records the core traces (rust/src/callid.rs, record::RECORDS):
+  # npm writes the lockfile it reads, which may be the shrinkwrap, and the
+  # tree record.
+  for rel in package-lock.json node_modules/.package-lock.json npm-shrinkwrap.json; do
     file="${project}/${rel}"
     [[ -e "${file}" ]] || continue
     recorded=$(jq -r --arg rel "${rel}" '.npm_trace.inodes[$rel] // ""' "${pending}" 2>/dev/null)
@@ -1380,7 +1383,8 @@ oracle_line() {
   elif [[ "${line}" =~ ${re_reason_trace} ]]; then
     oracle_count reason-trace
     [[ "${O_TRACE}" == present ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}'"
-    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/package-lock.json" || "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules/.package-lock.json" ]] || oracle_red "not one of the project's two npm lockfiles"
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/package-lock.json" || "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules/.package-lock.json" \
+      || "${BASH_REMATCH[1]}" == "${O_PROJECT}/npm-shrinkwrap.json" ]] || oracle_red "not one of the npm records the project's trace watches"
   elif [[ "${line}" =~ ${re_reason_file} ]]; then
     oracle_count reason-file
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another project or another snapshot"

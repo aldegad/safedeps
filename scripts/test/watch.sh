@@ -1210,6 +1210,134 @@ row_accepted_source_other_bytes() {
 }
 row "other bytes under an accepted URL, and an entry revoked, are findings as before" row_accepted_source_other_bytes
 
+# ---- which npm lockfile ----------------------------------------------------------------
+# A directory is measured by the npm lockfile npm reads there
+# (lib/npm/closure.sh, safedeps_npm_project_lockfile), read once:
+# npm-shrinkwrap.json where it holds a byte, else package-lock.json where it
+# holds a byte. The other one, and one with no byte in it, is `ignored`: no
+# finding comes from it, it is no gap in the run, and a finding an earlier run
+# made of it is stale for that reason. Each row names the file the findings
+# come from and whether the accepted source still takes its advisory out.
+site_lock_at() { # FILE INTEGRITY
+  jq -n --arg url "${site_url}" --arg integrity "$2" '{name: "fixture", lockfileVersion: 3, packages: {
+    "": {name: "fixture"},
+    "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity},
+    "node_modules/left": {version: "1.0.0"}}}' > "$1"
+}
+npm_rows() { jq -c '[.roots[] | .lockfiles[]? | select(.kind == "npm") | {path, status}] | sort_by(.path)' "${home}/watch/state.json"; }
+both_rows() { # SHRINKWRAP_STATUS LOCK_STATUS
+  printf '[{"path":"./npm-shrinkwrap.json","status":"%s"},{"path":"./package-lock.json","status":"%s"}]' "$1" "$2"
+}
+row_shrinkwrap_beside_empty_lock() {
+  new_world; register a
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes100
+  : > "${d}/p/a/package-lock.json"
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and the empty package-lock.json ignored: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "the shrinkwrap's accepted advisory is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1 and .summary.complete == true and .summary.unmeasured == 0' \
+    'the accepted source counts and the empty file is no gap' '.unmeasured'
+}
+row "npm-shrinkwrap.json beside an empty package-lock.json: the shrinkwrap is measured and its accepted source takes the advisory out; the empty file is ignored and no gap" row_shrinkwrap_beside_empty_lock
+
+row_shrinkwrap_beside_other_lock() {
+  new_world; register a
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes100
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and package-lock.json ignored: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "other bytes in a package-lock.json npm does not read are a finding: $(npm_findings)"
+  # Other bytes in the shrinkwrap, the file npm reads, are a finding of it.
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes101
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].lockfile == "./npm-shrinkwrap.json" and .[0].state == "open"' > /dev/null \
+    || no "other bytes in the shrinkwrap are its finding: $(npm_findings)"
+}
+row "npm-shrinkwrap.json beside a package-lock.json with other bytes: the shrinkwrap is measured, the other file makes no finding, and other bytes in the shrinkwrap do" row_shrinkwrap_beside_other_lock
+
+row_empty_shrinkwrap_beside_lock() {
+  new_world; register a
+  : > "${d}/p/a/npm-shrinkwrap.json"
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows ignored measured)" ]] || no "package-lock.json is measured and the empty shrinkwrap ignored: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "the accepted advisory is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1 and .summary.complete == true and .summary.unmeasured == 0' \
+    'the accepted source counts and the empty shrinkwrap is no gap' '.unmeasured'
+}
+row "an empty npm-shrinkwrap.json beside package-lock.json: package-lock.json is measured and its accepted source takes the advisory out; the empty shrinkwrap is ignored and no gap" row_empty_shrinkwrap_beside_lock
+
+row_lock_npm_stops_reading() {
+  new_world; register a
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].lockfile == "./package-lock.json" and .[0].state == "open"' > /dev/null \
+    || no "other bytes in package-lock.json are a finding: $(npm_findings)"
+  # A shrinkwrap appears, holding the accepted bytes: npm reads it from now on.
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes100
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and package-lock.json ignored: $(npm_rows)"
+  npm_findings | jq -e 'length == 1 and .[0].lockfile == "./package-lock.json" and .[0].stale_measurement == true and .[0].unmeasured_reason == "ignored"' > /dev/null \
+    || no "the finding of a lockfile npm no longer reads is stale, for that reason: $(npm_findings)"
+  st '.summary.accepted_sources == 1 and .summary.complete == true' 'the shrinkwrap'"'"'s accepted source counts'
+}
+row "a finding of a package-lock.json npm stops reading, when a shrinkwrap appears, is stale for that reason and not closed" row_lock_npm_stops_reading
+
+row_unreadable_shrinkwrap() {
+  new_world; register a
+  mkdir "${d}/p/a/npm-shrinkwrap.json"
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan
+  [[ "$(npm_rows)" == '[{"path":"./package-lock.json","status":"unreadable"}]' ]] \
+    || no "a shrinkwrap that cannot be read leaves package-lock.json unread, as it leaves npm: $(npm_rows)"
+  st '.summary.complete == false and ([.unmeasured[] | select(.kind == "lockfile_unreadable" and .path == "./package-lock.json")] | length == 1)' \
+    'the directory is a gap' '.unmeasured'
+}
+row "an npm-shrinkwrap.json that cannot be read: npm reads no lockfile there, so package-lock.json is not measured and the directory is a gap" row_unreadable_shrinkwrap
+
+row_lock_beside_other_managers() {
+  new_world; register a
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  printf '%s\n' '__metadata:' '  version: 8' > "${d}/p/a/yarn.lock"
+  printf '%s\n' "lockfileVersion: '9.0'" > "${d}/p/a/pnpm-lock.yaml"
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan
+  [[ "$(npm_rows)" == '[{"path":"./package-lock.json","status":"measured"}]' ]] || no "package-lock.json is measured beside yarn.lock and pnpm-lock.yaml: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "the accepted advisory is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1' 'the accepted source counts'
+}
+row "package-lock.json beside a yarn.lock and a pnpm-lock.yaml is measured as npm's lockfile, and its accepted source takes the advisory out" row_lock_beside_other_managers
+
+row_workspace_member_lock() {
+  new_world; register a
+  printf '%s\n' '{"name":"fixture","private":true,"workspaces":["packages/member"]}' > "${d}/p/a/package.json"
+  mkdir -p "${d}/p/a/packages/member"
+  printf '%s\n' '{"name":"member","version":"1.0.0"}' > "${d}/p/a/packages/member/package.json"
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  site_lock_at "${d}/p/a/packages/member/package-lock.json" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  # Each directory is measured by its own lockfile: npm reads the member's
+  # where it runs in the member with workspaces off, and the watch does not
+  # know how npm is run.
+  npm_findings | jq -e 'length == 1 and .[0].lockfile == "./packages/member/package-lock.json"' > /dev/null \
+    || no "the member's own package-lock.json is measured as its directory's: $(npm_findings)"
+  st '.summary.accepted_sources == 1' "the root's accepted source counts"
+}
+row "a workspace member's own package-lock.json is measured as its directory's lockfile, beside the root's, whose accepted source takes the advisory out" row_workspace_member_lock
+
 if (( failures > 0 )); then
   printf '# %d row(s) did not pass\n' "${failures}" >&2
   exit 1

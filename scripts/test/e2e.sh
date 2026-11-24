@@ -1979,6 +1979,166 @@ grep -qE "^safedeps did not run npm rebuild in .*/src-held because the bytes of 
   <<< "$(post_message "${src_post}")" || fail "after the revoke the bytes are withheld: $(cat "${src_post}")"
 if src_rebuilt src-held; then fail "after the revoke no rebuild runs over the withheld bytes"; fi
 pass "after a revoke the bytes an acceptance brought in on first sight are withheld"
+
+# The order of the writes an install's keeping rests on, and the lockfile the
+# effect gate judges. A row that fails is said and the rows go on, so one run
+# shows each of them; the block fails at its end.
+lf_failed=0
+lf_row() { # NAME FUNCTION
+  local rc=0
+  set +e
+  ( set -e; "$2" )
+  rc=$?
+  set -e
+  if (( rc == 0 )); then pass "$1"; else printf 'not ok - %s\n' "$1" >&2; lf_failed=$((lf_failed + 1)); fi
+}
+lf_no() { printf '# %s\n' "$*" >&2; exit 1; }
+# A path nothing can write: the file moved aside, where it is there, and a
+# directory in its place. lf_back puts the file back, and the row's exit runs
+# it too, so a row that stops early leaves the path as it was.
+lf_aside() {
+  if [[ -e "$1" ]]; then mv "$1" "$1.aside"; fi
+  mkdir "$1"
+  trap "lf_back '$1'" EXIT
+}
+lf_back() {
+  if [[ -d "$1" && ! -L "$1" ]]; then rmdir "$1"; fi
+  if [[ -e "$1.aside" ]]; then mv "$1.aside" "$1"; fi
+}
+# A package from the public registry no approval names: the problem
+# SAFEDEPS_ACCEPT_RISK keeps an install for.
+lf_unapproved=',
+    "node_modules/fixture-accept-extra": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-accept-extra/-/fixture-accept-extra-1.0.0.tgz", "integrity": "sha512-fixtureAcceptExtra100"}'
+lf_both="SAFEDEPS_ACCEPT_RISK='${accept_reason}' $(src_with "${src_url}")"
+
+# The audit record of SAFEDEPS_ACCEPT_RISK is written before the entries of
+# SAFEDEPS_ACCEPT_SOURCE (rust/src/post/run.rs, judge): the entries are the
+# one write that releases bytes, so an install a failed audit record rolls
+# back leaves none. Here the audit record's path is a directory.
+lf_audit_unwritten() {
+  local before said=0
+  before=$(accept_entries)
+  lf_aside "${accept_audit}"
+  src_install src-atomic "${lf_both}" "$(src_member "${src_url}" "${src_integrity}")${lf_unapproved}" || said=$?
+  lf_back "${accept_audit}"
+  # The ledger first: what a rolled-back install must not leave behind.
+  [[ "$(src_entries)" == 0 ]] || lf_no "the install whose audit record could not be written left an accepted-source entry: $(./bin/safedeps --json sources)"
+  (( said == 0 )) || lf_no "the post hook's answer did not pass the report oracle"
+  src_rolled_back || lf_no "an install whose audit record cannot be written is rolled back: $(cat "${src_post}")"
+  grep -q "SAFEDEPS_ACCEPT_RISK was set for this install, and its audit record .*accepted-risk.jsonl could not be written" < "${src_post}" \
+    || lf_no "the rollback says the audit record could not be written: $(cat "${src_post}")"
+  grep -q 'it accepts a source only for an install no other check rolls back, so no entry was written' < "${src_post}" \
+    || lf_no "the rollback says the override wrote no entry: $(cat "${src_post}")"
+  if grep -q '^Accepted source: ' <<< "$(post_message "${src_post}")"; then lf_no "a rolled-back install says an Accepted source line"; fi
+  [[ "$(accept_entries)" == "${before}" ]] || lf_no "an audit line was written"
+}
+lf_row "an install SAFEDEPS_ACCEPT_RISK and SAFEDEPS_ACCEPT_SOURCE would keep, whose audit record cannot be written, is rolled back and leaves no accepted-source entry" lf_audit_unwritten
+
+# The entries come last, so where they cannot be written the audit record
+# already stands: it records the decision, and the rollback says it stays.
+lf_entries_unwritten() {
+  local before
+  before=$(accept_entries)
+  lf_aside "${src_ledger}"
+  src_install src-atomic-ledger "${lf_both}" "$(src_member "${src_url}" "${src_integrity}")${lf_unapproved}"
+  lf_back "${src_ledger}"
+  src_rolled_back || lf_no "an install whose entries cannot be written is rolled back: $(cat "${src_post}")"
+  grep -q "SAFEDEPS_ACCEPT_SOURCE was set for this install, and the accepted-source ledger .*accepted-sources.jsonl could not take its entries" < "${src_post}" \
+    || lf_no "the rollback says the ledger could not take the entries: $(cat "${src_post}")"
+  grep -q "the audit record of SAFEDEPS_ACCEPT_RISK for this install was written to .*accepted-risk.jsonl before the entries failed, and it stays" < "${src_post}" \
+    || lf_no "the rollback says the audit record stays: $(cat "${src_post}")"
+  [[ "$(accept_entries)" == "$((before + 1))" ]] || lf_no "the audit record was written before the entries"
+  tail -n 1 "${accept_audit}" | jq -e '.project | endswith("/src-atomic-ledger")' > /dev/null || lf_no "the last audit line is this install's"
+  [[ "$(src_entries)" == 0 ]] || lf_no "an entry was written: $(./bin/safedeps --json sources)"
+}
+lf_row "where the entries of SAFEDEPS_ACCEPT_SOURCE cannot be written, the install is rolled back, and the audit record written before them stays and is said" lf_entries_unwritten
+
+# A project whose lockfile is npm-shrinkwrap.json: npm reads it over any
+# package-lock.json (rust/src/post/lockfile.rs). sw_install is src_install in
+# such a project, made on first use with no package-lock.json. The install
+# writes the shrinkwrap with the members, and with WRITES `tree` the hidden
+# record too; with `lock-only`, the shrinkwrap alone, as
+# `npm install --package-lock-only` writes it.
+sw_lock() { # FILE MEMBERS
+  cat > "$1" <<EOF
+{
+  "name": "src-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    ${src_public}$2
+  }
+}
+EOF
+}
+sw_project() { # NAME: the project, with the shrinkwrap and the hidden record holding the public pair
+  local dir="${tmp_root}/$1"
+  mkdir -p "${dir}/node_modules"
+  printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${dir}/package.json"
+  sw_lock "${dir}/npm-shrinkwrap.json" ""
+  cp "${dir}/npm-shrinkwrap.json" "${dir}/node_modules/.package-lock.json"
+}
+sw_install() { # PROJECT COMMAND MEMBERS WRITES
+  local dir="${tmp_root}/$1" decision rewrite
+  src_n=$((src_n + 1))
+  [[ -d "${dir}" ]] || sw_project "$1"
+  src_pre=$(accept_payload "$1-${src_n}" "$2" "${dir}" | pre_hook)
+  src_post=""
+  decision=$(hook_response_read decision "${src_pre}" quiet-or-decision)
+  [[ "${decision}" != deny ]] || return 0
+  rewrite=$(hook_response_read rewrite "${src_pre}" quiet-or-decision)
+  payload=$(accept_payload "$1-${src_n}" "${rewrite:-$2}" "${dir}")
+  sw_lock "${dir}/npm-shrinkwrap.json" "$3"
+  [[ "$4" != tree ]] || cp "${dir}/npm-shrinkwrap.json" "${dir}/node_modules/.package-lock.json"
+  src_post=$(PATH="${src_bin}:${PATH}" post_hook <<< "${payload}")
+}
+
+lf_shrinkwrap_rollback() {
+  sw_install sw-none "npm install ${src_url}" "$(src_member "${src_url}" "${src_integrity}")" tree
+  src_rolled_back || lf_no "a site tarball in a shrinkwrap project is rolled back: $(cat "${src_post}")"
+  grep -q "non-standard registries (.*${src_url}" < "${src_post}" || lf_no "the rollback names the source: $(cat "${src_post}")"
+  if grep -q 'fixture-site' "${tmp_root}/sw-none/npm-shrinkwrap.json"; then lf_no "the rollback did not restore npm-shrinkwrap.json: $(cat "${tmp_root}/sw-none/npm-shrinkwrap.json")"; fi
+  [[ ! -e "${tmp_root}/sw-none/package-lock.json" ]] || lf_no "the rollback made a package-lock.json in a shrinkwrap project"
+}
+lf_row "in a project whose lockfile is npm-shrinkwrap.json, a site tarball is rolled back and the rollback restores the shrinkwrap" lf_shrinkwrap_rollback
+
+lf_shrinkwrap_lock_only() {
+  sw_install sw-lockonly "npm install --package-lock-only ${src_url}" "$(src_member "${src_url}" "${src_integrity}")" lock-only
+  src_rolled_back || lf_no "a write to the shrinkwrap alone is judged, and the site record in it rolled back: $(cat "${src_post}")"
+  if grep -q 'fixture-site' "${tmp_root}/sw-lockonly/npm-shrinkwrap.json"; then lf_no "the rollback did not restore the shrinkwrap"; fi
+}
+lf_row "an install that writes npm-shrinkwrap.json alone leaves a trace, and a site record it writes there is rolled back" lf_shrinkwrap_lock_only
+
+lf_shrinkwrap_accepted() {
+  sw_install sw-accept "$(src_with "${src_url}")" "$(src_member "${src_url}" "${src_integrity}")" tree
+  if src_rolled_back; then lf_no "SAFEDEPS_ACCEPT_SOURCE keeps the install in a shrinkwrap project: $(cat "${src_post}")"; fi
+  grep -qxF "Accepted source: ${src_url} for fixture-site@1.0.0 (advisories accepted: CVE-2026-1000), recorded in ${src_ledger}" \
+    <<< "$(post_message "${src_post}")" || lf_no "the kept install names the accepted source: $(post_message "${src_post}")"
+  [[ "$(src_entries)" == 1 ]] || lf_no "the kept install writes one entry: $(./bin/safedeps --json sources)"
+  # The same bytes in another shrinkwrap project, beside an empty
+  # package-lock.json, install as an approved package.
+  sw_project sw-again
+  : > "${tmp_root}/sw-again/package-lock.json"
+  sw_install sw-again "npm ci" "$(src_member "${src_url}" "${src_integrity}")" tree
+  hook_response_parse "${src_post}" quiet || lf_no "accepted bytes in a shrinkwrap beside an empty package-lock.json say nothing: $(cat "${src_post}")"
+  src_rebuilt sw-again || lf_no "the rebuild runs over accepted bytes in a shrinkwrap project"
+}
+lf_row "SAFEDEPS_ACCEPT_SOURCE keeps an install in a shrinkwrap project, and the entry covers the same bytes in a shrinkwrap beside an empty package-lock.json" lf_shrinkwrap_accepted
+
+lf_shrinkwrap_other_bytes() {
+  # The entry the row above wrote stands for the accepted bytes. Here the
+  # package-lock.json npm does not read holds them, and the install writes
+  # other bytes into the shrinkwrap.
+  sw_project sw-other
+  sw_lock "${tmp_root}/sw-other/package-lock.json" "$(src_member "${src_url}" "${src_integrity}")"
+  sw_install sw-other "npm install --package-lock-only ${src_url}" "$(src_member "${src_url}" sha512-fixtureSiteOther100)" lock-only
+  src_rolled_back || lf_no "other bytes in the shrinkwrap are rolled back, whatever the package-lock.json beside it holds: $(cat "${src_post}")"
+  grep -q "fixture-site@1.0.0 from ${src_url} has an integrity no accepted-source entry of that URL names, so its bytes are not the ones accepted" < "${src_post}" \
+    || lf_no "the rollback says the shrinkwrap's bytes are not the ones accepted: $(cat "${src_post}")"
+}
+lf_row "other bytes in npm-shrinkwrap.json are judged, though the package-lock.json beside it holds the accepted ones" lf_shrinkwrap_other_bytes
+./bin/safedeps sources revoke "${src_url}" > /dev/null 2>&1 || true
+(( lf_failed == 0 )) || fail "${lf_failed} write-order or lockfile row(s) did not pass"
 jq '.vulnerable -= ["fixture-site@1.0.0"]' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
 
 # A rollback never acts outside the project it read. Some worktree layouts link

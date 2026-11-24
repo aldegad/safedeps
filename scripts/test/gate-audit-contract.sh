@@ -20,6 +20,14 @@ mkdir -p "${fakebin}" "${fixture_home}/.codex/skills/safedeps"
 cat > "${fakebin}/npm" <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FAKE_NPM_ARGS_LOG:?}"
+# The directory npm audits, as npm says it: the one it runs in, or with
+# FAKE_NPM_PREFIX the root of the workspace that directory is a member of,
+# which npm audits from a member. FAKE_NPM_PREFIX_FAILS: npm says nothing.
+if [ "${1:-}" = "prefix" ]; then
+  [ -z "${FAKE_NPM_PREFIX_FAILS:-}" ] || exit 1
+  printf '%s\n' "${FAKE_NPM_PREFIX:-$PWD}"
+  exit 0
+fi
 if [ "${1:-}" = "run" ]; then
   [ "${2:-}" != "security:audit" ] || exit 99
   exit 0
@@ -97,7 +105,16 @@ cat > "${fakebin}/pip-audit" <<'FAKE'
 exit 0
 FAKE
 
-chmod +x "${fakebin}/npm" "${fakebin}/yarn" "${fakebin}/jq" "${fakebin}/find" "${fakebin}/pip-audit"
+# pnpm, with a clean report: a pnpm-lock.yaml beside an npm lockfile is
+# audited by pnpm on its own.
+cat > "${fakebin}/pnpm" <<'FAKE'
+#!/usr/bin/env bash
+[ "${1:-}" = "audit" ] || exit 0
+printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}'
+exit 0
+FAKE
+
+chmod +x "${fakebin}/npm" "${fakebin}/yarn" "${fakebin}/pnpm" "${fakebin}/jq" "${fakebin}/find" "${fakebin}/pip-audit"
 
 make_fixture() {
   local manager="$1" fixture="${tmp_root}/${1}-repo"
@@ -254,6 +271,95 @@ assert_audit 1 "npm: an advisory no accepted-source entry names counts" "${site_
 site_entry GHSA-site-aaaa-bbbb
 site_lock sha512-siteBytes101
 assert_audit 1 "npm: other bytes under an accepted URL count" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+
+# Which lockfile npm's advisories are compared with: the one npm reads
+# (lib/npm/closure.sh, safedeps_npm_project_lockfile) in the directory npm
+# audits (`npm prefix`), read once. npm reads npm-shrinkwrap.json where it
+# holds a byte, else package-lock.json where it holds a byte. Each row names
+# the file the advisory is judged by and whether the accepted source still
+# takes it out. The first two are a shrinkwrap alone, then the same beside an
+# empty package-lock.json, which was compared in its place. A row that fails
+# is said and the rows go on, so one run shows each of them.
+shape_fixture="${tmp_root}/shape-repo"
+shape_failed=0
+shape_reset() { # PACKAGE_JSON: a project with that manifest and nothing else
+  rm -rf -- "${shape_fixture}"
+  mkdir -p "${shape_fixture}"
+  git -C "${shape_fixture}" init -q
+  printf '%s\n' "$1" > "${shape_fixture}/package.json"
+}
+shape_lock() { # FILE INTEGRITY: an npm lockfile whose site record holds those bytes
+  jq -n --arg url "${site_url}" --arg integrity "$2" '{name: "gate-audit-contract", lockfileVersion: 3, packages: {
+    "": {name: "gate-audit-contract"},
+    "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity}}}' > "$1"
+}
+shape_row() { # EXPECTED NAME SAID FIXTURE ENV...: the audit's exit, and a line its output holds (none where SAID is empty)
+  local expected="$1" name="$2" said="$3" fixture="$4"; shift 4
+  audit_rc "${fixture}" "$@"
+  if [ "${RUN_RC}" = "${expected}" ] && { [ -z "${said}" ] || grep -qF -- "${said}" "${tmp_root}/audit.out"; }; then
+    pass "${name}"
+  else
+    printf 'not ok - %s: audit expected %s and got %s%s: %s\n' "${name}" "${expected}" "${RUN_RC}" "${said:+, saying '${said}'}" "$(tr '\n' ' ' < "${tmp_root}/audit.out")"
+    shape_failed=$((shape_failed + 1))
+  fi
+}
+shape_accepted='safedeps audit: npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)'
+site_entry GHSA-site-aaaa-bbbb
+shape_reset '{"name":"gate-audit-contract","private":true}'
+shape_lock "${shape_fixture}/npm-shrinkwrap.json" sha512-siteBytes100
+shape_row 0 "npm: npm-shrinkwrap.json alone is judged, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+: > "${shape_fixture}/package-lock.json"
+shape_row 0 "npm: beside an empty package-lock.json, npm-shrinkwrap.json is judged, and the accepted source still takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+shape_lock "${shape_fixture}/npm-shrinkwrap.json" sha512-siteBytes101
+shape_row 1 "npm: npm-shrinkwrap.json is judged over a package-lock.json npm does not read, so other bytes in the shrinkwrap count" "" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+: > "${shape_fixture}/npm-shrinkwrap.json"
+shape_row 0 "npm: beside an empty npm-shrinkwrap.json, package-lock.json is judged, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+: > "${shape_fixture}/package-lock.json"
+shape_row 1 "npm: where neither lockfile holds a byte, nothing is compared, the advisory counts, and the empty lockfiles are said" \
+  "holds a byte, so no accepted source covers an advisory npm reported, and every one is counted." \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+rm -f -- "${shape_fixture}/npm-shrinkwrap.json"
+mkdir "${shape_fixture}/npm-shrinkwrap.json"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+shape_row 1 "npm: an npm-shrinkwrap.json that cannot be read stops the choice as it stops npm's, so the package-lock.json beside it is not judged, the advisory counts, and the shrinkwrap is said" \
+  "/npm-shrinkwrap.json could not be read, so every advisory npm reported is counted." \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+rmdir "${shape_fixture}/npm-shrinkwrap.json"
+shape_row 1 "npm: where npm does not say which project it audits, nothing is compared, the advisory counts, and that is said" \
+  'safedeps audit: npm: npm did not say which project it audits (npm prefix), so every advisory npm reported is counted.' \
+  "${shape_fixture}" FAKE_NPM_MODE=site FAKE_NPM_PREFIX_FAILS=1 "${site_env[@]}"
+shape_row 0 "control: the same package-lock.json, where npm says which project it audits, has its accepted advisory taken out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+# A workspace member: npm audits the root's lockfile from it, and ignores a
+# package-lock.json the member holds of its own.
+shape_reset '{"name":"gate-audit-contract","private":true,"workspaces":["packages/member"]}'
+mkdir -p "${shape_fixture}/packages/member"
+printf '%s\n' '{"name":"member","version":"1.0.0"}' > "${shape_fixture}/packages/member/package.json"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+shape_lock "${shape_fixture}/packages/member/package-lock.json" sha512-siteBytes101
+shape_row 0 "npm: in a workspace member, the root's package-lock.json is judged, as npm audits it, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}/packages/member" FAKE_NPM_MODE=site FAKE_NPM_PREFIX="${shape_fixture}" "${site_env[@]}"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes101
+shape_lock "${shape_fixture}/packages/member/package-lock.json" sha512-siteBytes100
+shape_row 1 "npm: in a workspace member, other bytes in the root's package-lock.json count, whatever the member's own package-lock.json holds" "" \
+  "${shape_fixture}/packages/member" FAKE_NPM_MODE=site FAKE_NPM_PREFIX="${shape_fixture}" "${site_env[@]}"
+# A yarn.lock or a pnpm-lock.yaml beside: npm's advisories are judged by
+# package-lock.json, and Yarn and pnpm audit their own lockfiles.
+shape_reset '{"name":"gate-audit-contract","private":true}'
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+printf '%s\n' '__metadata:' '  version: 8' > "${shape_fixture}/yarn.lock"
+shape_row 0 "npm: beside a yarn.lock, package-lock.json is judged for npm's advisories, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site FAKE_YARN_MODE=clean "${site_env[@]}"
+rm -f -- "${shape_fixture}/yarn.lock"
+printf '%s\n' "lockfileVersion: '9.0'" > "${shape_fixture}/pnpm-lock.yaml"
+shape_row 0 "npm: beside a pnpm-lock.yaml, package-lock.json is judged for npm's advisories, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+[ "${shape_failed}" -eq 0 ] || fail "${shape_failed} lockfile-shape row(s) did not pass"
 
 # The release gate's two reads of the Python surface. A find that failed is no
 # "no surface", and a list it printed first may be missing what it could not read.
