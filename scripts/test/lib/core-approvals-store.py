@@ -54,6 +54,15 @@ runs `approvals index`. The core's read takes the lock exclusively, on the
 read-only descriptor it reads through, so it is refused at the deadline.
 Without the holder the read is granted. Where the host refuses an exclusive
 lock on a read-only descriptor, the read with no holder fails and says why.
+
+The row after it reads the turn each `approvals index` writes as it takes
+the store lock: the time its hold began on the host's monotonic clock. Each index
+is a process of its own, and the time it wrote must lie between this script's
+readings of the same clock before the index started and after it ended, and
+never go back from one index to the next. So the processes of the host read
+one clock, which is what a waiter compares a turn with. The wall clock is the
+control: the same time does not lie between this script's readings of it, so
+the check tells one clock from another.
 """
 import calendar
 import fcntl
@@ -108,6 +117,10 @@ KILL_TRIES = 3
 # land whole before the limit cuts the next one.
 PARTWAY_ENTRIES = 5
 PARTWAY_LANDED = 2
+# The host's monotonic clock, the one the core reads for a turn
+# (`os::host_clock` in rust/src/os.rs), and how many reads the turn row makes.
+HOST_CLOCK = time.CLOCK_UPTIME_RAW if sys.platform == "darwin" else time.CLOCK_MONOTONIC
+TURN_READS = 20
 # What a write the file size limit stops answers, as the core reports it.
 EFBIG = "returned OS error 27"
 # The counts every migration report gives: the approve lines, then the five
@@ -479,6 +492,36 @@ def row_read_lock_is_exclusive(base):
     expect_index(home, [h(1)], 0, "a read once the holder is gone")
 
 
+def turn_began(home):
+    """The time the turn beside the store names, from a line of the turn's
+    form whose check is its time's: 20 digits, a space, the first 16 hex
+    digits of their SHA-256 and a newline."""
+    line = (home / "approvals.turn").read_bytes()
+    if len(line) != 38 or line[20:21] != b" " or line[37:] != b"\n" or not line[:20].isdigit():
+        raise Failed(f"the turn is not a line of the turn's form: {line!r}")
+    if line[21:37] != hashlib.sha256(line[:20]).hexdigest()[:16].encode():
+        raise Failed(f"the turn's check is not its time's: {line!r}")
+    return int(line[:20])
+
+
+def row_turn_is_the_host_clock(base):
+    home = base / "turn-clock"
+    commit_ok(home, 1, "the line before the reads")
+    last = 0
+    for k in range(TURN_READS):
+        before, wall_before = time.clock_gettime_ns(HOST_CLOCK), time.clock_gettime_ns(time.CLOCK_REALTIME)
+        expect_index(home, [h(1)], 0, "a read that writes its turn")
+        after, wall_after = time.clock_gettime_ns(HOST_CLOCK), time.clock_gettime_ns(time.CLOCK_REALTIME)
+        began = turn_began(home)
+        if not before <= began <= after:
+            raise Failed(f"read {k}: the turn names {began}, not between this process's {before} and {after}")
+        if began < last:
+            raise Failed(f"read {k}: the turn names {began}, before the last read's {last}")
+        if wall_before <= began <= wall_after:
+            raise Failed(f"read {k}: the turn's {began} lies between the wall clock's {wall_before} and {wall_after} too")
+        last = began
+
+
 def expect_counts(report, approve, inserted, duplicates, when):
     """A finished run's counts: no line left out, nothing unconfirmed or
     taken back, and the five after the approve lines adding up to them. A
@@ -742,7 +785,9 @@ def main():
                 failed = True
         for label, row in (("migration counts keywords in other log kinds as broken", row_other_log_keywords),
                            ("migration refuses a take-back hash after another word", row_misplaced_take_back_hash),
-                           ("a read takes the store lock exclusively, through a read-only descriptor", row_read_lock_is_exclusive)):
+                           ("a read takes the store lock exclusively, through a read-only descriptor", row_read_lock_is_exclusive),
+                           ("the turn a process writes names its hold's start on the clock every process of the host reads",
+                            row_turn_is_the_host_clock)):
             try:
                 row(base)
                 print(f"ok - {label}")

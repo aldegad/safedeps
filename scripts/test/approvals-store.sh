@@ -15,6 +15,8 @@
 # at its first byte, and hold its report to what the index says right after.
 # One row holds the store lock shared and runs `approvals index`, which takes
 # the lock exclusively, through a read-only descriptor, and is refused.
+# Another reads the turn each `approvals index` writes, a time on the host's
+# monotonic clock, between this battery's own readings of that clock.
 # What `safedeps check` does with the store's answers is check-fail-closed's.
 set -euo pipefail
 

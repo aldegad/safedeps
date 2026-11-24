@@ -1,7 +1,8 @@
 //! The few things the hook asks of the system that std does not offer: the
 //! process's umask, a signal to a process group, a local time with its zone
-//! offset, and a file lock. They are libc's own functions, declared here, so the crate
-//! still names no dependency.
+//! offset, a file lock, and a monotonic clock every process of the host reads
+//! alike. They are libc's own functions, declared here, so the crate still
+//! names no dependency.
 //!
 //! The rest is how the bash hooks' helper commands print what they read
 //! (`stat`, `ls -di`, `date`, `realpath`), because the other hook compares
@@ -38,6 +39,15 @@ extern "C" {
     #[cfg(not(target_os = "macos"))]
     fn iswprint_l(c: u32, locale: *mut std::ffi::c_void) -> i32;
     fn flock(fd: i32, operation: i32) -> i32;
+    fn clock_gettime(clock: i32, tp: *mut Timespec) -> i32;
+}
+
+/// struct timespec: time_t and long, 64 bits each on the three targets
+/// (Darwin arm64 and x86_64, Linux x86_64 musl).
+#[repr(C)]
+struct Timespec {
+    tv_sec: i64,
+    tv_nsec: i64,
 }
 
 /// Printable units for the hook shell's printf %q. Darwin's system bash
@@ -98,31 +108,72 @@ pub fn scratch_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 
+/// The host's monotonic clock: CLOCK_UPTIME_RAW on macOS (<time.h>: 8, the
+/// value mach_absolute_time gives, clock_gettime(3)), CLOCK_MONOTONIC on
+/// Linux and WSL1 (<linux/time.h>: 1, "a nonsettable system-wide clock",
+/// clock_gettime(2)). Each is one clock for every process of the host, so a
+/// reading one process writes down is a time another can compare with its
+/// own. They are the clocks std's Instant reads on each, so a wait counted
+/// on this clock is the length it was when it was counted on Instant.
+#[cfg(target_os = "macos")]
+const HOST_CLOCK: i32 = 8;
+#[cfg(not(target_os = "macos"))]
+const HOST_CLOCK: i32 = 1;
+
+/// A reading of the host's monotonic clock, in nanoseconds since a point
+/// the host fixed when it started.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct HostTime(pub u64);
+
+impl HostTime {
+    /// The time `d` after this one.
+    pub fn after(self, d: std::time::Duration) -> Self {
+        Self(self.0.saturating_add(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)))
+    }
+}
+
+/// The host's monotonic clock, now. clock_gettime(2) fails only for a clock
+/// the system does not have, and std's Instant::now panics there too: the
+/// lock's wait read Instant before it read this clock.
+pub fn host_clock() -> HostTime {
+    let mut t = Timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { clock_gettime(HOST_CLOCK, &mut t) } != 0 {
+        panic!("clock_gettime({HOST_CLOCK}) failed: {}", std::io::Error::last_os_error());
+    }
+    HostTime((t.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(t.tv_nsec as u64))
+}
+
 /// flock(2)'s exclusive lock on the open file description of `file`, which
 /// may be open for reading alone, tried until it is granted, or until `wait`
-/// has passed with no move. After each try the lock refused, `moved` says
-/// whether its holder moved on since it last answered, and each time it
-/// answers true the wait starts again. So a lock that changes hands is waited
-/// for however long it stays taken, and a holder that keeps it for `wait`
-/// with no move is a deadline outcome, never a lock taken anyway. The lock
-/// goes when the file is closed, by a drop or by the end of the process, so a
-/// holder that dies leaves no lock behind, as a lock directory does.
-pub fn flock_within(file: &std::fs::File, wait: std::time::Duration, mut moved: impl FnMut() -> bool) -> Result<(), crate::outcome::Outcome> {
+/// has passed from the wait's start. The wait starts when this call does.
+/// After each try the lock refused, `holder` is told the time and says when
+/// the hold that refused it began, or nothing where it cannot say: a start
+/// it gives starts the wait there, if that is later than this call's start,
+/// and nothing keeps the start the wait has. So a lock that changes hands is
+/// waited for however long it stays taken, and one hold that keeps it for
+/// `wait` is a deadline outcome, never a lock taken anyway. Answers the time
+/// read just before the try that was granted: the start of this hold, never
+/// later than the lock was taken. The lock goes when the file is closed, by a
+/// drop or by the end of the process, so a holder that dies leaves no lock
+/// behind, as a lock directory does.
+pub fn flock_within(file: &std::fs::File, wait: std::time::Duration, mut holder: impl FnMut(HostTime) -> Option<HostTime>) -> Result<HostTime, crate::outcome::Outcome> {
     use std::os::unix::io::AsRawFd;
-    let mut until = std::time::Instant::now() + wait;
+    let began = host_clock();
+    let mut start = began;
     loop {
+        let tried = host_clock();
         if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-            return Ok(());
+            return Ok(tried);
         }
         let e = std::io::Error::last_os_error();
         match e.kind() {
             std::io::ErrorKind::Interrupted => continue,
             std::io::ErrorKind::WouldBlock => {
-                let now = std::time::Instant::now();
-                if moved() {
-                    until = now + wait;
+                let now = host_clock();
+                if let Some(held) = holder(now) {
+                    start = held.max(began);
                 }
-                if now >= until {
+                if now >= start.after(wait) {
                     return Err(crate::outcome::Outcome::Deadline);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10))
@@ -372,7 +423,6 @@ pub enum WallRole {
     AcceptedRiskHeader,
     AcceptedRiskEntry,
     ApprovalRecord,
-    ApprovalsTurn,
     JournalOpened,
     JournalStage,
     JournalRecoveryHeader,

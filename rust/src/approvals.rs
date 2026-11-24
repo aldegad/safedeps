@@ -37,24 +37,33 @@
 //! for each other, and a read that stalls under the lock has the reads behind
 //! it refused after LOCK_WAIT, as it has a commit.
 //!
-//! The turn. A waiter waits while the lock changes hands. Every hold of the
-//! lock, a writer's or a reader's, writes its turn as it takes the lock, in
-//! `approvals.turn` beside the store: the holder's pid, the hold's number in
-//! its process and the time the hold began, one line of fixed width written
-//! over the last. A process numbers its own holds, and a pid used again
-//! begins its holds at another time, so two holds write two turns. After each
-//! try the lock refused, a waiter reads the turn, and a turn other than the
-//! last one it read is the lock in a new hold: the wait starts again. No two
-//! holds overlap, so a hold writes its turn only once the hold before it let
-//! the lock go, and a hold that keeps the lock writes no other turn beside
-//! it. So commits that overlap wait their turn, however many there are, and
-//! none is refused for the crowd, while one hold that keeps the lock for
-//! LOCK_WAIT is an error: nothing is written or read without the lock. A turn
-//! that cannot be read is the last one read, so it never lengthens a wait,
-//! and a hold that cannot write its turn leaves the last one standing: either
-//! costs a waiter its patience, never the lock. A read that meets a write half
-//! done reads a turn it has not seen, or none. The turn is no record: only a
-//! waiter reads it, and it vouches for nothing.
+//! The turn. A waiter waits while the lock changes hands, and LOCK_WAIT
+//! behind one hold. Every hold of the lock, a writer's or a reader's, writes
+//! its turn once it took the lock, in `approvals.turn` beside the store: when
+//! the hold began and a check of that time, one line of fixed width written
+//! over the last. The time is the host's monotonic clock (`os::host_clock`),
+//! one clock for every process of the host, read just before the try that
+//! took the lock, so a turn never says a hold began later than it did. A
+//! waiter counts LOCK_WAIT from the later of two times: when it began to
+//! wait, and when the hold it waits behind began, as the turn says. After
+//! each try the lock refused it reads the turn and counts again. The first
+//! turn it reads whole can be older than its wait, so it never counts: a
+//! turn left from before the host started again can name a time the clock
+//! reaches only later. Only a turn other than the first counts.
+//! A turn that cannot be read, whose check is not its time's, as a line read
+//! while a hold writes over it can be, or that names a time later than now,
+//! counts for nothing, and the wait keeps the start it had. No two holds
+//! overlap, so commits that overlap wait their turn, however many there are,
+//! and none is refused for the crowd, while a waiter that waited LOCK_WAIT
+//! behind one hold is refused: nothing is written or read without the lock.
+//! A hold writes its turn after it took the lock, so for a moment the turn is
+//! still the last hold's, longer where a hold stalls between its lock and its
+//! turn, and a hold that cannot write its turn leaves the last one standing.
+//! The waiter then counts from its own start or from the last hold's: it is
+//! refused sooner, never later. Processes in two Linux time namespaces read
+//! two such clocks (time_namespaces(7)): a turn from the other one can move a
+//! wait by the namespaces' offset. The turn is no record: only a waiter reads
+//! it, and it vouches for nothing.
 //!
 //! The same lock orders every write of a ledger entry an approval stands on:
 //! a commit and a revoke of an entry each run under it from their first
@@ -186,7 +195,7 @@
 use crate::{
     jq,
     json::{self, Value},
-    ledger, os, state,
+    ledger, os, sha256, state,
     outcome::{Action, Form, Outcome},
 };
 use std::{
@@ -198,7 +207,6 @@ use std::{
         fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -589,54 +597,52 @@ fn log_line(log: &Path, at: &str, text: &[u8]) -> Result<(), Fault> {
 /// The turn's file, beside the store.
 const TURN: &str = "approvals.turn";
 
-/// The holds of the store lock this process took, which number its turns.
-static HOLDS: AtomicU64 = AtomicU64::new(0);
-
-/// One hold of the store lock, as its holder wrote it when it took the lock:
-/// its pid, the hold's number in its process, and the time the hold began,
-/// in seconds and nanoseconds since the epoch.
+/// One hold of the store lock, as its holder wrote it once it took the lock:
+/// when the hold began, on the host's monotonic clock, read just before the
+/// try that took the lock, so never later than the hold began.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Turn {
-    pid: u32,
-    hold: u64,
-    secs: i64,
-    nanos: u32,
+    began: os::HostTime,
 }
 
 impl Turn {
-    /// The length of every turn's line. Each field has a fixed width, so a
-    /// turn is written over the last whole, and nothing is truncated.
-    const LEN: usize = 63;
+    /// The length of every turn's line: the time in 20 digits, a space, its
+    /// check in 16 hex digits and a newline. A turn is written over the last
+    /// whole, and nothing is truncated.
+    const LEN: usize = 38;
 
-    fn line(&self) -> String {
-        format!("{:010} {:020} {:020}.{:09}\n", self.pid, self.hold, self.secs, self.nanos)
+    /// The first 16 hex digits of the SHA-256 of the time's 20 digits.
+    fn check(digits: &str) -> String {
+        sha256::hex(digits.as_bytes())[..16].to_string()
     }
 
-    /// A turn's line, or None for bytes that are not one.
+    fn line(&self) -> String {
+        let digits = format!("{:020}", self.began.0);
+        format!("{digits} {}\n", Self::check(&digits))
+    }
+
+    /// A turn's line, or None for bytes that are not one: a line of another
+    /// form, or one whose check is not its time's, as a line read while a
+    /// hold writes over it can be.
     fn parse(line: &[u8; Self::LEN]) -> Option<Self> {
         let text = std::str::from_utf8(line).ok()?.strip_suffix('\n')?;
-        let (pid, rest) = text.split_once(' ')?;
-        let (hold, began) = rest.split_once(' ')?;
-        let (secs, nanos) = began.split_once('.')?;
-        let digits = |field: &str, width: usize| field.len() == width && field.bytes().all(|b| b.is_ascii_digit());
-        if !(digits(pid, 10) && digits(hold, 20) && digits(secs, 20) && digits(nanos, 9)) {
+        let (digits, check) = text.split_once(' ')?;
+        if digits.len() != 20 || !digits.bytes().all(|b| b.is_ascii_digit()) || check != Self::check(digits) {
             return None;
         }
-        Some(Self { pid: pid.parse().ok()?, hold: hold.parse().ok()?, secs: secs.parse().ok()?, nanos: nanos.parse().ok()? })
+        Some(Self { began: os::HostTime(digits.parse().ok()?) })
     }
 }
 
-/// Writes this hold's turn over the last, under the lock it just took. The
-/// open does not wait for a FIFO's reader, and only a regular file is
-/// written to.
-fn write_turn(dir: &Path) -> io::Result<()> {
-    let began = os::wall(os::WallRole::ApprovalsTurn);
-    let turn = Turn { pid: std::process::id(), hold: HOLDS.fetch_add(1, Ordering::Relaxed), secs: began.seconds(), nanos: began.nanos() };
+/// Writes the turn of the hold that `began`, over the last, under the lock
+/// it just took. The open does not wait for a FIFO's reader, and only a
+/// regular file is written to.
+fn write_turn(dir: &Path, began: os::HostTime) -> io::Result<()> {
     let file = fs::OpenOptions::new().write(true).create(true).mode(0o600).custom_flags(os::O_NONBLOCK).open(dir.join(TURN))?;
     if !file.metadata()?.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    file.write_all_at(turn.line().as_bytes(), 0)
+    file.write_all_at(Turn { began }.line().as_bytes(), 0)
 }
 
 /// The turn beside the store, or None where no turn can be read.
@@ -647,23 +653,22 @@ fn read_turn(dir: &Path) -> Option<Turn> {
     Turn::parse(&line)
 }
 
-/// The store lock on `file`, the store in `dir`, then this hold's turn, with
-/// the wait started again each time the turn changed (the module's "The
-/// turn"). The first turn read is the one the wait started on.
+/// The store lock on `file`, the store in `dir`, then this hold's turn. The
+/// wait is counted from the later of the waiter's start and the start of the
+/// hold the turn names (the module's "The turn"). A turn names that hold only
+/// where it is read whole, is not the first turn this waiter read whole, and
+/// began no later than now.
 fn lock_store(dir: &Path, file: &fs::File, wait: Duration) -> Result<(), Fault> {
-    let mut seen = None;
-    os::flock_within(file, wait, || {
-        let now = read_turn(dir);
-        let handed_on = matches!((seen, now), (Some(was), Some(is)) if is != was);
-        if now.is_some() {
-            seen = now;
-        }
-        handed_on
+    let mut first = None;
+    let began = os::flock_within(file, wait, |now| {
+        let turn = read_turn(dir)?;
+        let was = *first.get_or_insert(turn);
+        (turn != was && turn.began <= now).then_some(turn.began)
     })
     .map_err(|o| Fault::operation(o, &path(dir), |p| Action::Lock(p)))?;
     // A turn not written leaves the last one standing: a waiter's patience,
     // never the lock.
-    let _ = write_turn(dir);
+    let _ = write_turn(dir, began);
     Ok(())
 }
 
@@ -1320,11 +1325,11 @@ mod tests {
 
     #[test]
     fn a_lock_held_past_the_wait_after_its_last_handoff_is_an_error_and_nothing_is_written() {
-        // The control. The wait starts again when the lock changes hands, and
-        // only then: a holder that took the lock and keeps it is waited for
-        // the wait, then the commit is refused, as a lock held past the wait
-        // always was. A run where the commit took the lock between two holds
-        // does not count.
+        // The control. The wait counts from the start of the hold the commit
+        // waits behind: a holder that took the lock and keeps it is waited
+        // for the wait from its start, then the commit is refused, as a lock
+        // held past the wait always was. A run where the commit took the lock
+        // between two holds does not count.
         let wait = Duration::from_millis(500);
         until_met(|| {
             let d = scratch();
@@ -1405,9 +1410,9 @@ mod tests {
 
     #[test]
     fn a_turn_that_cannot_be_read_is_no_handoff() {
-        // A waiter that cannot read the turn takes it for the last one read,
-        // however often it looks: a holder that keeps the lock is waited for
-        // the wait and no longer.
+        // A turn a waiter cannot read counts for nothing, however often it
+        // looks: a holder that keeps the lock is waited for the wait and no
+        // longer.
         let d = scratch();
         let held = holder(&d.0);
         fs::remove_file(d.0.join(TURN)).unwrap();
@@ -1431,7 +1436,7 @@ mod tests {
     /// turn.
     fn bare_hold(dir: &Path) -> fs::File {
         let f = fs::OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(path(dir)).unwrap();
-        assert!(os::flock_within(&f, Duration::ZERO, || false).is_ok(), "another held the lock");
+        assert!(os::flock_within(&f, Duration::ZERO, |_| None).is_ok(), "another held the lock");
         f
     }
     /// The turn's bytes, as the last hold that wrote one left them.
@@ -1569,6 +1574,79 @@ mod tests {
         let answer = waiter.join().unwrap();
         assert!(answered, "the commit still waited when the hold let the lock go: a torn turn was taken for a new hold");
         assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+    }
+
+    /// A waiter's commit of 1 under `dir`, in a thread, behind a hold kept
+    /// `held_for`; `meanwhile` runs once the commit started. Answers whether
+    /// the commit answered while the hold kept the lock, and what.
+    fn commit_behind(dir: &Path, held: fs::File, wait: Duration, held_for: Duration, meanwhile: impl FnOnce()) -> (bool, Answer) {
+        let (staged, entry) = stage(dir, 1, "entry of 1");
+        let home = dir.to_owned();
+        let began = Instant::now();
+        let waiter = std::thread::spawn(move || {
+            let mut err = Vec::new();
+            commit_with(&home, &approval(1, &staged, &entry, &rec(1), &h(1)), wait, &Real, &mut err)
+        });
+        meanwhile();
+        std::thread::sleep(held_for.saturating_sub(began.elapsed()));
+        let answered = waiter.is_finished();
+        drop(held);
+        (answered, waiter.join().unwrap())
+    }
+
+    #[test]
+    fn a_turn_that_was_there_when_the_wait_began_never_counts() {
+        // A turn written before the host's clock started again can name a
+        // time the clock reaches only later, and a hold that has not written
+        // its own turn leaves it standing. Here it names a time just short of
+        // the wait. Counted once the clock reached it, it would have the wait
+        // start there and run past the hold. It was the first turn the waiter
+        // read, so it counts for nothing, and the commit is refused at the
+        // wait while the hold keeps the lock.
+        let wait = Duration::from_secs(2);
+        let d = scratch();
+        drop(holder(&d.0));
+        let held = bare_hold(&d.0);
+        put_turn(&d.0, Turn { began: os::host_clock().after(wait * 9 / 10) }.line().as_bytes());
+        let (answered, answer) = commit_behind(&d.0, held, wait, wait * 3 / 2, || ());
+        assert!(answered, "the commit answered only once the hold let the lock go: {answer:?}");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+    }
+
+    #[test]
+    fn a_turn_that_names_a_time_later_than_now_counts_for_nothing() {
+        // A turn that names a time the clock has not reached is no hold of
+        // this host. Here one an hour ahead lands while a hold keeps the lock,
+        // after the waiter read the hold's own: the commit is refused at the
+        // wait while the hold keeps the lock.
+        let wait = Duration::from_millis(500);
+        let d = scratch();
+        let held = holder(&d.0);
+        let (answered, answer) = commit_behind(&d.0, held, wait, Duration::from_secs(2), || {
+            std::thread::sleep(wait / 5);
+            put_turn(&d.0, Turn { began: os::host_clock().after(Duration::from_secs(3600)) }.line().as_bytes());
+        });
+        assert!(answered, "the commit answered only once the hold let the lock go: {answer:?}");
+        assert_eq!(answer, Answer::NotApproved(Failure::Store, Entry::Untouched));
+    }
+
+    #[test]
+    fn a_turn_is_a_time_on_the_host_clock_and_its_check() {
+        // The line a hold writes: its time read just before the lock, and the
+        // check that a line read while a hold writes over it fails.
+        let d = scratch();
+        let before = os::host_clock();
+        drop(holder(&d.0));
+        let after = os::host_clock();
+        let bytes = turn_bytes(&d.0);
+        assert_eq!(bytes.len(), Turn::LEN);
+        let turn = Turn::parse(bytes.as_slice().try_into().unwrap()).expect("a whole turn");
+        assert!(before <= turn.began && turn.began <= after, "{before:?} {turn:?} {after:?}");
+        assert_eq!(bytes[20], b' ');
+        assert_eq!(&bytes[21..37], sha256::hex(&bytes[..20])[..16].as_bytes());
+        let mut wrong = bytes.clone();
+        wrong[19] = if wrong[19] == b'0' { b'1' } else { b'0' };
+        assert_eq!(Turn::parse(wrong.as_slice().try_into().unwrap()), None, "a time whose check is another's");
     }
 
     /// A commit's steps as `Real` runs them, but paced: the lock kept
@@ -1774,8 +1852,8 @@ mod tests {
     }
     fn held_elsewhere(home: &Path) -> bool {
         let other = fs::File::open(path(home)).unwrap();
-        match os::flock_within(&other, Duration::ZERO, || false) {
-            Ok(()) => false,
+        match os::flock_within(&other, Duration::ZERO, |_| None) {
+            Ok(_) => false,
             Err(Outcome::Deadline) => true,
             Err(e) => panic!("the lock check failed: {e:?}"),
         }
