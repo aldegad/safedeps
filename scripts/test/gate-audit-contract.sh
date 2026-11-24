@@ -277,9 +277,11 @@ assert_audit 1 "npm: other bytes under an accepted URL count" "${site_fixture}" 
 # audits (`npm prefix`), read once. npm reads npm-shrinkwrap.json where it
 # holds a byte, else package-lock.json where it holds a byte. Each row names
 # the file the advisory is judged by and whether the accepted source still
-# takes it out. The first two are a shrinkwrap alone, then the same beside an
-# empty package-lock.json, which was compared in its place. A row that fails
-# is said and the rows go on, so one run shows each of them.
+# takes it out. The first two are the two runs of a review: a shrinkwrap
+# alone, then the same beside a package-lock.json whose packages are empty,
+# which was compared in its place. The third puts a file with no byte in it
+# there. A row that fails is said and the rows go on, so one run shows each
+# of them.
 shape_fixture="${tmp_root}/shape-repo"
 shape_failed=0
 shape_reset() { # PACKAGE_JSON: a project with that manifest and nothing else
@@ -308,6 +310,9 @@ site_entry GHSA-site-aaaa-bbbb
 shape_reset '{"name":"gate-audit-contract","private":true}'
 shape_lock "${shape_fixture}/npm-shrinkwrap.json" sha512-siteBytes100
 shape_row 0 "npm: npm-shrinkwrap.json alone is judged, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+printf '%s\n' '{"name":"gate-audit-contract","lockfileVersion":3,"packages":{}}' > "${shape_fixture}/package-lock.json"
+shape_row 0 "npm: beside a package-lock.json whose packages are empty, npm-shrinkwrap.json is judged, and the accepted source still takes its advisory out" "${shape_accepted}" \
   "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
 : > "${shape_fixture}/package-lock.json"
 shape_row 0 "npm: beside an empty package-lock.json, npm-shrinkwrap.json is judged, and the accepted source still takes its advisory out" "${shape_accepted}" \
