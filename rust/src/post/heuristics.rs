@@ -5,6 +5,8 @@ use std::{fs, path::Path, time::Instant};
 type W = Vec<u8>;
 
 pub(super) mod native;
+#[cfg(test)]
+mod lockfile_tests;
 
 fn raw_field(st: &jv::Stream, keys: &[&str], default: &[u8]) -> Result<W, i32> {
     let (lines, rc) = jv::each(st, |v| {
