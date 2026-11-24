@@ -170,8 +170,12 @@ safedeps_watch_measure_npm_file() {
     jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
     return 0
   fi
+  # What the entries cover of this lockfile joins the run's covered rows only
+  # when jq answered 0: a comparison that fails takes nothing out, whatever
+  # it printed before it failed.
   if [[ -n "${sources}" ]] \
-    && ! jq -c --arg root "${root}" --arg rel "${rel}" --slurpfile sources "${sources}" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "${copy}" >> "${tmp}/npm-covered.jsonl"; then
+    && ! { jq -c --arg root "${root}" --arg rel "${rel}" --slurpfile sources "${sources}" "${SAFEDEPS_NPM_ACCEPTED_JQ}" "${copy}" > "${tmp}/npm-covered-one.jsonl" \
+      && cat "${tmp}/npm-covered-one.jsonl" >> "${tmp}/npm-covered.jsonl"; }; then
     jq -nc --arg root "${root}" --arg rel "${rel}" '{root:$root, path:$rel, kind:"npm", status:"unreadable", reason:"accepted sources not compared"}' >> "${status}"
     jq -nc --arg root "${root}" --arg rel "${rel}" '{kind:"lockfile_unreadable", root:$root, path:$rel}' >> "${errors}"
     return 0

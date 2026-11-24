@@ -1322,22 +1322,34 @@ row_ledger_g4_no_file() {
   not_read "G4, no file for the index"
 }
 row "G4: where the index cannot be written to its file the ledger is not read: the error row, and the advisory is a finding" row_ledger_g4_no_file
+# G6 has a second project, b, whose lockfile is measured, so the run goes on
+# to its findings, and a's comparison alone fails. What it printed before it
+# failed takes nothing out: a's advisory is an open finding.
 row_ledger_g6_not_compared() {
-  site_world
-  local before
+  local before what
   for before in 1 ''; do
-    printf '#!/bin/sh\ncase "$*" in *"--slurpfile sources"*) [ -n "%s" ] || %s "$@"; exit 5 ;; esac\nexec %s "$@"\n' \
-      "${before}" "$(command -v jq)" "$(command -v jq)" > "${d}/fakebin/jq"
+    if [[ -n "${before}" ]]; then what="G6, failing before it printed"; else what="G6, failing after it printed"; fi
+    site_world; register b
+    npm_lock "${d}/p/b" left@1.0.0
+    printf '#!/bin/sh\ncase "$*" in *"root %s "*"--slurpfile sources"*) [ -n "%s" ] || %s "$@"; exit 5 ;; esac\nexec %s "$@"\n' \
+      "${d}/p/a" "${before}" "$(command -v jq)" "$(command -v jq)" > "${d}/fakebin/jq"
     chmod +x "${d}/fakebin/jq"
     scan
-    [[ "${rc}" == 1 ]] || no "G6${before:+ before it printed}: the scan exited ${rc}: $(head -c 400 "${d}/stderr")"
-    st '[.errors[] | select(.kind == "accepted_sources_unreadable")] | length == 0' "G6: the ledger was read" '.errors'
-    st '[.unmeasured[] | select(.kind == "lockfile_unreadable" and .path == "./package-lock.json" and .reason == "accepted sources not compared")] | length == 1
-        and .summary.complete == false' "G6${before:+ before it printed}: the lockfile is a gap, not compared" '.unmeasured'
-    [[ "$(npm_rows)" == '[{"path":"./package-lock.json","status":"unreadable"}]' ]] || no "G6: the lockfile row: $(npm_rows)"
+    [[ "${rc}" == 1 ]] || no "${what}: the scan exited ${rc}: $(head -c 400 "${d}/stderr")"
+    st '[.errors[] | select(.kind == "accepted_sources_unreadable")] | length == 0' "${what}: the ledger was read" '.errors'
+    st --arg r "${d}/p/a" '([.unmeasured[] | select(.kind == "lockfile_unreadable" and .root == $r and .path == "./package-lock.json"
+          and .reason == "accepted sources not compared")] | length == 1)
+        and .summary.complete == false' "${what}: a's lockfile is a gap, not compared" '.unmeasured'
+    st '([.roots[] | select(.name == "a") | .lockfiles[]? | select(.kind == "npm") | {path, status}] == [{path: "./package-lock.json", status: "unreadable"}])
+        and ([.roots[] | select(.name == "b") | .lockfiles[]? | select(.kind == "npm") | .status] == ["measured"])' \
+      "${what}: a's lockfile is unread and b's is measured" '[.roots[] | {name, lockfiles}]'
+    npm_findings | jq -e --arg r "${d}/p/a" '[.[] | select(.root == $r)]
+        | length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].state == "open" and .[0].closed_reason == null' > /dev/null \
+      || no "${what}: a's advisory is not an open finding: $(npm_findings)"
+    st '.summary.accepted_sources == 0' "${what}: nothing is accepted" '.summary'
   done
 }
-row "G6: a comparison that fails, before or after it printed, leaves the lockfile unread with the reason accepted sources not compared" row_ledger_g6_not_compared
+row "G6: a comparison that fails, before or after it printed, leaves the lockfile unread with the reason accepted sources not compared, and takes nothing out" row_ledger_g6_not_compared
 
 # ---- which npm lockfile ----------------------------------------------------------------
 # A directory is measured by the npm lockfile npm reads there
