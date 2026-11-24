@@ -1682,6 +1682,290 @@ grep -q 'SAFEDEPS_ACCEPT_RISK kept this install' < "${codex_post}" || fail "on C
 grep -q 'safedeps did not add --ignore-scripts to this install' < "${codex_post}" || fail "on Codex the message says safedeps did not add the flag"
 pass "on Codex SAFEDEPS_ACCEPT_RISK keeps the install and does not lift the ledger check"
 
+# SAFEDEPS_ACCEPT_SOURCE: a person's decision to keep, once, a package npm
+# records from outside the public registry, said in front of the install. The
+# install that is kept writes an entry per package it brought from that URL
+# into the accepted-source ledger: the URL, the integrity, the name and
+# version, and the advisory ids OSV named then. From then on those bytes,
+# under that URL, name and version, install as an approved package. Each row
+# runs in a project of its own, whose two npm records hold fixture-parent and
+# fixture-child from the public registry with an integrity, and the members a
+# row adds. The npm on PATH answers `npm query` from the hidden lockfile, so
+# the rebuild check reads the tree the row wrote, and npm's configuration with
+# the public registry.
+src_url='https://example.test/fixture-site/-/fixture-site-1.0.0.tgz'
+src_integrity='sha512-fixtureSiteBytes100'
+src_reason='owner: the fixed build is published on the maker site only'
+src_ledger="${SAFEDEPS_HOME}/accepted-sources.jsonl"
+src_calls="${tmp_root}/src-npm-calls.log"
+src_bin="${tmp_root}/src-npm-bin"
+mkdir -p "${src_bin}"
+cat > "${src_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$PWD \$*" >> "${src_calls}"
+if [[ "\$1" == query ]]; then
+  jq -c '[{location:"",name:"src-project"}] + [.packages | to_entries[] | select(.key != "")
+    | {location:.key, name:(.value.name // (.key | split("node_modules/") | last)), version:.value.version}]' node_modules/.package-lock.json
+elif [[ "\$1" == config ]]; then
+  cat "${tmp_root}/src-npm-config.json"
+fi
+exit 0
+EOF
+chmod +x "${src_bin}/npm"
+printf '%s\n' '{"registry":"https://registry.npmjs.org/","replace-registry-host":"npmjs"}' > "${tmp_root}/src-npm-config.json"
+src_public='"node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "integrity": "sha512-fixtureParent100", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz", "integrity": "sha512-fixtureChild100"}'
+# src_lock <project> <members>: both npm records, with the public pair and
+# the members given.
+src_lock() {
+  cat > "$1/package-lock.json" <<EOF
+{
+  "name": "src-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    ${SRC_PUBLIC:-${src_public}}$2
+  }
+}
+EOF
+  mkdir -p "$1/node_modules"
+  cp "$1/package-lock.json" "$1/node_modules/.package-lock.json"
+}
+# src_member <url> <integrity, or empty for none> [key]: one record of
+# fixture-site@1.0.0 under node_modules/fixture-site, or the key given.
+src_member() {
+  local integrity=""
+  [[ -z "$2" ]] || integrity=", \"integrity\": \"$2\""
+  printf ',\n    "%s": {"name": "fixture-site", "version": "1.0.0", "resolved": "%s"%s}' "${3:-node_modules/fixture-site}" "$1" "${integrity}"
+}
+# src_install <project> <command> <members> [codex]: the pre hook in the
+# project (made on first use), then both records with the members, then the
+# post hook. src_pre and src_post hold the answers; a denial runs no post hook.
+src_n=0
+src_install() {
+  local dir="${tmp_root}/$1" decision rewrite
+  src_n=$((src_n + 1))
+  if [[ ! -d "${dir}" ]]; then
+    mkdir -p "${dir}"
+    printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${dir}/package.json"
+    src_lock "${dir}" ""
+  fi
+  src_pre=$(accept_payload "$1-${src_n}" "$2" "${dir}" ${4:-} | pre_hook)
+  src_post=""
+  decision=$(hook_response_read decision "${src_pre}" quiet-or-decision)
+  [[ "${decision}" != deny ]] || return 0
+  rewrite=$(hook_response_read rewrite "${src_pre}" quiet-or-decision)
+  payload=$(accept_payload "$1-${src_n}" "${rewrite:-$2}" "${dir}" ${4:-})
+  src_lock "${dir}" "$3"
+  src_post=$(PATH="${src_bin}:${PATH}" post_hook <<< "${payload}")
+}
+src_rolled_back() { grep -q 'suspicious dependency change detected. A rollback ran.' < "${src_post}"; }
+src_rebuilt() { grep -qE "/$1 rebuild --global=false --location=project --prefix .*/$1\$" "${src_calls}"; }
+src_entries() { ./bin/safedeps --json sources | jq '.entries | length'; }
+src_withheld_has() { cat "${SAFEDEPS_HOME}"/npm-withheld/*.json 2>/dev/null | jq -se --arg t "$1" 'any(.[]; has($t))' > /dev/null; }
+src_with() { printf "SAFEDEPS_ACCEPT_SOURCE='%s %s' npm install %s" "$1" "${src_reason}" "${2:-$1}"; }
+jq '.vulnerable += ["fixture-site@1.0.0"]' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+
+# Without the override, a package from outside the public registry is rolled
+# back, and nothing is accepted.
+[[ "$(src_entries)" == 0 ]] || fail "no earlier row writes an accepted-source entry"
+src_install src-none "npm install ${src_url}" "$(src_member "${src_url}" "${src_integrity}")"
+src_rolled_back || fail "without SAFEDEPS_ACCEPT_SOURCE a site tarball is rolled back: $(cat "${src_post}")"
+grep -q "non-standard registries (.*${src_url}" < "${src_post}" || fail "the rollback names the source"
+grep -q 'fixture-site' "${tmp_root}/src-none/package-lock.json" && fail "the rolled-back lockfile is restored"
+[[ "$(src_entries)" == 0 ]] || fail "a rollback writes no accepted-source entry"
+src_withheld_has "${src_integrity}" || fail "the rolled-back install records the bytes it fetched from the site as withheld"
+pass "without SAFEDEPS_ACCEPT_SOURCE a package from outside the public registry is rolled back"
+
+# An override that names no URL it can accept, or no reason, is denied before
+# the install runs and leaves no record of the call. http, git and file: are
+# never accepted.
+src_project_pending() { find "${SAFEDEPS_HOME}/pending" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' '; }
+for src_bad in "http://example.test/fixture-site-1.0.0.tgz" "git+https://example.test/fixture-site.git" "file:vendor/fixture-site-1.0.0.tgz" \
+    "https://registry.npmjs.org/fixture-site/-/fixture-site-1.0.0.tgz"; do
+  src_pending=$(src_project_pending)
+  src_install src-bad "$(src_with "${src_bad}" "${src_url}")" ""
+  [[ "$(hook_response_read decision "${src_pre}")" == deny ]] || fail "an override naming ${src_bad} is denied"
+  hook_response_read reason "${src_pre}" | grep -q "SAFEDEPS_ACCEPT_SOURCE is in this command and does not count: the URL it names (${src_bad}) is not one it can accept" \
+    || fail "the denial says the URL cannot be accepted: ${src_bad}"
+  [[ "$(src_project_pending)" == "${src_pending}" ]] || fail "a denied override leaves no record: ${src_bad}"
+done
+src_install src-bad "SAFEDEPS_ACCEPT_SOURCE='${src_url}' npm install ${src_url}" ""
+hook_response_read reason "${src_pre}" | grep -q 'its value names a URL and no reason after it' || fail "an override with no reason is denied"
+src_install src-bad "SAFEDEPS_ACCEPT_SOURCE='${src_url} ${src_reason}' npm install ${src_url} && npm install fixture-parent@1.0.0" ""
+[[ "$(hook_response_read decision "${src_pre}")" == deny ]] || fail "an override beside a second install is denied"
+pass "an override naming http, git, file: or the public registry, or no reason, is denied before the install runs"
+
+# On Codex the override is refused: Codex cannot withhold install scripts.
+src_install src-codex "$(src_with "${src_url}")" "" codex
+[[ "$(hook_response_read decision "${src_pre}")" == deny ]] || fail "on Codex the override is denied"
+hook_response_read reason "${src_pre}" | grep -q 'SAFEDEPS_ACCEPT_SOURCE does not count on Codex' || fail "the Codex denial says why"
+pass "on Codex SAFEDEPS_ACCEPT_SOURCE is denied before the install runs"
+
+# A package whose install script the heuristics flag is rolled back, override
+# or not, and nothing is accepted.
+mkdir -p "${tmp_root}/src-script"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${tmp_root}/src-script/package.json"
+src_lock "${tmp_root}/src-script" ""
+mkdir -p "${tmp_root}/src-script/node_modules/fixture-site"
+printf '{"name":"fixture-site","version":"1.0.0","scripts":{"postinstall":"node -e eval(1)"}}\n' \
+  > "${tmp_root}/src-script/node_modules/fixture-site/package.json"
+src_install src-script "$(src_with "${src_url}")" "$(src_member "${src_url}" "${src_integrity}")"
+src_rolled_back || fail "an accepted package with a flagged install script is rolled back: $(cat "${src_post}")"
+grep -q "Package 'fixture-site' has install script with code execution" < "${src_post}" || fail "the rollback names the install script"
+grep -q 'it accepts a source only for an install no other check rolls back, so no entry was written' < "${src_post}" \
+  || fail "the rollback says the override wrote nothing"
+[[ "$(src_entries)" == 0 ]] || fail "a rolled-back override writes no entry"
+pass "SAFEDEPS_ACCEPT_SOURCE does not cover an install script the heuristics flag"
+
+# A bypass that names another URL, or a prefix of this one, covers nothing.
+for src_other in "https://example.test/fixture-site/-/fixture-other-1.0.0.tgz" "https://example.test/fixture-site/"; do
+  src_install src-other "SAFEDEPS_ACCEPT_SOURCE='${src_other} ${src_reason}' npm install ${src_url}" "$(src_member "${src_url}" "${src_integrity}")"
+  src_rolled_back || fail "an override naming ${src_other} does not cover ${src_url}: $(cat "${src_post}")"
+  grep -q "SAFEDEPS_ACCEPT_SOURCE was set for this install and names ${src_other}, which neither npm record holds, so it accepted nothing" < "${src_post}" \
+    || fail "the rollback says the override named another URL: ${src_other}"
+  [[ "$(src_entries)" == 0 ]] || fail "an override naming another URL writes no entry"
+done
+pass "SAFEDEPS_ACCEPT_SOURCE naming another URL or a prefix covers nothing"
+
+# A record of that URL with no integrity is rolled back under the override:
+# the integrity is what an entry binds.
+src_install src-noint "$(src_with "${src_url}")" "$(src_member "${src_url}" "")"
+src_rolled_back || fail "a record with no integrity is rolled back under the override: $(cat "${src_post}")"
+grep -q "package-lock.json: fixture-site@1.0.0 from ${src_url} has no integrity, so no accepted source can cover it" < "${src_post}" \
+  || fail "the rollback says the record has no integrity"
+[[ "$(src_entries)" == 0 ]] || fail "a record with no integrity writes no entry"
+pass "SAFEDEPS_ACCEPT_SOURCE does not cover a record with no integrity"
+
+# The override keeps the install after a rollback in the same project, writes
+# the entry with the advisory OSV named, says so on one line, and the rebuild
+# runs: the tree holds approved and accepted packages only. The bytes the
+# rollback recorded as withheld are released for this record.
+src_install src-none "$(src_with "${src_url}")" "$(src_member "${src_url}" "${src_integrity}")"
+if src_rolled_back; then fail "SAFEDEPS_ACCEPT_SOURCE keeps the install: $(cat "${src_post}")"; fi
+grep -qxF 'safedeps: this install was not rolled back.' <<< "$(post_message "${src_post}")" || fail "the kept install says it was not rolled back"
+grep -qxF "Accepted source: ${src_url} for fixture-site@1.0.0 (advisories accepted: CVE-2026-1000), recorded in ${src_ledger}" \
+  <<< "$(post_message "${src_post}")" || fail "the kept install names the accepted source on one line: $(post_message "${src_post}")"
+[[ "$(src_entries)" == 1 ]] || fail "the kept install writes one entry"
+./bin/safedeps --json sources | jq -e --arg u "${src_url}" --arg i "${src_integrity}" --arg r "${src_reason}" '
+  .entries[0] | .url == $u and .integrity == $i and .package == "fixture-site" and .version == "1.0.0"
+  and .advisories == ["CVE-2026-1000"] and .reason == $r and (.project | endswith("/src-none"))' > /dev/null || fail "the entry holds the URL, integrity, package, advisories and reason"
+grep -q 'fixture-site' "${tmp_root}/src-none/package-lock.json" || fail "the kept install's lockfile is left as the install wrote it"
+src_rebuilt src-none || fail "the rebuild runs over a tree of approved and accepted packages"
+src_list=$(./bin/safedeps sources) || fail "safedeps sources lists the ledger"
+[[ "$(sed -n 1p <<< "${src_list}")" == "${src_url}" && "$(sed -n 2p <<< "${src_list}")" == "  fixture-site@1.0.0 ${src_integrity}" \
+  && "$(sed -n 3p <<< "${src_list}")" == "  advisories when accepted: CVE-2026-1000" ]] \
+  && grep -qE "^  accepted [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z in .*/src-none: ${src_reason}\$" <<< "${src_list}" \
+  || fail "safedeps sources names the URL, the bytes, the advisories and who accepted them: ${src_list}"
+pass "SAFEDEPS_ACCEPT_SOURCE keeps the install after a rollback, records the entry, and the rebuild runs"
+
+# The same bytes from the same URL, in another project, install without the
+# override as an approved package: nothing is said, the rebuild runs, and the
+# bytes are not recorded as withheld again.
+src_withheld_files=$(find "${SAFEDEPS_HOME}/npm-withheld" -type f -name '*.json' | wc -l | tr -d ' ')
+src_install src-again "npm ci" "$(src_member "${src_url}" "${src_integrity}")"
+hook_response_parse "${src_post}" quiet || fail "an install of accepted bytes says nothing: $(cat "${src_post}")"
+src_rebuilt src-again || fail "the rebuild runs over accepted bytes in another project"
+[[ "$(find "${SAFEDEPS_HOME}/npm-withheld" -type f -name '*.json' | wc -l | tr -d ' ')" == "${src_withheld_files}" ]] \
+  || fail "accepted bytes are not recorded as withheld again"
+[[ "$(src_entries)" == 1 ]] || fail "an install under an entry writes no entry"
+pass "accepted bytes install again without the override, say nothing, and are rebuilt"
+
+# A site package brought in by a dependency is covered the same way.
+src_install src-nested "npm ci" "$(src_member "${src_url}" "${src_integrity}" node_modules/fixture-parent/node_modules/fixture-site)"
+hook_response_parse "${src_post}" quiet || fail "accepted bytes nested under a dependency say nothing: $(cat "${src_post}")"
+pass "accepted bytes nested under a dependency install as an approved package"
+
+# Where npm fetches every URL from its registry (replace-registry-host=always),
+# the integrity still binds the bytes, so the entry still covers the record.
+printf '%s\n' '{"registry":"https://registry.npmjs.org/","replace-registry-host":"always"}' > "${tmp_root}/src-npm-config.json"
+src_install src-always "npm ci" "$(src_member "${src_url}" "${src_integrity}")"
+printf '%s\n' '{"registry":"https://registry.npmjs.org/","replace-registry-host":"npmjs"}' > "${tmp_root}/src-npm-config.json"
+hook_response_parse "${src_post}" quiet || fail "accepted bytes under replace-registry-host=always say nothing: $(cat "${src_post}")"
+src_rebuilt src-always || fail "accepted bytes under replace-registry-host=always are rebuilt"
+pass "accepted bytes install as an approved package where npm replaces every registry host"
+
+# On Codex an install of accepted bytes is kept: there is no override to refuse.
+src_install src-codex-again "npm ci" "$(src_member "${src_url}" "${src_integrity}")" codex
+if src_rolled_back; then fail "on Codex accepted bytes are kept: $(cat "${src_post}")"; fi
+grep -q 'fixture-site' "${tmp_root}/src-codex-again/package-lock.json" || fail "on Codex the lockfile of accepted bytes is left"
+pass "on Codex an install of accepted bytes is kept"
+
+# Other bytes under the URL, the same bytes under another name or another
+# URL, and the URL spelled with another case or a query, are judged as before.
+src_install src-bytes "npm ci" "$(src_member "${src_url}" "sha512-fixtureSiteOther100")"
+src_rolled_back || fail "other bytes under an accepted URL are rolled back: $(cat "${src_post}")"
+grep -q "fixture-site@1.0.0 from ${src_url} has an integrity no accepted-source entry of that URL names, so its bytes are not the ones accepted" < "${src_post}" \
+  || fail "the rollback says the bytes are not the ones accepted"
+src_install src-name "npm ci" ',
+    "node_modules/fixture-renamed": {"version": "1.0.0", "resolved": "'"${src_url}"'", "integrity": "'"${src_integrity}"'"}'
+src_rolled_back || fail "accepted bytes under another name are rolled back: $(cat "${src_post}")"
+grep -q "fixture-renamed@1.0.0 from ${src_url} has the integrity an accepted-source entry names under another package or version" < "${src_post}" \
+  || fail "the rollback says the entry names another package"
+for src_spelled in "https://EXAMPLE.test/fixture-site/-/fixture-site-1.0.0.tgz" "${src_url}?mirror=1" "https://example.test/mirror/fixture-site-1.0.0.tgz"; do
+  src_install src-spelled "npm ci" "$(src_member "${src_spelled}" "${src_integrity}")"
+  src_rolled_back || fail "accepted bytes under ${src_spelled} are rolled back: $(cat "${src_post}")"
+done
+[[ "$(src_entries)" == 1 ]] || fail "no rollback writes an entry"
+pass "other bytes, another name, another URL, another case and a query are each judged as before"
+
+# The same bytes recorded under another URL are the bytes recorded as
+# withheld: the entry covers its own URL only. Here an approved package's
+# public record names them, so the install is kept and the rebuild is held
+# back.
+SRC_PUBLIC="${src_public/sha512-fixtureParent100/${src_integrity}}" src_install src-public "npm ci" ""
+if src_rolled_back; then fail "an approved package with withheld bytes is kept: $(cat "${src_post}")"; fi
+grep -qE "^safedeps did not run npm rebuild in .*/src-public because the bytes of .*fixture-parent.* here are the ones an install in .*/src-none first fetched from ${src_url}, which is not the public npm registry" \
+  <<< "$(post_message "${src_post}")" || fail "the same bytes under the public URL are held back as withheld: $(cat "${src_post}")"
+if src_rebuilt src-public; then fail "no rebuild runs over the same bytes under another URL"; fi
+pass "the same bytes under another URL are not released by the entry"
+
+# An advisory the entry does not name is a finding again, and a KEV listing is
+# never covered.
+jq '.vulnerable_more = ["fixture-site@1.0.0"]' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+src_install src-newid "npm ci" "$(src_member "${src_url}" "${src_integrity}")"
+jq 'del(.vulnerable_more)' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+src_rolled_back || fail "an advisory the entry does not name rolls back: $(cat "${src_post}")"
+grep -q 'npm closure contains vulnerable package(s): fixture-site@1.0.0' < "${src_post}" || fail "the rollback names the vulnerable package"
+jq '.kev = ["fixture-site@1.0.0"]' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+src_install src-kev "npm ci" "$(src_member "${src_url}" "${src_integrity}")"
+jq 'del(.kev)' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+src_rolled_back || fail "a KEV listing of an accepted package rolls back: $(cat "${src_post}")"
+grep -q 'KEV-blocked package(s): fixture-site@1.0.0' < "${src_post}" || fail "the rollback names the KEV listing"
+pass "a new advisory and a KEV listing of accepted bytes are rolled back"
+
+# Two entries may stand for one URL: here a second acceptance of other bytes.
+src_install src-second "$(src_with "${src_url}")" "$(src_member "${src_url}" "sha512-fixtureSiteBytes101")"
+if src_rolled_back; then fail "a second acceptance under one URL is kept: $(cat "${src_post}")"; fi
+[[ "$(src_entries)" == 2 ]] || fail "two entries stand for one URL"
+pass "two entries can stand for one URL"
+
+# A revoke takes back every entry of the URL. The same install is rolled back
+# again, and the bytes the first install recorded are still withheld.
+src_revoke=$(./bin/safedeps sources revoke "${src_url}") || fail "the revoke succeeds"
+[[ "${src_revoke}" == "safedeps: revoked 2 accepted-source entries for ${src_url}. The next install that brings those bytes is judged as before." ]] \
+  || fail "the revoke says how many entries it took back: ${src_revoke}"
+[[ "$(src_entries)" == 0 ]] || fail "no entry stands after the revoke"
+if ./bin/safedeps sources revoke "${src_url}" > /dev/null; then fail "a revoke with nothing to take back exits non-zero"; fi
+src_install src-revoked "npm ci" "$(src_member "${src_url}" "${src_integrity}")"
+src_rolled_back || fail "after the revoke the install is rolled back again: $(cat "${src_post}")"
+grep -q "non-standard registries (.*${src_url}" < "${src_post}" || fail "the rollback names the source again"
+src_withheld_has "${src_integrity}" || fail "the bytes stay recorded as withheld after the revoke"
+pass "after a revoke the same bytes are rolled back again and stay withheld"
+
+# The second acceptance was the first time those bytes came in, and the
+# install that accepted them recorded them as withheld all the same: once the
+# entry is gone, an approved package whose public record names them is kept
+# and its rebuild is held back.
+src_withheld_has sha512-fixtureSiteBytes101 || fail "the install that accepted bytes on first sight recorded them as withheld"
+SRC_PUBLIC="${src_public/sha512-fixtureParent100/sha512-fixtureSiteBytes101}" src_install src-held "npm ci" ""
+if src_rolled_back; then fail "an approved package with withheld bytes is kept after the revoke: $(cat "${src_post}")"; fi
+grep -qE "^safedeps did not run npm rebuild in .*/src-held because the bytes of .*fixture-parent.* here are the ones an install in .*/src-second first fetched from ${src_url}, which is not the public npm registry" \
+  <<< "$(post_message "${src_post}")" || fail "after the revoke the bytes are withheld: $(cat "${src_post}")"
+if src_rebuilt src-held; then fail "after the revoke no rebuild runs over the withheld bytes"; fi
+pass "after a revoke the bytes an acceptance brought in on first sight are withheld"
+jq '.vulnerable -= ["fixture-site@1.0.0"]' "${state_file}" > "${state_file}.next" && mv "${state_file}.next" "${state_file}"
+
 # A rollback never acts outside the project it read. Some worktree layouts link
 # node_modules to another checkout's, and `npm ci` empties whatever node_modules
 # resolves to before it installs. This stub npm does what that first step of

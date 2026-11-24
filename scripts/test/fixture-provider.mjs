@@ -151,6 +151,11 @@ function osvResponse(packageName, version, pageToken) {
   if (packageName === 'fixture-paged') {
     return { vulns: [osvVuln('CVE-2026-1002', null)] };
   }
+  // A package listed under `vulnerable_more` (name@version) answers the
+  // advisory `vulnerable` gives and one more, as after OSV published another.
+  if (current.vulnerable_more?.includes(key)) {
+    return { vulns: [osvVuln('CVE-2026-1000', null), osvVuln('CVE-2026-1002', null)] };
+  }
   if (current.kev?.includes(key)) {
     return { vulns: [osvVuln('CVE-2026-9999', null)] };
   }

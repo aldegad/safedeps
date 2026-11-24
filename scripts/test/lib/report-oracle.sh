@@ -120,6 +120,7 @@ journal-differs journal-gone journal-extra journal-no-list
 file-line file-line-absent
 log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated log-record-gone log-record-empty log-record-unread
 head-accepted accepted-reason audit-line skip-fact-accepted log-accepted
+accepted-source
 "
 
 # The native owner API supplies integer start times, so the ps empty/date
@@ -153,6 +154,7 @@ ORACLE_PROSE=(
   "prose-fetch-unknown|rollback confirm accepted|0|safedeps could not tell where npm fetched the bytes this install brought into "
   "prose-record-failed|rollback confirm accepted|0|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
   "prose-fetched-elsewhere|confirm accepted|3|this install fetched packages from a registry that is not the public npm registry ("
+  "prose-rebuild-held|confirm|2|safedeps did not run npm rebuild in "
 )
 oracle_prose_field() {
   local entry="$1" n="$2"
@@ -1231,6 +1233,21 @@ oracle_line() {
     [[ "${BASH_REMATCH[2]}" == "${O_HOME}/accepted-risk.jsonl" ]] || oracle_red "not the audit record under SAFEDEPS_HOME"
     python3 "${ORACLE_READ}" accepted "${BASH_REMATCH[2]}" "${O_PROJECT}" "${O_CMD}" "${O_ACCEPT}" "${O_CALL_ID}" \
       || oracle_red "the last audit entry does not name this call's project, command and reason"
+    return 0
+  fi
+
+  # The one line an install that makes accepted-source entries says, in the
+  # message of an install that is kept. The URL is the one this call's record
+  # holds, the ledger is the one under SAFEDEPS_HOME, and its last line is an
+  # accept line of that URL, this project and this call.
+  if [[ "${line}" =~ ^Accepted\ source:\ (https://[^\ ]+)\ for\ (.+),\ recorded\ in\ (/.+)$ ]]; then
+    oracle_count accepted-source
+    [[ "${O_BLOCK}" == confirm || "${O_BLOCK}" == accepted ]] || oracle_red "an Accepted source line outside the message of a kept install"
+    [[ "$(python3 "${ORACLE_READ}" string "${O_CONSUMED}" accept_source url 2>/dev/null)" == "${BASH_REMATCH[1]}" ]] \
+      || oracle_red "the URL is not the one this call's record holds"
+    [[ "${BASH_REMATCH[3]}" == "${O_HOME}/accepted-sources.jsonl" ]] || oracle_red "not the accepted-source ledger under SAFEDEPS_HOME"
+    python3 "${ORACLE_READ}" sources "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" "${O_PROJECT}" "${O_CALL_ID}" \
+      || oracle_red "the ledger's last line is not an accept line of this URL, project and call"
     return 0
   fi
 

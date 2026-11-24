@@ -25,6 +25,8 @@ case "${FAKE_NPM_MODE:-clean}" in
   vuln)  printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":4,"high":0,"critical":0}}}'; exit 1 ;;
   low)   printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":2,"moderate":0,"high":0,"critical":0}}}'; exit 1 ;;
   failed) printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}'; exit 5 ;;
+  # One moderate advisory of a package from a site, as npm 7+ reports it.
+  site) printf '%s\n' '{"vulnerabilities":{"site":{"name":"site","severity":"moderate","via":[{"source":1,"name":"site","url":"https://github.com/advisories/GHSA-site-aaaa-bbbb","severity":"moderate"}],"nodes":["node_modules/site"]}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":1,"high":0,"critical":0,"total":1}}}'; exit 1 ;;
 esac
 exit 98
 FAKE
@@ -188,6 +190,39 @@ assert_audit 2 "yarn classic: a clean summary from an audit that failed is no ve
 assert_audit 0 "yarn classic: a clean summary from an audit that finished is clean" "${yarn_fixture}" FAKE_YARN_VERSION=1.22.22 FAKE_YARN_MODE=clean
 assert_audit 2 "yarn Berry: advisory lines jq printed and failed on are no verdict" "${yarn_fixture}" STUB_MATCH='.children.Severity? != null' FAKE_YARN_MODE=advisory
 assert_audit 2 "yarn Berry: advisory lines jq failed on before printing are not clean" "${yarn_fixture}" STUB_MATCH='.children.Severity? != null' STUB_BEFORE=1 FAKE_YARN_MODE=advisory
+
+# An advisory of a package the accepted-source ledger covers is taken out of
+# npm's counts and named on one line; other bytes, an advisory no entry names
+# and no entry at all leave the count as npm gave it. The entry is written
+# here as an install would write it.
+site_fixture="${tmp_root}/site-repo"
+mkdir -p "${site_fixture}"
+git -C "${site_fixture}" init -q
+printf '%s\n' '{"name":"gate-audit-contract","private":true}' > "${site_fixture}/package.json"
+site_home="${tmp_root}/site-home"
+mkdir -p "${site_home}"
+site_url='https://example.test/site/-/site-1.0.0.tgz'
+site_lock() {
+  jq -n --arg url "${site_url}" --arg integrity "$1" '{name: "gate-audit-contract", lockfileVersion: 3, packages: {
+    "": {name: "gate-audit-contract"}, "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity}}}' \
+    > "${site_fixture}/package-lock.json"
+}
+site_entry() {
+  jq -nc --arg url "${site_url}" --arg id "$1" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url, integrity: "sha512-siteBytes100",
+    package: "site", version: "1.0.0", advisories: [$id], reason: "owner: the fix is on the maker site only",
+    project: "/work/site", tool_use_id: null}' > "${site_home}/accepted-sources.jsonl"
+}
+site_lock sha512-siteBytes100
+assert_audit 1 "npm: an advisory of a package from a site, with no accepted source, counts" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
+site_entry GHSA-site-aaaa-bbbb
+assert_audit 0 "npm: an advisory an accepted-source entry names is not counted" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
+grep -qxF 'safedeps audit: npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)' "${tmp_root}/audit.out" \
+  || fail "npm: the accepted advisory is named on one line: $(cat "${tmp_root}/audit.out")"
+site_entry GHSA-site-cccc-dddd
+assert_audit 1 "npm: an advisory no accepted-source entry names counts" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
+site_entry GHSA-site-aaaa-bbbb
+site_lock sha512-siteBytes101
+assert_audit 1 "npm: other bytes under an accepted URL count" "${site_fixture}" FAKE_NPM_MODE=site SAFEDEPS_HOME="${site_home}"
 
 # The release gate's two reads of the Python surface. A find that failed is no
 # "no surface", and a list it printed first may be missing what it could not read.

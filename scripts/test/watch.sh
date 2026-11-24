@@ -1148,6 +1148,68 @@ row_last_full_scan() {
 }
 row "last_full_scan: a root scan after a full scan with errors keeps the full scan's run, time and errors; last_scan is the root scan" row_last_full_scan
 
+# ---- accepted sources ----------------------------------------------------------------
+# An entry of the accepted-source ledger (rust/src/sources.rs) covers a
+# package whose lock record names its URL, integrity, name and version. An
+# advisory the entry names is no finding; one it does not name, a KEV listing
+# and other bytes under the URL are findings as before. The entry is written
+# here as an install would write it.
+site_url='https://example.test/site/-/site-1.0.0.tgz'
+site_lock() { # DIR INTEGRITY
+  jq -n --arg url "${site_url}" --arg integrity "$2" '{name: "fixture", lockfileVersion: 3, packages: {
+    "": {name: "fixture"},
+    "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity},
+    "node_modules/left": {version: "1.0.0"}}}' > "$1/package-lock.json"
+}
+site_accept() { # ADVISORY...
+  jq -nc --arg url "${site_url}" --arg p "${d}/p/a" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url,
+    integrity: "sha512-siteBytes100", package: "site", version: "1.0.0", advisories: $ARGS.positional,
+    reason: "owner: the fix is on the maker site only", project: $p, tool_use_id: "toolu_fixture"}' --args "$@" \
+    >> "${home}/accepted-sources.jsonl"
+}
+row_accepted_source() {
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_findings)" == "[]" ]] || no "an advisory the entry names is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1 and .summary.open == 0' 'accepted'
+  st '.summary.line | test("; accepted sources 1(;|$)")' 'the line counts the accepted source'
+  st '[.roots[] | .lockfiles[]? | select(.kind == "npm") | .accepted[]? | .package + "@" + .version] == ["site@1.0.0"]' \
+    'the status row lists the accepted package' '[.roots[] | .lockfiles[]?]'
+  [[ "$(jq '[.events[] | select(.kind == "finding")] | length' "${home}/watch/state.json")" == 0 ]] || no "an accepted advisory made an event"
+  # A second advisory the entry does not name is a finding and an event.
+  fx ".osv[\"site@1.0.0\"] += [$(osv_record GHSA-site-cccc-dddd '' site 1.0.1)]"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-cccc-dddd" and .[0].state == "open"' > /dev/null \
+    || no "a new advisory is a finding again: $(npm_findings)"
+  st '[.events[] | select(.kind == "finding")] | length == 1' 'one event for the new advisory'
+  # A KEV listing of the accepted advisory is a finding.
+  fx '.kev = ["GHSA-site-aaaa-bbbb"]'
+  scan_ok
+  npm_findings | jq -e 'map(select(.advisory == "GHSA-site-aaaa-bbbb")) | length == 1 and .[0].kev == true' > /dev/null \
+    || no "a KEV-listed advisory of an accepted package is a finding: $(npm_findings)"
+}
+row "an advisory an accepted-source entry names is no finding and the line counts it; a new advisory and a KEV listing are findings" row_accepted_source
+
+row_accepted_source_other_bytes() {
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].state == "open"' > /dev/null \
+    || no "other bytes under an accepted URL are a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 0 and (.summary.line | test("accepted sources") | not)' 'other bytes are not accepted'
+  # Revoked, the entry covers nothing.
+  site_lock "${d}/p/a" sha512-siteBytes100
+  (cd "${d}" && envd "${SD}" sources revoke "${site_url}" > /dev/null 2>&1) || no "the revoke succeeds"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].state == "open"' > /dev/null || no "after the revoke the advisory is a finding: $(npm_findings)"
+}
+row "other bytes under an accepted URL, and an entry revoked, are findings as before" row_accepted_source_other_bytes
+
 if (( failures > 0 )); then
   printf '# %d row(s) did not pass\n' "${failures}" >&2
   exit 1
