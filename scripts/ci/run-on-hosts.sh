@@ -42,9 +42,9 @@
 # caller's locale ran the tests under it, and perl there (shasum) printed a
 # warning ahead of the output a row read. So no ssh of the run carries the
 # caller's LANG or LC_*, and each host runs the build and every unit under a
-# UTF-8 locale it has, or C when it has none (scripts/ci/remote.sh). run.txt
-# names that locale for each host, against what the build and each unit there
-# recorded as they started.
+# locale it has whose `locale charmap` is UTF-8, or C when none is
+# (scripts/ci/remote.sh). run.txt names that locale for each host, how the host
+# picked it, and what the build and each unit there recorded as they started.
 #
 # A run is red when any unit failed, printed `not ok`, skipped a row the
 # verdict does not allow, or never ran; when the shards of a battery
@@ -510,27 +510,37 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   fi
 done
 
-# The locale a host picked for the run (remote.sh prepare writes it) set
-# against what the build and each unit there started under: each writes its
-# LANG and LC_* as it starts. The line says the pick when every record is LANG
-# set to it and nothing else, and names each record that is not.
+# The locale a host picked for the run, and how (remote.sh prepare writes
+# locale and locale.pick), set against what the build and each unit there
+# started under. The build writes core-prepare/build.locale as it starts, and
+# each unit started (it has a .run) writes <unit>.locale: its LANG and LC_*. The
+# line counts the records that are LANG set to the pick and nothing else, and
+# names each record that is not, or that is missing.
 locale_line() { # index
-  local dir="${logs}/hosts/${H_NAME[$1]}" pick f started=0 other=""
+  local dir="${logs}/hosts/${H_NAME[$1]}" pick how f record started=0 other=""
   pick=$(cat "${dir}/locale" 2>/dev/null) || { printf 'none recorded'; return 0; }
-  for f in "${dir}/core-prepare/build.locale" "${dir}"/*.locale; do
+  how=$(cat "${dir}/locale.pick" 2>/dev/null) || how="picked ${pick}; how is not recorded"
+  for f in "${dir}/core-prepare" "${dir}"/*.run; do
     [[ -e "${f}" ]] || continue
-    if [[ "$(cat "${f}")" == "LANG=${pick}" ]]; then
+    if [[ "${f}" == "${dir}/core-prepare" ]]; then
+      record="core-prepare/build.locale"
+    else
+      record="$(basename "${f}" .run).locale"
+    fi
+    if [[ ! -f "${dir}/${record}" ]]; then
+      other+="${other:+; }${record} missing"
+    elif [[ "$(cat "${dir}/${record}")" == "LANG=${pick}" ]]; then
       started=$(( started + 1 ))
     else
-      other+="${other:+; }${f#"${dir}/"} [$(paste -sd ' ' "${f}")]"
+      other+="${other:+; }${record} [$(paste -sd ' ' "${dir}/${record}")]"
     fi
   done
   if [[ -n "${other}" ]]; then
-    printf 'picked LANG=%s, but these started otherwise: %s' "${pick}" "${other}"
+    printf '%s; but not every record is LANG=%s alone: %s' "${how}" "${pick}" "${other}"
   elif (( started == 0 )); then
-    printf 'picked LANG=%s; neither the build nor a unit recorded what it started under' "${pick}"
+    printf '%s; neither the build nor a unit recorded what it started under' "${how}"
   else
-    printf 'LANG=%s and no LC_*, as all %s records of the build and the units say' "${pick}" "${started}"
+    printf '%s; all %s records of the build and the units say LANG=%s and no LC_*' "${how}" "${started}" "${pick}"
   fi
 }
 
