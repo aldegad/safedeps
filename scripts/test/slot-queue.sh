@@ -6,25 +6,22 @@
 # Each row installs the runner into a home of its own as a host gets it: the
 # installer run by its own #! line, as scripts/ci/test-hosts.example writes it,
 # and the script it prints read by bash -s. The first row is that install. A
-# row then puts one record in the queue or in a slot, starts a suite behind it
-# and reads what the runner decided: the suite ran, the runner said the slots
-# are busy, or it refused to queue. All three are things the runner does, so a
-# row waits for one of them and needs no clock but a ceiling.
+# row then puts a ticket in the queue or holds a slot, starts a suite behind
+# it and reads what the runner decided: the suite ran, the runner said the
+# slots are busy, or it refused to queue. All three are things the runner
+# does, so a row waits for one of them and needs no clock but a ceiling.
 #
-# The records name a live process of this battery's own, a sleep, by its pid.
-# A record with the start the kernel holds for it is that process; one with
-# another start is a process gone after a reboot whose pid came back. With
-# --script the rows judge another copy of slot.sh, as the red controls do: the
-# copy before the fix waits behind both records.
+# The tickets name a live process of this battery's own, a sleep, by its pid.
+# A ticket with the start the kernel holds for it is that process; one with
+# another start is a process gone after a reboot whose pid came back. A slot
+# is held as a runner holds it: a process of the battery's own opens the
+# slot's file on fd 9, and perl takes flock(2) on that descriptor. With
+# --script the rows judge another copy of slot.sh, as the red controls do.
 #
 # Each step a verdict of the runner rests on has a row that makes that step
-# fail, by a tool found ahead of the real one on the runner's PATH.
-#
-# Two waiters can judge one gone record at once. The rows of that race make
-# its order with a hook on the step between this suite's judgment and its
-# removal: there another run removes the record and puts its own in its place,
-# a real runner for a slot and a ticket under the same name for the queue. The
-# suite must leave that run's record as it found it.
+# fail, by a tool found ahead of the real one on the runner's PATH. A hook on
+# a step lets another run act just before it, so the order of a race is the
+# row's and not the scheduler's.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -112,39 +109,75 @@ ticket() { # pid, then the lines it holds; $record is its path
   record="${home}/safedeps-runs/.queue/$(( $(date +%s) - 100 ))-$(printf %07d "${pid}")"
   printf '%s\n' "$@" > "${record}"
 }
-slot() { # pid, then the identity it holds or nothing
+# slot <pid> [<identity>]: the record the runner before the kernel lock kept
+# in the slot directory .slot, and slot_in <name> the same in another. The
+# runner reads no such record. Only the handoff row sets them up, so that a
+# copy from before the lock, run with --script, meets the slots it judged.
+slot() {
   slot_in .slot "$@"
 }
-slot_in() { # the slot's name, then as slot
+slot_in() {
   local L="${home}/safedeps-runs/$1"; shift
   mkdir -p "${L}"
   [[ $# -lt 2 ]] || printf '%s\n' "$2" > "${L}/identity"
   printf '%s\n' "$1" > "${L}/pid"
   printf 'other since 00:00:00\n' > "${L}/owner"
 }
+# A slot held as a runner holds it. lock-holder <file> <ready> <marker> opens
+# file on fd 9, has perl take flock(2) on that descriptor, and lives on as a
+# sleep that keeps the descriptor until it is killed.
+cat > "${tmp_root}/lock-holder" <<'EOF'
+#!/bin/bash
+exec 9>> "$1" || exit 2
+perl -MFcntl=:flock -e 'open(my $h, ">>&=", 9) or exit 2; flock($h, LOCK_EX | LOCK_NB) or exit 1' || exit 1
+: > "$2"
+exec -a "$3" sleep 600
+EOF
+chmod +x "${tmp_root}/lock-holder"
+locker=""; fixture=""
+# lock_held <file>: a live process of this battery's own holds the lock on
+# file, and $locker is its pid.
+lock_held() {
+  local i
+  rm -f "${tmp_root}/locked"
+  ( cd "${tmp_root}" && exec "${tmp_root}/lock-holder" "$1" "${tmp_root}/locked" "${MARK}" ) 2> /dev/null &
+  locker=$!
+  children+=("${locker}")
+  for (( i = 0; i < 600; i++ )); do
+    [[ -e "${tmp_root}/locked" ]] && return 0
+    kill -0 "${locker}" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  return 1
+}
+# held <name>: the slot <name> of the row's home is held by a process of the
+# battery's own. A row whose holder never held it fails, and read_seen ends
+# the holder.
+held() { lock_held "${home}/safedeps-runs/$1" || fixture="the battery's holder never held $1"; }
+# is_free <file>: whether a fresh open of file takes the lock now. It lets go
+# at once.
+is_free() {
+  ( exec 9>> "$1" && exec perl -MFcntl=:flock -e 'open(my $h, ">>&=", 9) or exit 2; flock($h, LOCK_EX | LOCK_NB) or exit 1' ) 2> /dev/null
+}
 # A step that fails. The runner of the next row finds these tools first on its
 # PATH, and a call goes to the real tool unless it is the one picked: a call
 # of a tool PROBE_TOOL lists with the argument PROBE_FILE (a value ending in *
 # picks any argument that starts with what is before it), or every call of
 # that tool when PROBE_FILE is empty. The picked call notes itself in
-# PROBE_SEEN, prints what a failure part way leaves and exits 1: sed reads the
-# file PROBE_CUT in the path's place, ls leaves out the names PROBE_CUT lists,
-# sort prints only the last line of its order, and the rest print PROBE_CUT.
-# date takes the format as the path. With PROBE_SKIP=n the first n calls it
-# picks go to the real tool and note nothing, so a row can make a later call of
-# the same step fail. With PROBE_MODE=record, mkdir makes the slot, then the
-# paths its record goes to as directories, and ends 0. With PROBE_MODE=taken,
-# mkdir makes the slot and writes into it the record PROBE_CUT holds, a pid and
-# then an identity, as another run that took the slot first, and ends 1 as a
-# mkdir that finds it. With PROBE_MODE=hook the picked call fails nothing: it
-# first runs the script PROBE_CUT, on the PATH the battery has and with none of
-# these variables, then is the real call. So another run acts between two steps
-# of the runner, in the order the row sets.
+# PROBE_SEEN, prints what a failure part way leaves and exits PROBE_RC, or 1:
+# sed reads the file PROBE_CUT in the path's place, ls leaves out the names
+# PROBE_CUT lists, sort prints only the last line of its order, and the rest
+# print PROBE_CUT. date takes the format as the path. With PROBE_SKIP=n the
+# first n calls it picks go to the real tool and note nothing, so a row can
+# make a later call of the same step fail. With PROBE_MODE=hook the picked
+# call fails nothing: it first runs the script PROBE_CUT, on the PATH the
+# battery has and with none of these variables, then is the real call. So
+# another run acts between two steps of the runner, in the order the row sets.
 probe="${tmp_root}/probe"
 mkdir -p "${probe}"
 {
   printf '#!/bin/bash\n'
-  for tool in cat sed ls date grep sort tail python3 dirname mkdir mv rm; do
+  for tool in cat sed ls date grep sort tail python3 dirname mkdir mv perl; do
     printf 'real_%s=%q\n' "${tool}" "$(command -v "${tool}")"
   done
   cat <<'EOF'
@@ -170,7 +203,7 @@ fi
 : > "${PROBE_SEEN}"
 if [[ "${PROBE_MODE}" == hook ]]; then
   hook=${PROBE_CUT}
-  ( unset PROBE_TOOL PROBE_FILE PROBE_CUT PROBE_SEEN PROBE_MODE PROBE_SKIP; PATH=${PROBE_PATH}; "${hook}" )
+  ( unset PROBE_TOOL PROBE_FILE PROBE_CUT PROBE_SEEN PROBE_MODE PROBE_SKIP PROBE_RC; PATH=${PROBE_PATH}; "${hook}" )
   exec "${real}" "$@"
 fi
 case "${tool}" in
@@ -178,22 +211,14 @@ case "${tool}" in
        "${real}" "${args[@]}" ;;
   ls) "${real}" "$@" | "${real_grep}" -vxF -f "${PROBE_CUT}" ;;
   sort) "${real}" "$@" | "${real_tail}" -n 1 ;;
-  mkdir) case "${PROBE_MODE}" in
-           record) "${real}" "$@" && "${real}" "${PROBE_FILE}/identity" "${PROBE_FILE}/pid"
-                   exit ;;
-           taken) "${real}" "$@" || exit 1
-                  { read -r pid; read -r identity; } < "${PROBE_CUT}"
-                  printf '%s\n' "${identity}" > "${PROBE_FILE}/identity"
-                  printf '%s\n' "${pid}" > "${PROBE_FILE}/pid" ;;
-         esac ;;
   *) "${real_cat}" "${PROBE_CUT}" ;;
 esac
-exit 1
+exit "${PROBE_RC:-1}"
 EOF
 } > "${probe}/fail"
 chmod +x "${probe}/fail"
-for tool in cat sed ls date sort python3 dirname mkdir mv rm; do ln -s fail "${probe}/${tool}"; done
-probe_tool=""; probe_file=""; probe_mode=""; probe_skip=""
+for tool in cat sed ls date sort python3 dirname mkdir mv perl; do ln -s fail "${probe}/${tool}"; done
+probe_tool=""; probe_file=""; probe_mode=""; probe_skip=""; probe_rc=""
 cut_short() { # tool, path, bytes: the next row's runner reads path with tool to all but its last bytes, and the read fails
   probe_tool="$1"; probe_file="$2"
   head -c "$(( $(wc -c < "$2") - $3 ))" "$2" > "${tmp_root}/cut"
@@ -201,10 +226,6 @@ cut_short() { # tool, path, bytes: the next row's runner reads path with tool to
 fails() { # tool, the argument that picks its call ('' for every call), then what the call gives: it fails
   probe_tool="$1"; probe_file="$2"; shift 2
   printf '%s' "$@" > "${tmp_root}/cut"
-}
-taken() { # path: the next row's runner's second mkdir of path finds the slot another run made first, held by the witness
-  probe_tool=mkdir; probe_file="$1"; probe_mode=taken; probe_skip=1
-  printf '%s\n%s\n' "${witness}" "${witness_id}" > "${tmp_root}/cut"
 }
 # hook <tool> <argument> [<skip>]: the next row's runner's picked call of tool
 # first runs the script read from stdin, once, then is the real call.
@@ -218,19 +239,16 @@ runner_env() {
   env=(HOME="${home}")
   [[ -z "${probe_tool}" ]] || env+=(PATH="${probe}:${PATH}" PROBE_TOOL="${probe_tool}" PROBE_FILE="${probe_file}"
     PROBE_CUT="${tmp_root}/cut" PROBE_SEEN="${tmp_root}/seen" PROBE_MODE="${probe_mode}" PROBE_SKIP="${probe_skip}"
-    PROBE_PATH="${PATH}")
+    PROBE_RC="${probe_rc}" PROBE_PATH="${PATH}")
 }
-# read_seen: a row that made a step fail holds only if the runner took that step.
+# read_seen: a row that made a step fail holds only if the runner took that
+# step, and a row whose slot the battery held holds only if it was held. It
+# ends the row's holder.
 read_seen() {
   [[ -z "${probe_tool}" || -e "${tmp_root}/seen" ]] || got="${got}, and it never ran the failing ${probe_tool} ${probe_file##*/}"
-  probe_tool=""; probe_file=""; probe_mode=""; probe_skip=""
-}
-# gone_pid: a pid the kernel no longer has, in $dead; fails when it came back at once.
-gone_pid() {
-  ( cd "${tmp_root}" && exec sleep 0 ) &
-  dead=$!
-  wait "${dead}" || true
-  ! kill -0 "${dead}" 2>/dev/null
+  [[ -z "${fixture}" ]] || got="${got}, and ${fixture}"
+  [[ -z "${locker}" ]] || stop "${locker}"
+  probe_tool=""; probe_file=""; probe_mode=""; probe_skip=""; probe_rc=""; fixture=""; locker=""
 }
 
 # start: a suite behind the records, in the background; $suite is its pid.
@@ -263,11 +281,16 @@ expect() { # ran|waited, label
   read_seen
   if [[ "${got}" == "$1" ]]; then pass "$2"; else fail "$2 (the suite: ${got})"; fi
 }
+# judged <label>: the row started by start held when the suite waited, in $got.
+judged() {
+  if [[ "${got}" == waited ]]; then pass "$1"; else fail "$1 (the suite: ${got})"; fi
+}
 # refuses <label> [<env>...]: the runner, started with env, refuses at once. It
-# exits 2, says it is not queueing and leaves the queue as it found it. One
-# that queues instead may never end, as the copy before the fix does with no ps
-# on PATH, so it is stopped once it says the slots are busy, or after a minute,
-# and the row says so.
+# exits 2, says it is not queueing and leaves the queue as it found it. With
+# $refusal set, what it says holds that text. One that queues instead may never
+# end, as the copy before the fix does with no ps on PATH, so it is stopped
+# once it says the slots are busy, or after a minute, and the row says so.
+refusal=""
 refuses() {
   local label="$1" env rc i refuser got="" before; shift
   rm -f "${tmp_root}/seen" "${tmp_root}/seen.calls"
@@ -292,6 +315,8 @@ refuses() {
     set -e
   fi
   read_seen
+  [[ -z "${refusal}" ]] || grep -qF -- "${refusal}" "${tmp_root}/err" || got="${got}, and it did not say '${refusal}'"
+  refusal=""
   if [[ "${rc}" == 2 && -z "${got}" ]] && grep -q 'not queueing' "${tmp_root}/err" \
     && [[ "$(ls "${home}/safedeps-runs/.queue")" == "${before}" ]]; then
     pass "${label}"
@@ -321,31 +346,18 @@ fi
 # --- a pid the kernel handed out again ----------------------------------------------
 fresh 1; ticket "${witness}" other "${other_id}"
 expect ran "a ticket ahead whose pid runs under another start is gone, and the suite behind it runs"
-fresh 1; slot "${witness}" "${other_id}"
-expect ran "a slot whose pid runs under another start is gone, and the suite takes it"
 
 # --- what is not known stays ----------------------------------------------------------
 fresh 1; ticket "${witness}" other "not an identity"
 expect waited "a ticket ahead whose record holds no start it can read is kept"
 fresh 1; ticket "${witness}" other
 expect waited "a ticket ahead written before records held a start is kept while its pid runs"
-fresh 1; slot "${witness}"
-expect waited "a slot written before records held a start is kept while its pid runs"
 
 # --- a read that fails part way gives nothing --------------------------------------------
 # What a cut-short read printed is no part of the record, however well formed.
-# The ticket's part names another start; the slot's part is the pid's first
-# digits, another pid.
+# The ticket's part names another start.
 fresh 1; ticket "${witness}" other "${other_id}"; cut_short sed "${record}" 2
 expect waited "a ticket ahead whose read fails part way is judged on its pid alone, and kept while the pid runs"
-if (( witness >= 20 )); then
-  fresh 1; slot "${witness}" "${witness_id}"; cut_short cat "${home}/safedeps-runs/.slot/pid" 2
-  expect waited "a slot whose pid read fails after its first digits is not taken"
-else
-  fail "a slot whose pid read fails after its first digits (the witness pid ${witness} has no first digits that are a pid)"
-fi
-fresh 1; slot "${witness}" "${other_id}"; cut_short cat "${home}/safedeps-runs/.slot/identity" 2
-expect waited "a slot whose start read fails part way is judged on its pid alone, and kept while the pid runs"
 # The list cut short leaves out the live ticket ahead.
 fresh 1; ticket "${witness}" other "${witness_id}"; fails ls "${home}/safedeps-runs/.queue" "${record##*/}"
 expect waited "a queue whose list fails part way leaves the suite's place not known, so it waits"
@@ -357,11 +369,11 @@ expect waited "a name in the queue that holds no pid is a ticket whose process i
 # --- every other step a verdict rests on ----------------------------------------------------
 # Before the runner holds a ticket, a step that fails leaves it without a value
 # it queues on, so it refuses and leaves the queue as it was.
-fresh 1; slot "${witness}" "${witness_id}"; fails cat "${home}/safedeps-runs/.slots"
+fresh 1; held .slot.lock; fails cat "${home}/safedeps-runs/.slots"
 refuses "a .slots whose read fails leaves N not known, so the runner refuses rather than take a second slot"
-fresh 1; slot "${witness}" "${witness_id}"; fails ls "${home}/safedeps-runs"
+fresh 1; held .slot.lock; fails ls "${home}/safedeps-runs"
 refuses "a runs directory whose list fails leaves it not known whether .slots is there, so the runner refuses"
-fresh 1; rm "${home}/safedeps-runs/.slots"; slot "${witness}" "${witness_id}"
+fresh 1; rm "${home}/safedeps-runs/.slots"; held .slot.lock
 expect ran "a runs directory that holds no .slots has two slots, so the suite takes the second beside a live holder"
 # What a failed dirname printed is no directory. The reader put there calls
 # every process gone, so a runner that asked it would run past a live ticket.
@@ -380,8 +392,8 @@ fresh 1; fails mkdir "${home}/safedeps-runs/.queue"
 refuses "a queue whose mkdir fails is not known to be there, so the runner refuses"
 fresh 1; fails mv "${home}/safedeps-runs/.queue/*"
 refuses "a ticket that cannot be put in the queue leaves no place to wait for, so the runner refuses"
-# Once it holds a ticket, a step that fails leaves its place or a holder not
-# known, so the suite waits.
+# Once it holds a ticket, a step that fails leaves its place not known or
+# takes no slot, so the suite waits.
 fresh 1; ticket "${witness}" other "${witness_id}"; fails sort ''
 expect waited "a sort of the queue that fails gives no order, even when it printed the tickets behind, so the suite waits"
 # The ticket ahead names the witness's pid plus 2^64, which an arithmetic read
@@ -392,151 +404,25 @@ printf '%s\n' other "${other_id}" > "${home}/safedeps-runs/.queue/$(( $(date +%s
 expect waited "a name with more digits than a pid holds names no process, not the pid they wrap onto, and is kept"
 fresh 1; ticket "${witness}" other "${witness_id}"; fails python3 "${witness}" gone
 expect waited "a kernel answer that fails is no answer, even when it printed gone, so a live ticket ahead is kept"
-fresh 1; slot "${witness}" "${witness_id}"; fails python3 "${witness}" gone
-expect waited "a kernel answer that fails is no answer, even when it printed gone, so a live holder's slot is not taken"
-fresh 1; fails mkdir "${home}/safedeps-runs/.slot"
-expect waited "a slot whose mkdir fails, with nothing there to read, is not taken"
-fresh 1; probe_mode=record; fails mkdir "${home}/safedeps-runs/.slot"
-start
-got=$(decided)
-stop "${suite}"
+# The lock call is the one step that takes a slot. One that fails for any
+# reason but a holder takes nothing, and the runner says why; 1 is a holder.
+fresh 1; fails perl '' "No locks available"; probe_rc=2
+start; got=$(decided); stop "${suite}"
+grep -qF "the lock call on ${home}/safedeps-runs/.slot.lock ended 2: No locks available" "${tmp_root}/err" \
+  || got="${got}, and it did not say why"
 read_seen
-[[ ! -e "${home}/safedeps-runs/.slot" ]] || got="${got}, and the slot is left"
-if [[ "${got}" == waited ]]; then
-  pass "a slot whose record cannot be written is given back, and the suite waits"
-else
-  fail "a slot whose record cannot be written is given back, and the suite waits (the suite: ${got})"
-fi
-if gone_pid; then
-  # Removing the ticket fails at its first step, which is rm of its name, or mv
-  # of its name to a name of the runner's own when it claims it first.
-  fresh 1; ticket "${dead}" other "${witness_id}"; fails "rm mv" "${record}"
-  expect ran "a gone ticket ahead that cannot be removed is still gone, and the suite behind it runs"
-  fresh 1; slot "${dead}"; fails rm "${home}/safedeps-runs/.slot"
-  expect waited "a gone holder's slot that cannot be removed is not taken"
-  # Another run takes the slot between this run's removal of it and its mkdir:
-  # the first mkdir, which finds the gone holder's slot, is not the failing one.
-  fresh 1; slot "${dead}"; taken "${home}/safedeps-runs/.slot"
-  start
-  got=$(decided)
-  stop "${suite}"
-  read_seen
-  [[ "$(cat "${home}/safedeps-runs/.slot/pid" 2>/dev/null)" == "${witness}" ]] || got="${got}, and the slot is not the other run's"
-  if [[ "${got}" == waited ]]; then
-    pass "a gone holder's slot that another run makes again first stays that run's, and the suite waits"
-  else
-    fail "a gone holder's slot that another run makes again first stays that run's, and the suite waits (the suite: ${got})"
-  fi
-else
-  fail "a pid the kernel no longer has (pid ${dead} came back at once)"
-fi
-
-# --- a removal acts on what it judged, never on what another run made since ---------------
-# Two waiters can judge one gone record at once, and one of them removes it and
-# puts its own in its place before the other removes. In these rows the other
-# run acts at a hook on the step between this suite's judgment and its removal,
-# so the order is the row's and not the scheduler's.
-# judged <label>: the row started by start held when the suite waited, in $got.
-judged() {
-  if [[ "${got}" == waited ]]; then pass "$1"; else fail "$1 (the suite: ${got})"; fi
-}
-# What it finds goes into $got, and it ends 0 whatever it finds: a read of a
-# slot that is gone fails, and under errexit that would end the battery.
-slot_is() { # pid [identity]: .slot holds that record, whole, and no claim is left in it
-  local L="${home}/safedeps-runs/.slot" pid
-  pid=$(cat "${L}/pid" 2>/dev/null) || pid=""
-  if [[ "${pid}" != "$1" ]]; then got="${got}, and .slot's pid is '${pid}', not $1"; return 0; fi
-  [[ $# -lt 2 || "$(cat "${L}/identity" 2>/dev/null)" == "$2" ]] || got="${got}, and .slot's identity is not the one it held"
-  [[ -z "$(ls -A "${L}" | grep -v -x -e pid -e identity -e owner || true)" ]] || got="${got}, and .slot holds $(ls -A "${L}" 2>/dev/null | tr '\n' ' ' || true)"
-  return 0
-}
-if gone_pid; then
-  # Both waiters judge the gone holder's .slot. The other one, a runner of its
-  # own, removes it and takes the slot while this suite asks the kernel about
-  # the gone holder. .slot2 is held by a live process, so .slot is the one both
-  # want. The failure is two runs on one slot.
-  fresh 2; slot "${dead}" "${other_id}"; slot_in .slot2 "${witness}" "${witness_id}"
-  rm -f "${tmp_root}/other-ran" "${tmp_root}/other.pid" "${tmp_root}/other-release" "${tmp_root}/other.err"
-  hook python3 "${dead}" < <(
-    printf '( cd %q && HOME=%q exec %q other bash -c %q _ %q %q %q ) < /dev/null > /dev/null 2> %q &\n' \
-      "${tmp_root}" "${home}" "${home}/safedeps-runs/slot.sh" ': > "$1"; while [ ! -e "$2" ]; do sleep 0.1; done' \
-      "${tmp_root}/other-ran" "${tmp_root}/other-release" "${MARK}" "${tmp_root}/other.err"
-    printf 'printf "%%s\\n" "$!" > %q\n' "${tmp_root}/other.pid"
-    printf 'for (( i = 0; i < 600; i++ )); do [[ -e %q ]] && break; sleep 0.1; done\n' "${tmp_root}/other-ran")
-  start
-  got=$(decided)
-  other=$(cat "${tmp_root}/other.pid" 2>/dev/null || true)
-  [[ -z "${other}" ]] || children+=("${other}")
-  if [[ ! -e "${tmp_root}/other-ran" ]]; then
-    got="${got}, and the other waiter never took the slot: $(head -c 200 "${tmp_root}/other.err" 2>/dev/null | tr '\n' ' ' || true)"
-  else
-    [[ "${got}" != ran ]] || got="${got} while the other waiter held .slot, so two runs held one slot"
-    slot_is "${other}"
-  fi
-  stop "${suite}"
-  read_seen
-  : > "${tmp_root}/other-release"
-  [[ -z "${other}" ]] || stop "${other}"
-  judged "two waiters that judge one gone slot: the one that takes it first keeps it, and the other waits"
-
-  # Each step between the claim and the removal fails.
-  fresh 1; slot "${dead}" "${other_id}"; fails mv "${home}/safedeps-runs/.slot/pid"
-  start; got=$(decided); stop "${suite}"; read_seen; slot_is "${dead}" "${other_id}"
-  judged "a gone holder's slot that cannot be claimed is not removed, and the suite waits"
-  fresh 1; slot "${dead}" "${other_id}"; fails cat "${home}/safedeps-runs/.slot/.reap-*" "${dead%?}"
-  start; got=$(decided); stop "${suite}"; read_seen; slot_is "${dead}" "${other_id}"
-  judged "a claimed slot whose pid read fails part way gets its pid back, and is not removed"
-  fresh 1; slot "${dead}" "${other_id}"; fails python3 "${dead}" gone; probe_skip=1
-  start; got=$(decided); stop "${suite}"; read_seen; slot_is "${dead}" "${other_id}"
-  judged "a claimed slot whose kernel answer fails gets its pid back, even when the answer printed gone"
-  fresh 1; slot "${dead}" "${other_id}"; fails rm "${home}/safedeps-runs/.slot"
-  start; got=$(decided); stop "${suite}"; read_seen; slot_is "${dead}" "${other_id}"
-  judged "a claimed gone slot that cannot be removed gets its pid back, whole"
-  # The claimed slot is removed and made again by another run while its start
-  # is read, so the start read is the new holder's and the pid the gone one's.
-  fresh 1; slot "${dead}" "${other_id}"
-  L="${home}/safedeps-runs/.slot"
-  hook cat "${L}/identity" 1 < <(
-    printf 'rm -rf %q && mkdir %q && printf "%%s\\n" %q > %q && printf "%%s\\n" %q > %q && printf "other since 00:00:00\\n" > %q\n' \
-      "${L}" "${L}" "${witness_id}" "${L}/identity" "${witness}" "${L}/pid" "${L}/owner")
-  start; got=$(decided); stop "${suite}"; read_seen; slot_is "${witness}" "${witness_id}"
-  judged "a claimed slot made again while it is judged is not removed: the judgment counts only while the claim is there"
-
-  # A claimed ticket whose kernel answer fails, and one that cannot be removed.
-  fresh 1; ticket "${dead}" other "${witness_id}"; fails python3 "${dead}" gone; probe_skip=1
-  start; got=$(decided); stop "${suite}"; read_seen
-  [[ "$(sed -n 2p "${record}" 2>/dev/null)" == "${witness_id}" ]] || got="${got}, and the ticket is not back"
-  judged "a claimed ticket whose kernel answer fails is put back and kept, even when the answer printed gone"
-  fresh 1; ticket "${dead}" other "${witness_id}"; fails rm "${home}/safedeps-runs/.queue/.reap-*"
-  expect ran "a claimed gone ticket that cannot be removed is still gone, and the suite behind it runs"
-else
-  fail "a pid the kernel no longer has (pid ${dead} came back at once)"
-fi
-# The slot ahead names the witness's pid under another start, so it is judged
-# gone; the start read after the claim fails, so the pid alone is judged, and
-# it runs.
-fresh 1; slot "${witness}" "${other_id}"; fails cat "${home}/safedeps-runs/.slot/identity" "${other_id}"; probe_skip=1
-start; got=$(decided); stop "${suite}"; read_seen; slot_is "${witness}" "${other_id}"
-judged "a claimed slot whose start read fails is judged on its pid alone, and a running pid gets its slot back"
-# The ticket ahead names the witness's pid under another start: a run gone
-# before a reboot whose pid came back. While this suite asks the kernel about
-# it, a run that has that pid now queues in the same second, and its mv puts
-# its own ticket under the same name. That ticket is a live run's place.
-fresh 1; ticket "${witness}" other "${other_id}"
-hook python3 "${witness}" < <(printf 'printf "%%s\\n" other %q > %q && mv -f %q %q\n' \
-  "${witness_id}" "${home}/safedeps-runs/.queue/.next" "${home}/safedeps-runs/.queue/.next" "${record}")
-start; got=$(decided); stop "${suite}"; read_seen
-[[ "$(sed -n 2p "${record}" 2>/dev/null)" == "${witness_id}" ]] || got="${got}, and the live run's ticket is gone"
-judged "a ticket judged gone that a live run puts its own under the same name before it is removed stays, and the suite waits"
-fresh 1; ticket "${witness}" other "${other_id}"; fails sed "${home}/safedeps-runs/.queue/.reap-*" "other${nl}${other_id}"
-start; got=$(decided); stop "${suite}"; read_seen
-[[ "$(sed -n 2p "${record}" 2>/dev/null)" == "${other_id}" ]] || got="${got}, and the ticket is not back"
-judged "a claimed ticket whose read fails part way is judged on its pid alone, and a running pid's ticket is put back"
+judged "a lock call that fails takes no slot, says why, and the suite waits"
+# A directory where the slot's file goes cannot be opened for writing.
+fresh 1; mkdir "${home}/safedeps-runs/.slot.lock"
+start; got=$(decided); stop "${suite}"
+grep -qF "${home}/safedeps-runs/.slot.lock could not be opened" "${tmp_root}/err" || got="${got}, and it did not say why"
+read_seen
+judged "a slot whose file cannot be opened is not taken, the runner says so, and the suite waits"
 
 # --- as before --------------------------------------------------------------------------
 fresh 1; ticket "${witness}" other "${witness_id}"
 expect waited "a ticket ahead whose process runs keeps the suite behind it waiting"
-fresh 1; slot "${witness}" "${witness_id}"
+fresh 1; held .slot.lock
 expect waited "a slot whose process runs is not taken"
 
 ( cd "${tmp_root}" && exec sleep 0 ) &
@@ -549,9 +435,14 @@ else
   expect ran "a ticket ahead whose pid the kernel no longer has is gone"
   fresh 1; ticket "${ended}" other "${other_id}"; cut_short sed "${record}" 2
   expect ran "a ticket ahead whose read fails part way is still gone when the kernel has no such pid"
-  # What a run killed before records held a start leaves, as a reboot does.
-  fresh 1; slot "${ended}"
-  expect ran "a slot written before records held a start is taken once the kernel has no such pid"
+  # No run removes a ticket but its own, so a gone one stays where it is, and
+  # the look that passed it over says how many it passed.
+  fresh 1; ticket "${ended}" other "${witness_id}"
+  start; got=$(decided); stop "${suite}"; read_seen
+  [[ -e "${record}" ]] || got="${got}, and the gone ticket was removed"
+  grep -qF "passed over in ${home}/safedeps-runs/.queue: 1 " "${tmp_root}/err" || got="${got}, and it did not say it passed over 1"
+  label="a gone ticket ahead is passed over, left where it is and counted in what the runner says, and the suite behind it runs"
+  if [[ "${got}" == ran ]]; then pass "${label}"; else fail "${label} (the suite: ${got})"; fi
 fi
 
 # A zombie: a child that ends after its parent became a sleep, which never
@@ -573,23 +464,25 @@ fi
 
 # A suite that holds the slot, and one behind it that runs once it is given back.
 fresh 1
+rm -f "${tmp_root}/holding" "${tmp_root}/release"
 ( cd "${tmp_root}" && HOME="${home}" exec "${home}/safedeps-runs/slot.sh" holder \
-    bash -c 'while [ ! -e "$1" ]; do sleep 0.1; done' _ "${tmp_root}/release" "${MARK}" ) 2> /dev/null &
+    bash -c ': > "$1"; while [ ! -e "$2" ]; do sleep 0.1; done' _ "${tmp_root}/holding" "${tmp_root}/release" "${MARK}" ) 2> /dev/null &
 holder=$!
 children+=("${holder}")
-for (( i = 0; i < 600; i++ )); do [[ -e "${home}/safedeps-runs/.slot/owner" ]] && break; sleep 0.1; done
+for (( i = 0; i < 600; i++ )); do [[ -e "${tmp_root}/holding" ]] && break; sleep 0.1; done
 start
 got=$(decided)
+L="${home}/safedeps-runs/.slot.lock"
 if [[ "${got}" == waited ]]; then
   : > "${tmp_root}/release"
   # The waiter looks again every 10 seconds.
   for (( i = 0; i < 600; i++ )); do [[ -e "${tmp_root}/ran" ]] && break; sleep 0.1; done
   wait "${holder}" 2>/dev/null || true
   wait "${suite}" 2>/dev/null || true
-  if [[ -e "${tmp_root}/ran" && ! -e "${home}/safedeps-runs/.slot" && -z "$(ls "${home}/safedeps-runs/.queue")" ]]; then
-    pass "a suite behind a holder waits, then runs once the holder gives the slot back, and leaves nothing"
+  if [[ -e "${tmp_root}/ran" && ! -s "${L}" && -z "$(ls "${home}/safedeps-runs/.queue")" ]] && is_free "${L}"; then
+    pass "a suite behind a holder waits, then runs once the holder gives the slot back, and leaves the slot free, its label empty and no ticket"
   else
-    fail "a suite behind a holder runs once the holder is done (ran: $([[ -e "${tmp_root}/ran" ]] && echo yes || echo no), slot left: $([[ -e "${home}/safedeps-runs/.slot" ]] && echo yes || echo no), queue: $(ls "${home}/safedeps-runs/.queue" | wc -l | tr -d ' '))"
+    fail "a suite behind a holder runs once the holder is done (ran: $([[ -e "${tmp_root}/ran" ]] && echo yes || echo no), free: $(is_free "${L}" && echo yes || echo no), label: '$(cat "${L}" 2>/dev/null || true)', queue: $(ls "${home}/safedeps-runs/.queue" | wc -l | tr -d ' '))"
   fi
 else
   stop "${suite}"
@@ -598,7 +491,85 @@ fi
 : > "${tmp_root}/release"
 stop "${holder}"
 
-# --- a look acts only through what holds the slot -----------------------------------------
+# --- the kernel holds the slots ---------------------------------------------------------
+# A runner and its suite killed by SIGKILL run no trap, and leave their label
+# and their ticket. The kernel lets go of the lock all the same, once the last
+# open of the file is gone.
+fresh 1
+rm -f "${tmp_root}/killed.pid"
+( cd "${tmp_root}" && HOME="${home}" exec "${home}/safedeps-runs/slot.sh" killed \
+    bash -c 'printf "%s\n" "$$" > "$1.t" && mv "$1.t" "$1"; exec -a "$2" sleep 600' _ "${tmp_root}/killed.pid" "${MARK}" ) 2> /dev/null &
+runner=$!
+children+=("${runner}")
+for (( i = 0; i < 600; i++ )); do [[ -e "${tmp_root}/killed.pid" ]] && break; sleep 0.1; done
+killed=$(cat "${tmp_root}/killed.pid" 2>/dev/null || true)
+label="a slot whose runner was killed with its suite is taken: the kernel let go of its lock, and the label left behind decides nothing"
+if [[ -z "${killed}" ]]; then
+  fail "${label} (the killed runner's suite never started)"
+else
+  children+=("${killed}")
+  kill -9 "${killed}" "${runner}" 2>/dev/null || true
+  wait "${runner}" 2>/dev/null || true
+  for (( i = 0; i < 600; i++ )); do kill -0 "${killed}" 2>/dev/null || break; sleep 0.1; done
+  expect ran "${label}"
+fi
+# What a slot's file holds is a label, and a label is no holder.
+fresh 1; printf 'other since 00:00:00\n' > "${home}/safedeps-runs/.slot.lock"
+expect ran "a slot whose file holds the label of a run that is gone, and whose lock no process holds, is taken"
+# Two runs ask for one free slot at once. The other one, a runner of its own,
+# takes it just before this suite's lock call: a hook on that call starts the
+# other runner and waits until its suite runs. The second slot is held
+# throughout, so the first is the one both want. The failure is two runs on
+# one slot.
+fresh 2; held .slot2.lock
+rm -f "${tmp_root}/other-ran" "${tmp_root}/other.pid" "${tmp_root}/other-release" "${tmp_root}/other.err"
+hook perl '' < <(
+  printf '( cd %q && HOME=%q exec %q other bash -c %q _ %q %q %q ) < /dev/null > /dev/null 2> %q &\n' \
+    "${tmp_root}" "${home}" "${home}/safedeps-runs/slot.sh" ': > "$1"; while [ ! -e "$2" ]; do sleep 0.1; done' \
+    "${tmp_root}/other-ran" "${tmp_root}/other-release" "${MARK}" "${tmp_root}/other.err"
+  printf 'printf "%%s\\n" "$!" > %q\n' "${tmp_root}/other.pid"
+  printf 'for (( i = 0; i < 600; i++ )); do [[ -e %q ]] && break; sleep 0.1; done\n' "${tmp_root}/other-ran")
+start
+got=$(decided)
+other=$(cat "${tmp_root}/other.pid" 2>/dev/null || true)
+[[ -z "${other}" ]] || children+=("${other}")
+if [[ ! -e "${tmp_root}/other-ran" ]]; then
+  got="${got}, and the other run never took the slot: $(head -c 200 "${tmp_root}/other.err" 2>/dev/null | tr '\n' ' ' || true)"
+else
+  [[ "${got}" != ran ]] || got="${got} while the other run held .slot.lock, so two runs held one slot"
+  ! is_free "${home}/safedeps-runs/.slot.lock" || got="${got}, and the slot the other run took was free"
+fi
+stop "${suite}"
+read_seen
+: > "${tmp_root}/other-release"
+[[ -z "${other}" ]] || stop "${other}"
+judged "two runs that ask for one free slot: the one whose lock call comes first keeps it, and the other waits"
+# The suite shares the runner's open of the slot's file. A runner killed while
+# its suite runs leaves the slot to the suite until the suite ends.
+fresh 1
+rm -f "${tmp_root}/kept.pid" "${tmp_root}/kept-end"
+( cd "${tmp_root}" && HOME="${home}" exec "${home}/safedeps-runs/slot.sh" kept \
+    bash -c 'printf "%s\n" "$$" > "$1.t" && mv "$1.t" "$1"; while [ ! -e "$2" ]; do sleep 0.1; done' \
+    _ "${tmp_root}/kept.pid" "${tmp_root}/kept-end" "${MARK}" ) 2> /dev/null &
+runner=$!
+children+=("${runner}")
+for (( i = 0; i < 600; i++ )); do [[ -e "${tmp_root}/kept.pid" ]] && break; sleep 0.1; done
+kept=$(cat "${tmp_root}/kept.pid" 2>/dev/null || true)
+if [[ -z "${kept}" ]]; then
+  got="none: the holder's suite never started"
+else
+  children+=("${kept}")
+  kill -9 "${runner}" 2>/dev/null || true
+  wait "${runner}" 2>/dev/null || true
+  start; got=$(decided); stop "${suite}"; read_seen
+  kill -0 "${kept}" 2>/dev/null || got="${got}, and the holder's suite was not running"
+  : > "${tmp_root}/kept-end"
+  for (( i = 0; i < 600; i++ )); do kill -0 "${kept}" 2>/dev/null || break; sleep 0.1; done
+  is_free "${home}/safedeps-runs/.slot.lock" || got="${got}, and the slot was still held once that suite ended"
+fi
+: > "${tmp_root}/kept-end"
+judged "a runner killed while its suite runs leaves the slot to the suite until it ends, and a suite behind it waits"
+
 # moongchi's handoff (the checkpoint of slot-stale-lock-race-1124) as a row.
 # The first slot is free to take, and the second is held by a live process
 # throughout, so one run at a time can run. B looks at the first slot and is
@@ -635,32 +606,6 @@ EOF
   } > "${pause}/${tool}"
   chmod +x "${pause}/${tool}"
 done
-cat > "${tmp_root}/lock-holder" <<'EOF'
-#!/bin/bash
-# lock-holder <file> <ready> <marker>: holds a lock on file the way a runner
-# holds its slot, its shell's open of the file on fd 9 and flock(2) on that
-# descriptor by perl, until it is killed.
-exec 9>> "$1" || exit 2
-perl -MFcntl=:flock -e 'open(my $h, ">>&=", 9) or exit 2; flock($h, LOCK_EX | LOCK_NB) or exit 1' || exit 1
-: > "$2"
-exec -a "$3" sleep 600
-EOF
-chmod +x "${tmp_root}/lock-holder"
-# lock_held <file>: a live process of this battery's own holds the lock on
-# file, and $locker is its pid.
-lock_held() {
-  local i
-  rm -f "${tmp_root}/locked"
-  ( cd "${tmp_root}" && exec "${tmp_root}/lock-holder" "$1" "${tmp_root}/locked" "${MARK}" ) 2> /dev/null &
-  locker=$!
-  children+=("${locker}")
-  for (( i = 0; i < 600; i++ )); do
-    [[ -e "${tmp_root}/locked" ]] && return 0
-    kill -0 "${locker}" 2>/dev/null || return 1
-    sleep 0.1
-  done
-  return 1
-}
 # launch <name> [<dir>]: a runner named name in the background, with dir
 # first on its PATH when given. Its suite marks $H/entered-<name> and runs
 # until $H/end-<name> appears. $launched is the runner's pid, and what it
@@ -725,10 +670,11 @@ got=""; A=""; B=""; C=""; locker=""
 handoff
 for f in go-claim go-check go-lock end-A end-B end-C; do : > "${H}/${f}"; done
 for p in "${B}" "${C}" "${A}" "${locker}"; do [[ -z "${p}" ]] || stop "${p}"; done
+locker=""
 label="a waiter that acts on its look after A took the slot, ran and ended, and C took it, does not run beside C"
 if [[ -z "${got}" ]]; then pass "${label}"; else fail "${label} (${got})"; fi
 
-# --- a run the kernel cannot name does not queue ------------------------------------------
+# --- a run that cannot name itself or take a lock does not queue ---------------------------
 fresh 1
 bin="${tmp_root}/bin-${row}"
 mkdir -p "${bin}"
@@ -737,6 +683,14 @@ for tool in bash cat date dirname ls mkdir mv rm sed sleep sort tr wc; do
 done
 # The copy before the fix, with no ps on PATH, drops its own ticket and waits.
 refuses "with no reader for its own start the runner refuses, and takes no ticket" PATH="${bin}"
+fresh 1
+bin="${tmp_root}/bin-${row}"
+mkdir -p "${bin}"
+for tool in bash cat date dirname ls mkdir mv python3 rm sed sleep sort tr wc; do
+  ln -s "$(command -v "${tool}")" "${bin}/${tool}"
+done
+refusal="no perl"
+refuses "with no perl to take a slot's lock the runner refuses, and takes no ticket" PATH="${bin}"
 
 # --- the installed copy names its source ---------------------------------------------------
 want_slot="# installed from scripts/ci/slot.sh sha256 $(sha "${ROOT_DIR}/scripts/ci/slot.sh")"

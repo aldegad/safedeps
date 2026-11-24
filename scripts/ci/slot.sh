@@ -8,47 +8,52 @@
 # one slot, e.g. on battery below 40% with a small charger).
 # usage: slot.sh <owner> <command...>
 #
-# A waiter takes a ticket in ~/safedeps-runs/.queue, named by time, then pid,
-# that holds its owner and then its identity. Only a ticket among the first N
-# live tickets may take a slot, so a poller cannot jump the queue. Slots are
-# the lock dirs ~/safedeps-runs/.slot and .slot2, each holding the holder's
-# identity, pid and owner.
+# The kernel holds the slots. They are the files ~/safedeps-runs/.slot.lock and
+# .slot2.lock. This run's shell opens a slot's file on fd 9, and perl takes
+# flock(2) on that descriptor, LOCK_EX|LOCK_NB, and exits. The lock belongs to
+# the open file, which the shell and the suite it starts share, so it lasts
+# until the last of them is gone, however they end, and then the kernel lets
+# go of it. A process the suite leaves running shares it too, and holds the
+# slot until it ends. That one call takes a slot or is told another holds it,
+# so no run judges whether a holder is gone, and nothing a run could remove
+# says that a slot is held. The files are never removed: a file removed while
+# held would let a second run make a new one and lock that. What a file holds
+# is a label, "<owner> since <time>", which no verdict reads. The watch lock,
+# lib/watch/lock.sh, is the same primitive.
 #
-# A process is its pid and the start the kernel stored when it forked, and
-# `running` in native_budget_owners.py answers whether the process a record
-# names still runs. That file is installed beside this one, in slot-lib/, or
-# read from the repository's scripts/test/lib/. A ticket or a slot is removed
-# only when its process is gone on a fact: the kernel has no such pid, it holds
-# a zombie, or it holds another start under the pid. A pid the kernel hands out
-# again after a reboot is the third fact. A record with no start that can be
-# read is gone only on the first two, and what is not known stays. So this run
-# does not queue when the kernel cannot name it.
+# A waiter takes a ticket in ~/safedeps-runs/.queue, named by time, then pid,
+# that holds its owner and then its identity, and removes it when it ends.
+# Only a run among the first N live tickets asks for a slot, so a poller
+# cannot jump the queue. A process is its pid and the start the kernel stored
+# when it forked, and `running` in native_budget_owners.py answers whether
+# the process a ticket names still runs. That file is installed beside this
+# one, in slot-lib/, or read from the repository's scripts/test/lib/. A ticket
+# is passed over when its process is gone on a fact: the kernel has no such
+# pid, it holds a zombie, or it holds another start under the pid. A pid the
+# kernel hands out again after a reboot is the third fact. A ticket with no
+# start that can be read is gone only on the first two, and what is not known
+# stays ahead. So this run does not queue when the kernel cannot name it. No
+# run removes a ticket but its own: one whose run was killed stays and is
+# passed over on every look, and a look says on a line of its own how many it
+# passed over whenever that number changes. The queue only orders the runs;
+# the lock alone keeps two of them off one slot.
+#
+# A known boundary of the order: a live run can put its ticket under a gone
+# ticket's name only with the same second and pid, as a clock set back after
+# a reboot allows. A look that read the gone ticket just before then lets this
+# run go ahead of that one once. The lock still keeps one run per slot.
 #
 # A value a verdict rests on is used only when every step that made it ended
 # 0: where the reader is, N, this run's start, the clock, this run's ticket,
-# the queue's list and its order, a record, the kernel's answer, the claim of a
-# record judged gone, and the record of the slot this run takes. A step that
-# fails gives nothing, even after it printed part of an answer. So a pipeline
-# fails when any of its commands fails, and each such value is a plain
-# assignment whose status is read where it is made, never a substitution
-# inside a word or a list. Before this run holds a ticket, a value it cannot
-# know means it does not queue (exit 2); after, it waits and looks again. A
-# ticket whose start cannot be read is judged on its pid, which is its name,
-# alone, and a name that holds no pid is a ticket whose process is not known.
-# A slot whose pid cannot be read stays, and a slot whose record this run
-# cannot write is given back.
-#
-# A waiter removes only the record it judged gone, and never one another run
-# made since. Two waiters can judge one gone record at once, and the first to
-# remove it puts its own in its place. So a waiter first claims what it judged
-# with a rename to a name of its own: the slot's pid file inside the slot, the
-# ticket inside the queue, where ls does not list a name that starts with a
-# dot. One rename of a name can succeed, so two waiters cannot both claim it,
-# and a claimed slot stays where it is, so no run can make it again. Then the
-# waiter judges what it claimed, the pid it moved and the start read while the
-# claim is still there, and removes it only when that process is gone. A record
-# it claimed that is not known to be gone goes back under its name. So the
-# record another run put there stays, and is judged again on the next look.
+# the queue's list and its order, a ticket's record, the kernel's answer, the
+# open of a slot's file and the lock call. A step that fails gives nothing,
+# even after it printed part of an answer. So a pipeline fails when any of its
+# commands fails, and each such value is a plain assignment whose status is
+# read where it is made, never a substitution inside a word or a list. Before
+# this run holds a ticket, a value it cannot know means it does not queue
+# (exit 2); after, it waits and looks again. A ticket whose start cannot be
+# read is judged on its pid, which is its name, alone, and a name that holds
+# no pid is a ticket whose process is not known.
 set -o pipefail
 B="$HOME/safedeps-runs"; Q="$B/.queue"; owner="$1"; shift
 nl=$'\n'
@@ -73,45 +78,16 @@ else:
     print({True: "running", False: "gone", None: "unknown"}[owners.running({"pid": int(sys.argv[3]), "identity": sys.argv[4]})])' \
     "$LIB" "$@" 2>/dev/null
 }
-# gone <pid> <identity>: whether the record's process is gone on a fact. A pid
+# gone <pid> <identity>: whether the ticket's process is gone on a fact. A pid
 # that is not a number names no process.
 gone() {
   local said
   case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
   said=$(kernel running "$1" "$2") && [ "$said" = gone ]
 }
-# reap <slot>: removes a slot judged gone, and succeeds only when it did. It
-# claims the slot by moving the pid file to .reap-<this pid> inside it, then
-# judges the pid it moved and the start beside it. The start counts only when
-# the claim is still there after it is read: a run that removes the slot and
-# makes it again in the meantime takes the claim with it. A claimed slot whose
-# process is not known to be gone gets its pid file back.
-reap() {
-  local c="$1/.reap-$$" p who
-  mv "$1/pid" "$c" 2>/dev/null || return 1
-  if p=$(cat "$c" 2>/dev/null); then
-    who=$(cat "$1/identity" 2>/dev/null) || who=""
-    [ -e "$c" ] && gone "$p" "$who" && rm -rf "$1" && return 0
-  fi
-  mv "$c" "$1/pid" 2>/dev/null
-  return 1
-}
-# reap_ticket <name> <pid>: removes a ticket judged gone. It fails only when the
-# ticket it claimed there is not known to be gone and went back, so that ticket
-# is still in the queue. The claim moves the ticket to .reap-<this pid> in the
-# queue, and the judgment is made again on the ticket it moved, under the pid
-# the name holds. A claim that fails leaves nothing under the name for this
-# run to remove, and the ticket stays gone on the record already read.
-reap_ticket() {
-  local c="$Q/.reap-$$" who
-  mv "$Q/$1" "$c" > /dev/null 2>&1 || return 0
-  who=$(sed -n 2p "$c" 2>/dev/null) || who=""
-  if gone "$2" "$who"; then rm -f "$c" > /dev/null 2>&1; return 0; fi
-  mv "$c" "$Q/$1" > /dev/null 2>&1
-  return 1
-}
 ME=$(kernel identity $$) && [ -n "$ME" ] ||
   refuse "the kernel gave no start for this run (pid $$, reader $LIB/native_budget_owners.py), so a later process under the same pid could pass for it"
+command -v perl > /dev/null || refuse "no perl on PATH, so this run could not take a slot's lock"
 now=$(date +%s) || now=""
 case "$now" in ''|*[!0-9]*)
   refuse "the clock gave no time for this run's ticket, so its place in the queue is not known" ;;
@@ -126,68 +102,71 @@ case "$nl$listing$nl" in
   *) N=2 ;;
 esac
 case "$N" in 1|2) ;; *) N=2 ;; esac
-SLOTS="$B/.slot"; [ "$N" = 2 ] && SLOTS="$B/.slot $B/.slot2"
+SLOTS="$B/.slot.lock"; [ "$N" = 2 ] && SLOTS="$B/.slot.lock $B/.slot2.lock"
 printf -v t '%s/%s-%07d' "$Q" "$now" "$$" || refuse "the name of this run's ticket could not be made"
 trap 'rm -f "$t" "$B/.ticket-$$"' EXIT
 printf '%s\n%s\n' "$owner" "$ME" > "$B/.ticket-$$" && mv "$B/.ticket-$$" "$t" ||
   refuse "its ticket could not be put in $Q, so it has no place to wait for"
 # my_pos: this run's place among the live tickets, by name, so by time and then
-# pid. It prints a place only when every step it rests on ended 0, and fails
-# otherwise: the list and its order, and for each ticket ahead its record and
-# the kernel's answer. It runs in a command substitution, so the noglob and
-# the IFS it sets stay there, and each line of the list is one name.
+# pid, and after it the number of gone tickets ahead that it passed over. It
+# prints them only when every step it rests on ended 0, and fails otherwise:
+# the list and its order, and for each ticket ahead its record and the
+# kernel's answer. It runs in a command substitution, so the noglob and the
+# IFS it sets stay there, and each line of the list is one name.
 my_pos() {
-  local f p who sorted i=0 IFS="$nl"
+  local f p who sorted i=0 g=0 IFS="$nl"
   sorted=$(ls "$Q" 2>/dev/null | sort) || return 1
   set -f
   for f in $sorted; do
-    if [ "$f" = "${t##*/}" ]; then echo $((i + 1)); return; fi
+    if [ "$f" = "${t##*/}" ]; then echo "$((i + 1)) $g"; return; fi
     # The pid is the digits after the name's last dash, taken as text: read as
     # a number, a long one wraps onto another pid without a word.
     p=""; case "$f" in *-*) p=${f##*-} ;; esac
     p=${p#"${p%%[!0]*}"}
     case "$p" in ''|*[!0-9]*) i=$((i + 1)); continue ;; esac
     who=$(sed -n 2p "$Q/$f" 2>/dev/null) || who=""
-    if gone "$p" "$who" && reap_ticket "$f" "$p"; then :; else i=$((i + 1)); fi
+    if gone "$p" "$who"; then g=$((g + 1)); else i=$((i + 1)); fi
   done
   return 1
 }
-# take <slot>: whether this run now holds the slot. A slot whose process is
-# gone is removed and taken in the same look, so the runner does not report a
-# gone holder as busy. A slot this run could not remove after it judged it
-# gone is judged again, up to three times in a look.
+# take <slot file>: whether this run now holds the slot. It opens the file on
+# fd 9 and perl asks for the lock on that descriptor: 0 took it, 1 another
+# open holds it, and anything else is a call that failed, whose reason goes
+# into $why for the next message, as does a file that cannot be opened. Unless
+# it took the lock, it closes fd 9 again.
 take() {
-  local L="$1" p who try
-  for try in 1 2 3; do
-    if mkdir "$L" 2>/dev/null; then
-      # The slot is this run's once its record is written; others judge the
-      # holder by that record alone.
-      { printf '%s\n' "$ME" > "$L/identity" && echo $$ > "$L/pid"; } 2>/dev/null && return 0
-      echo "slot.sh: the record of $L could not be written, so the slot is given back — $(date +%T)" >&2
-      rm -rf "$L"
-      return 1
-    fi
-    p=$(cat "$L/pid" 2>/dev/null) || return 1
-    who=$(cat "$L/identity" 2>/dev/null) || who=""
-    gone "$p" "$who" || return 1
-    reap "$L"
-  done
+  local said rc
+  { exec 9>> "$1"; } 2> /dev/null || { why="$why $1 could not be opened;"; return 1; }
+  said=$(perl -MFcntl=:flock -e 'open(my $h, ">>&=", 9) or do { print STDERR "$!\n"; exit 2 };
+flock($h, LOCK_EX | LOCK_NB) and exit 0;
+$!{EWOULDBLOCK} and exit 1;
+print STDERR "$!\n"; exit 2' 2>&1)
+  rc=$?
+  [ "$rc" = 0 ] && return 0
+  exec 9>&-
+  [ "$rc" = 1 ] || why="$why the lock call on $1 ended $rc: $said;"
   return 1
 }
-MYL=""; announced=""
+MYL=""; announced=""; told=0
 while [ -z "$MYL" ]; do
-  pos=$(my_pos) || pos=""
+  why=""
+  look=$(my_pos) || look=""
+  pos=${look%% *}; passed=${look#* }
+  if [ -n "$look" ] && [ "$passed" != "$told" ]; then
+    echo "slot.sh: tickets of runs that are gone, passed over in $Q: $passed — $(date +%T)" >&2
+    told=$passed
+  fi
   if [ -n "$pos" ] && [ "$pos" -le "$N" ]; then
     for L in $SLOTS; do
       if take "$L"; then MYL="$L"; break; fi
     done
   fi
   [ -n "$MYL" ] && break
-  msg="slots busy: $(for L in $SLOTS; do cat "$L/owner" 2>/dev/null; done | tr '\n' ';'); queue position ${pos:-?} of $(ls "$Q" | wc -l | tr -d ' ')"
+  msg="slots busy: $(for L in $SLOTS; do cat "$L" 2>/dev/null; done | tr '\n' ';'); queue position ${pos:-?} of $(ls "$Q" | wc -l | tr -d ' ')${why:+;$why}"
   [ "$msg" = "$announced" ] || { echo "$msg — $(date +%T)" >&2; announced="$msg"; }
   sleep 10
 done
-echo "${owner} since $(date +%T)" > "$MYL/owner"
-trap 'rm -f "$t"; rm -rf "$MYL"' EXIT
+echo "${owner} since $(date +%T)" > "$MYL"
+trap 'rm -f "$t"; : > "$MYL"' EXIT
 trap 'exit 130' INT TERM
 "$@"
