@@ -252,7 +252,7 @@ rust/src/post/npm.rs	rebuild	human	report-entry	Report::rebuild	result-renderer	
 rust/src/post/npm.rs	record_inner	data	copy-or-publish	fs::rename	-	1
 rust/src/post/npm.rs	record_inner	data	raw-or-serialized	fs::write	-	1
 rust/src/post/npm.rs	record_inner	human	log-or-report	say	fixed-literal+other	3
-rust/src/post/npm.rs	record_inner	human	log-or-report	state::log_advisory	fixed-literal+other	5
+rust/src/post/npm.rs	record_inner	human	log-or-report	state::log_advisory	fixed-literal+other	6
 rust/src/post/npm.rs	sources	human	log-or-report	state::log_advisory	fixed-literal+other	2
 rust/src/post/process.rs	<module>	boundary	foreign-function	kill	-	1
 rust/src/post/process.rs	bsd	boundary	foreign-call	proc_pidinfo	-	1
