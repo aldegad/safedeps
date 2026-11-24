@@ -307,3 +307,210 @@ fn a_name_only_the_unread_tree_of_the_copy_lists_is_not_held() {
     assert_eq!(shown(&judge(Some(v2_with(&tops(&held, "1.0.0"), &both).as_bytes()), v3(&after).as_bytes())), shown(&counted(51)), "names only the copy's tree lists");
     assert_eq!(shown(&judge(Some(v3(&tops(&held, "1.0.0")).as_bytes()), v2_with(&tops(&held, "1.0.0"), &both).as_bytes())), shown(&counted(51)), "names only the tree after the command lists");
 }
+
+/// A validator's two probes, kept as the validator wrote them: 51 workspace
+/// members whose folders move while their names stay, and the control where
+/// the names change in the same folders. Each lock is one line here.
+fn workspace_lock(names: &[String], directory_prefix: &str) -> String {
+    let mut entries = vec![r#""":{"name":"fixture","workspaces":["packages/*"]}"#.to_owned()];
+    for (i, name) in names.iter().enumerate() {
+        let place = format!("packages/{directory_prefix}-{i:02}");
+        entries.push(format!(r#""node_modules/{name}":{{"resolved":"{place}","link":true}}"#));
+        entries.push(format!(r#""{place}":{{"name":"{name}","version":"1.0.0"}}"#));
+    }
+    format!(r#"{{"name":"fixture","lockfileVersion":3,"packages":{{{}}}}}"#, entries.join(","))
+}
+
+#[test]
+fn validator_workspace_directory_renames_add_no_packages() {
+    let members = names("@fixture/member-", 0..51);
+    let before = workspace_lock(&members, "old-folder");
+    let after = workspace_lock(&members, "new-folder");
+    let reasons = judge(Some(before.as_bytes()), after.as_bytes());
+    assert!(reasons.is_empty(), "51 directory renames, zero new package names: {:?}", shown(&reasons));
+}
+
+#[test]
+fn validator_workspace_name_change_control_counts_51_packages() {
+    let before = workspace_lock(&names("@fixture/old-", 0..51), "same-folder");
+    let after = workspace_lock(&names("@fixture/new-", 0..51), "same-folder");
+    let reasons = judge(Some(before.as_bytes()), after.as_bytes());
+    assert_eq!(shown(&reasons), shown(&counted(51)));
+}
+
+// Every shape of key and entry the two maps hold, and where the count reads a
+// name in each. A shape has two rows where both can be written: a name that
+// stays while its place changes, which adds no name, and a place that stays
+// while its name changes, which adds one. Each row changes 51 entries, so a
+// reading that takes a place for a name, or misses a name, lands on the wrong
+// side of the threshold. Where npm's own writing decides a row (the folders
+// it writes no `name` for, what it installs), the row is written as npm
+// writes it; the shapes are synthetic.
+
+/// The fields of one lock entry: each field's name and its JSON text.
+type Fields = Vec<(&'static str, String)>;
+type Entries = Vec<(String, Fields)>;
+
+fn q(s: &str) -> String { format!("\"{s}\"") }
+fn last(key: &str) -> &str { key.rsplit('/').next().unwrap_or(key) }
+fn each(f: impl Fn(&str) -> Entries) -> Entries { (0..51).flat_map(|i| f(&format!("{i:02}"))).collect() }
+
+/// An entry at `key`, with the `name` npm writes where the package's own name
+/// is not the one its folder gives, and these fields.
+fn entry(key: &str, name: Option<&str>, rest: Fields) -> Entries {
+    let mut fields: Fields = name.map(|n| vec![("name", q(n))]).unwrap_or_default();
+    fields.extend(rest);
+    vec![(key.to_owned(), fields)]
+}
+fn registry(key: &str, name: Option<&str>) -> Entries {
+    let real = name.unwrap_or(last(key));
+    entry(key, name, vec![("version", q("1.0.0")), ("resolved", q(&format!("https://registry.npmjs.org/{real}/-/{}-1.0.0.tgz", last(real)))), ("integrity", q(&format!("sha512-{real}")))])
+}
+fn git(key: &str, name: Option<&str>) -> Entries {
+    entry(key, name, vec![("version", q("1.0.0")), ("resolved", q(&format!("git+ssh://git@example.com/{}.git#0123456789abcdef0123456789abcdef01234567", last(key))))])
+}
+fn remote(key: &str, name: Option<&str>) -> Entries {
+    entry(key, name, vec![("version", q("1.0.0")), ("resolved", q(&format!("https://example.com/{}-1.0.0.tgz", last(key)))), ("integrity", q(&format!("sha512-{key}")))])
+}
+fn local(key: &str, name: Option<&str>) -> Entries {
+    entry(key, name, vec![("version", q("1.0.0")), ("resolved", q(&format!("file:tgz/{}-1.0.0.tgz", last(key)))), ("integrity", q(&format!("sha512-{key}")))])
+}
+/// A package another package's tarball carries: npm writes no source for it.
+fn bundled(key: &str, name: Option<&str>) -> Entries { entry(key, name, vec![("version", q("1.0.0")), ("inBundle", "true".into())]) }
+/// A link npm writes for a workspace member or a directory dependency.
+fn link(key: &str, dir: &str) -> Entries { entry(key, None, vec![("resolved", q(dir)), ("link", "true".into())]) }
+/// The folder a link points at.
+fn directory(dir: &str, name: Option<&str>) -> Entries { entry(dir, name, vec![("version", q("1.0.0"))]) }
+
+/// A lockfileVersion 3 lock: the project and these entries, in key order,
+/// one field per line.
+fn lock3(entries: &Entries) -> String {
+    let mut sorted: Vec<&(String, Fields)> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::from("{\n  \"name\": \"fixture\",\n  \"version\": \"1.0.0\",\n  \"lockfileVersion\": 3,\n  \"requires\": true,\n  \"packages\": {\n    \"\": {\n      \"name\": \"fixture\",\n      \"version\": \"1.0.0\"\n    }");
+    for (key, fields) in sorted {
+        let body: Vec<String> = fields.iter().map(|(k, v)| format!("      \"{k}\": {v}")).collect();
+        out.push_str(&format!(",\n    \"{key}\": {{\n{}\n    }}", body.join(",\n")));
+    }
+    out.push_str("\n  }\n}\n");
+    out
+}
+
+/// One entry of a `dependencies` tree: its name, its fields, and the entries
+/// nested under it.
+struct Node1 {
+    name: String,
+    fields: Fields,
+    nested: Vec<Node1>,
+}
+
+fn node1(name: &str, version: &str, more: Fields) -> Node1 {
+    let mut fields = vec![("version", q(version))];
+    fields.extend(more);
+    Node1 { name: name.into(), fields, nested: Vec::new() }
+}
+fn tree1(nodes: &[Node1], indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let rows: Vec<String> = nodes.iter().map(|n| {
+        let mut body: Vec<String> = n.fields.iter().map(|(k, v)| format!("{pad}  \"{k}\": {v}")).collect();
+        if !n.nested.is_empty() { body.push(format!("{pad}  \"dependencies\": {{\n{}\n{pad}  }}", tree1(&n.nested, indent + 4))); }
+        format!("{pad}\"{}\": {{\n{}\n{pad}}}", n.name, body.join(",\n"))
+    }).collect();
+    rows.join(",\n")
+}
+/// A lockfileVersion 1 lock: the `dependencies` tree of these entries.
+fn lock1(nodes: &[Node1]) -> String {
+    format!("{{\n  \"name\": \"fixture\",\n  \"version\": \"1.0.0\",\n  \"lockfileVersion\": 1,\n  \"requires\": true,\n  \"dependencies\": {{\n{}\n  }}\n}}\n", tree1(nodes, 4))
+}
+
+/// A row of the table: the shape, the change, the locks before and after the
+/// command, and how many names the change adds.
+struct Shape {
+    shape: &'static str,
+    change: &'static str,
+    before: String,
+    after: String,
+    adds: usize,
+}
+
+/// Packages held before and after: two packages others nest under, and two
+/// workspace members with their links.
+fn held() -> Entries {
+    [registry("node_modules/host", None), registry("node_modules/host-b", None), link("node_modules/ws-a", "packages/a"), directory("packages/a", Some("ws-a")), link("node_modules/ws-b", "packages/b"), directory("packages/b", Some("ws-b"))].concat()
+}
+fn map_row(shape: &'static str, change: &'static str, before: Entries, after: Entries, adds: usize) -> Shape {
+    Shape { shape, change, before: lock3(&[held(), before].concat()), after: lock3(&[held(), after].concat()), adds }
+}
+fn tree_row(shape: &'static str, change: &'static str, before: Vec<Node1>, after: Vec<Node1>, adds: usize) -> Shape {
+    let with_hosts = |mut nodes: Vec<Node1>| {
+        let (mut host, mut host_b) = (node1("host", "1.0.0", vec![]), node1("host-b", "1.0.0", vec![]));
+        let (under_host, under_b): (Vec<Node1>, Vec<Node1>) = nodes.drain(..).partition(|n| !n.name.starts_with("host-b/"));
+        let (under_host, top): (Vec<Node1>, Vec<Node1>) = under_host.into_iter().partition(|n| n.name.starts_with("host/"));
+        host.nested = under_host.into_iter().map(|mut n| { n.name = n.name["host/".len()..].into(); n }).collect();
+        host_b.nested = under_b.into_iter().map(|mut n| { n.name = n.name["host-b/".len()..].into(); n }).collect();
+        let mut all = vec![host, host_b];
+        all.extend(top);
+        lock1(&all)
+    };
+    Shape { shape, change, before: with_hosts(before), after: with_hosts(after), adds }
+}
+
+fn shapes() -> Vec<Shape> {
+    let mut rows = Vec::new();
+    type Make = fn(&str, Option<&str>) -> Entries;
+    for (shape, make) in [
+        ("packages: a registry package at node_modules/<name>", registry as Make),
+        ("packages: a git dependency", git as Make),
+        ("packages: a remote tarball", remote as Make),
+        ("packages: a local tarball", local as Make),
+    ] {
+        rows.push(map_row(shape, "the same name nested under another package", each(|i| make(&format!("node_modules/pkg-{i}"), None)), each(|i| make(&format!("node_modules/host/node_modules/pkg-{i}"), None)), 0));
+        rows.push(map_row(shape, "the same place holds another package (an alias)", each(|i| make(&format!("node_modules/pkg-{i}"), None)), each(|i| make(&format!("node_modules/pkg-{i}"), Some(format!("new-{i}").as_str()))), 51));
+    }
+    rows.push(map_row("packages: a scoped package", "the same name nested under another package", each(|i| registry(&format!("node_modules/@scope/pkg-{i}"), None)), each(|i| registry(&format!("node_modules/host/node_modules/@scope/pkg-{i}"), None)), 0));
+    rows.push(map_row("packages: a scoped package", "the same place holds another package (an alias)", each(|i| registry(&format!("node_modules/@scope/pkg-{i}"), None)), each(|i| registry(&format!("node_modules/@scope/pkg-{i}"), Some(format!("@scope/new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a nested package", "the same name under another package", each(|i| registry(&format!("node_modules/host/node_modules/pkg-{i}"), None)), each(|i| registry(&format!("node_modules/host-b/node_modules/pkg-{i}"), None)), 0));
+    rows.push(map_row("packages: a nested package", "the same place holds another package", each(|i| registry(&format!("node_modules/host/node_modules/pkg-{i}"), None)), each(|i| registry(&format!("node_modules/host/node_modules/pkg-{i}"), Some(format!("new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: an alias (a place name and the package's name)", "both names move under another package", each(|i| registry(&format!("node_modules/al-{i}"), Some(format!("pkg-{i}").as_str()))), each(|i| registry(&format!("node_modules/host/node_modules/al-{i}"), Some(format!("pkg-{i}").as_str()))), 0));
+    rows.push(map_row("packages: an alias (a place name and the package's name)", "the same place aliases another package", each(|i| registry(&format!("node_modules/al-{i}"), Some(format!("pkg-{i}").as_str()))), each(|i| registry(&format!("node_modules/al-{i}"), Some(format!("new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a bundled package (inBundle)", "the same name bundled by another package", each(|i| bundled(&format!("node_modules/host/node_modules/pkg-{i}"), None)), each(|i| bundled(&format!("node_modules/host-b/node_modules/pkg-{i}"), None)), 0));
+    rows.push(map_row("packages: a bundled package (inBundle)", "the same place holds another package", each(|i| bundled(&format!("node_modules/host/node_modules/pkg-{i}"), None)), each(|i| bundled(&format!("node_modules/host/node_modules/pkg-{i}"), Some(format!("new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a workspace member's own dependency", "the same name under another member", each(|i| registry(&format!("packages/a/node_modules/pkg-{i}"), None)), each(|i| registry(&format!("packages/b/node_modules/pkg-{i}"), None)), 0));
+    rows.push(map_row("packages: a workspace member's own dependency", "the same place holds another package", each(|i| registry(&format!("packages/a/node_modules/pkg-{i}"), None)), each(|i| registry(&format!("packages/a/node_modules/pkg-{i}"), Some(format!("new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a link and the directory it points at", "the directory moves; npm writes its name there", each(|i| [link(&format!("node_modules/dd-{i}"), &format!("vendor/dd-{i}")), directory(&format!("vendor/dd-{i}"), None)].concat()), each(|i| [link(&format!("node_modules/dd-{i}"), &format!("vendor/moved-{i}")), directory(&format!("vendor/moved-{i}"), Some(format!("dd-{i}").as_str()))].concat()), 0));
+    rows.push(map_row("packages: a link and the directory it points at", "the package in the same directory takes another name", each(|i| [link(&format!("node_modules/dd-{i}"), &format!("vendor/dd-{i}")), directory(&format!("vendor/dd-{i}"), None)].concat()), each(|i| [link(&format!("node_modules/new-{i}"), &format!("vendor/dd-{i}")), directory(&format!("vendor/dd-{i}"), Some(format!("new-{i}").as_str()))].concat()), 51));
+    rows.push(map_row("packages: a directory whose entry gives its name", "the folder moves", each(|i| directory(&format!("packages/dir-{i}"), Some(format!("@fixture/m-{i}").as_str()))), each(|i| directory(&format!("packages/moved-{i}"), Some(format!("@fixture/m-{i}").as_str()))), 0));
+    rows.push(map_row("packages: a directory whose entry gives its name", "the same folder, another name", each(|i| directory(&format!("packages/dir-{i}"), Some(format!("@fixture/m-{i}").as_str()))), each(|i| directory(&format!("packages/dir-{i}"), Some(format!("@fixture/new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a directory named as its folder (npm writes no name)", "the folder moves; npm writes its name there", each(|i| directory(&format!("packages/m-{i}"), None)), each(|i| directory(&format!("packages/moved-{i}"), Some(format!("m-{i}").as_str()))), 0));
+    rows.push(map_row("packages: a directory named as its folder (npm writes no name)", "the folder moves under a folder of the same name", each(|i| directory(&format!("vendor/m-{i}"), None)), each(|i| directory(&format!("elsewhere/m-{i}"), None)), 0));
+    rows.push(map_row("packages: a directory named as its folder (npm writes no name)", "the same folder, another name", each(|i| directory(&format!("packages/m-{i}"), None)), each(|i| directory(&format!("packages/m-{i}"), Some(format!("new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a directory named as its scope and folder", "the folder moves; npm writes its name there", each(|i| directory(&format!("packages/@fixture/m-{i}"), None)), each(|i| directory(&format!("packages/@fixture/moved-{i}"), Some(format!("@fixture/m-{i}").as_str()))), 0));
+    rows.push(map_row("packages: a directory named as its scope and folder", "the same folder, another name", each(|i| directory(&format!("packages/@fixture/m-{i}"), None)), each(|i| directory(&format!("packages/@fixture/m-{i}"), Some(format!("@fixture/new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a package with no name of its own (npm names it by its folder)", "the folder moves, and npm renames the package and its link", each(|i| [link(&format!("node_modules/m-{i}"), &format!("packages/m-{i}")), directory(&format!("packages/m-{i}"), None)].concat()), each(|i| [link(&format!("node_modules/moved-{i}"), &format!("packages/moved-{i}")), directory(&format!("packages/moved-{i}"), None)].concat()), 51));
+    rows.push(map_row("packages: a package with no name of its own (npm names it by its folder)", "the same folder, and the package takes a name", each(|i| [link(&format!("node_modules/m-{i}"), &format!("packages/m-{i}")), directory(&format!("packages/m-{i}"), None)].concat()), each(|i| [link(&format!("node_modules/new-{i}"), &format!("packages/m-{i}")), directory(&format!("packages/m-{i}"), Some(format!("new-{i}").as_str()))].concat()), 51));
+    rows.push(map_row("packages: a folder inside a package (npm installs nothing there)", "the folder moves; its name is written", each(|i| registry(&format!("node_modules/host/sub-{i}"), None)), each(|i| registry(&format!("node_modules/host/lib/other-{i}"), Some(format!("sub-{i}").as_str()))), 0));
+    rows.push(map_row("packages: a folder inside a package (npm installs nothing there)", "the same folder, another name", each(|i| registry(&format!("node_modules/host/sub-{i}"), None)), each(|i| registry(&format!("node_modules/host/sub-{i}"), Some(format!("new-{i}").as_str()))), 51));
+    rows.push(map_row("packages: a key with an empty, . or .. folder (read as npm resolves it)", "the same place, spelled another way", each(|i| registry(&format!("node_modules/pkg-{i}"), None)), each(|i| registry(&format!("{}{i}", ["node_modules//pkg-", "node_modules/./pkg-", "node_modules/host/../pkg-"][i.parse::<usize>().unwrap() % 3]), None)), 0));
+    rows.push(map_row("packages: a key with an empty, . or .. folder (read as npm resolves it)", "the same place holds another package", each(|i| registry(&format!("node_modules/pkg-{i}"), None)), each(|i| registry(&format!("node_modules/host/../pkg-{i}"), Some(format!("pkg-{i}-new").as_str()))), 51));
+    rows.push(map_row("packages: a key with an empty, . or .. folder (read as npm resolves it)", "a new place behind .. holds a package already there", each(|i| registry(&format!("node_modules/pkg-{i}"), None)), [each(|i| registry(&format!("node_modules/pkg-{i}"), None)), each(|i| registry(&format!("node_modules/host/../al-{i}"), Some(format!("pkg-{i}").as_str())))].concat(), 51));
+    rows.push(tree_row("dependencies: a package (its key is its name)", "the same name nested under another package", (0..51).map(|i| node1(&format!("pkg-{i:02}"), "1.0.0", vec![])).collect(), (0..51).map(|i| node1(&format!("host/pkg-{i:02}"), "1.0.0", vec![])).collect(), 0));
+    rows.push(tree_row("dependencies: an alias (npm: version)", "the same alias nested under another package", (0..51).map(|i| node1(&format!("al-{i:02}"), &format!("npm:pkg-{i:02}@1.0.0"), vec![])).collect(), (0..51).map(|i| node1(&format!("host/al-{i:02}"), &format!("npm:pkg-{i:02}@1.0.0"), vec![])).collect(), 0));
+    rows.push(tree_row("dependencies: an alias (npm: version)", "the same alias, another package", (0..51).map(|i| node1(&format!("al-{i:02}"), &format!("npm:pkg-{i:02}@1.0.0"), vec![])).collect(), (0..51).map(|i| node1(&format!("al-{i:02}"), &format!("npm:new-{i:02}@1.0.0"), vec![])).collect(), 51));
+    rows.push(tree_row("dependencies: a directory (file: version, as npm writes a link)", "the directory moves", (0..51).map(|i| node1(&format!("dd-{i:02}"), &format!("file:vendor/dd-{i:02}"), vec![])).collect(), (0..51).map(|i| node1(&format!("dd-{i:02}"), &format!("file:elsewhere/moved-{i:02}"), vec![])).collect(), 0));
+    rows.push(tree_row("dependencies: a git dependency", "the same name nested under another package", (0..51).map(|i| node1(&format!("pkg-{i:02}"), "git+ssh://git@example.com/x.git#0123456789abcdef0123456789abcdef01234567", vec![("from", q("git+ssh://git@example.com/x.git"))])).collect(), (0..51).map(|i| node1(&format!("host/pkg-{i:02}"), "git+ssh://git@example.com/x.git#0123456789abcdef0123456789abcdef01234567", vec![("from", q("git+ssh://git@example.com/x.git"))])).collect(), 0));
+    rows.push(tree_row("dependencies: a bundled package", "the same name bundled by another package", (0..51).map(|i| node1(&format!("host/pkg-{i:02}"), "1.0.0", vec![("bundled", "true".into())])).collect(), (0..51).map(|i| node1(&format!("host-b/pkg-{i:02}"), "1.0.0", vec![("bundled", "true".into())])).collect(), 0));
+    rows
+}
+
+/// Each shape counts names, not places: a name that only moves adds none,
+/// and a name that changes in its place adds one.
+#[test]
+fn each_shape_of_key_and_entry_counts_names_not_places() {
+    let rows = shapes();
+    let wrong: Vec<String> = rows.iter().filter_map(|row| {
+        let got = shown(&judge(Some(row.before.as_bytes()), row.after.as_bytes()));
+        let want = if row.adds > 50 { shown(&counted(row.adds)) } else { Vec::new() };
+        (got != want).then(|| format!("{} / {}: {:?}, want {:?}", row.shape, row.change, got, want))
+    }).collect();
+    assert!(wrong.is_empty(), "{} of {} rows:\n{}", wrong.len(), rows.len(), wrong.join("\n"));
+}
