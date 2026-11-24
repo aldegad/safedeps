@@ -31,7 +31,6 @@ if [[ "${1:-}" == --script ]]; then
   script="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 fi
 failures=0
-nl=$'\n'
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1"; failures=$((failures + 1)); }
 
@@ -49,7 +48,18 @@ done < <(ps -Ao pid=,args= 2>/dev/null)
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-slot.XXXXXX")
 children=()
-stop() { pkill -TERM -P "$1" 2>/dev/null || true; kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# stop <pid>: TERM to the process and to every process under it, read before
+# the first signal, and then a wait for it. A stop that signalled only the
+# process and its children left a run standing: macOS's /bin/bash 3.2 runs
+# the command of a substitution, the runner's lock call, as a child of a
+# child, and a runner reading the substitution's output did not end on TERM
+# until that command ended. A lock call that blocks never ends.
+tree() { local child; printf '%s\n' "$1"; for child in $(pgrep -P "$1" 2>/dev/null); do tree "${child}"; done; }
+stop() {
+  local pid
+  for pid in $(tree "$1"); do kill -TERM "${pid}" 2>/dev/null || true; done
+  wait "$1" 2>/dev/null || true
+}
 cleanup() {
   local child
   for child in "${children[@]:-}"; do [[ -z "${child}" ]] || stop "${child}"; done
