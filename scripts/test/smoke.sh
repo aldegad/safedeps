@@ -1462,7 +1462,7 @@ printf '{"dependencies":{}}\n' > "${nolock_dir}/package.json"
 nolock_safe="${tmp_root}/safe-nolock"
 jq -nc --arg cwd "${nolock_dir}" '{tool_name:"Bash",tool_input:{command:"pip install orphan==1.0.0"},cwd:$cwd}' |
   HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" hook_response_capture "${tmp_root}/no-lock-response" scripts/safedeps-hook-entry.sh post >/dev/null || true
-grep -q 'UNVERIFIED:.*no pending state.*no package-lock.json' "${nolock_safe}/advisory.log" || fail "post hook records a no-lockfile no-pending install as UNVERIFIED"
+grep -q 'UNVERIFIED:.*no pending state.*no npm-shrinkwrap.json, package-lock.json or node_modules/.package-lock.json in ' "${nolock_safe}/advisory.log" || fail "post hook records a no-lockfile no-pending install as UNVERIFIED"
 pass "post hook records an install-looking command with no pending state (no lockfile) as UNVERIFIED"
 
 # Finding #5: the npm effect gate is a COMMAND-INDEPENDENT backstop. An install-

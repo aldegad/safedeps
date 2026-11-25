@@ -1148,6 +1148,341 @@ row_last_full_scan() {
 }
 row "last_full_scan: a root scan after a full scan with errors keeps the full scan's run, time and errors; last_scan is the root scan" row_last_full_scan
 
+# ---- accepted sources ----------------------------------------------------------------
+# An entry of the accepted-source ledger (rust/src/sources.rs) covers a
+# package whose lock record names its URL, integrity, name and version. An
+# advisory the entry names is no finding; one it does not name, a KEV listing
+# and other bytes under the URL are findings as before. The entry is written
+# here as an install would write it.
+site_url='https://example.test/site/-/site-1.0.0.tgz'
+site_lock() { # DIR INTEGRITY
+  jq -n --arg url "${site_url}" --arg integrity "$2" '{name: "fixture", lockfileVersion: 3, packages: {
+    "": {name: "fixture"},
+    "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity},
+    "node_modules/left": {version: "1.0.0"}}}' > "$1/package-lock.json"
+}
+site_accept() { # ADVISORY...
+  jq -nc --arg url "${site_url}" --arg p "${d}/p/a" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url,
+    entries: [{integrity: "sha512-siteBytes100", package: "site", version: "1.0.0", advisories: $ARGS.positional}],
+    reason: "owner: the fix is on the maker site only", project: $p, tool_use_id: "toolu_fixture"}' --args "$@" \
+    >> "${home}/accepted-sources.jsonl"
+}
+row_accepted_source() {
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_findings)" == "[]" ]] || no "an advisory the entry names is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1 and .summary.open == 0' 'accepted'
+  st '.summary.line | test("; accepted sources 1(;|$)")' 'the line counts the accepted source'
+  st '[.roots[] | .lockfiles[]? | select(.kind == "npm") | .accepted[]? | .package + "@" + .version] == ["site@1.0.0"]' \
+    'the status row lists the accepted package' '[.roots[] | .lockfiles[]?]'
+  [[ "$(jq '[.events[] | select(.kind == "finding")] | length' "${home}/watch/state.json")" == 0 ]] || no "an accepted advisory made an event"
+  # A second advisory the entry does not name is a finding and an event.
+  fx ".osv[\"site@1.0.0\"] += [$(osv_record GHSA-site-cccc-dddd '' site 1.0.1)]"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-cccc-dddd" and .[0].state == "open"' > /dev/null \
+    || no "a new advisory is a finding again: $(npm_findings)"
+  st '[.events[] | select(.kind == "finding")] | length == 1' 'one event for the new advisory'
+  # A KEV listing of the accepted advisory is a finding.
+  fx '.kev = ["GHSA-site-aaaa-bbbb"]'
+  scan_ok
+  npm_findings | jq -e 'map(select(.advisory == "GHSA-site-aaaa-bbbb")) | length == 1 and .[0].kev == true' > /dev/null \
+    || no "a KEV-listed advisory of an accepted package is a finding: $(npm_findings)"
+}
+row "an advisory an accepted-source entry names is no finding and the line counts it; a new advisory and a KEV listing are findings" row_accepted_source
+
+row_accepted_source_other_bytes() {
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].state == "open"' > /dev/null \
+    || no "other bytes under an accepted URL are a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 0 and (.summary.line | test("accepted sources") | not)' 'other bytes are not accepted'
+  # Revoked, the entry covers nothing.
+  site_lock "${d}/p/a" sha512-siteBytes100
+  (cd "${d}" && envd "${SD}" sources revoke "${site_url}" > /dev/null 2>&1) || no "the revoke succeeds"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].state == "open"' > /dev/null || no "after the revoke the advisory is a finding: $(npm_findings)"
+}
+row "other bytes under an accepted URL, and an entry revoked, are findings as before" row_accepted_source_other_bytes
+
+# What the ledger holds reaches the watch's jq through a file, never as an
+# argument: a command's arguments have a limit the system sets, and a ledger
+# has none. The site entry beside 1, 9,000 and 100,000 entries of other
+# packages is judged the same, and each row says how long the scan took.
+unrelated_accepts() { # N: that many acceptances of other packages, added to the ledger
+  awk -v n="$1" 'BEGIN { for (i = 1; i <= n; i++) printf "{\"at\":\"2026-01-02T03:04:05Z\",\"op\":\"accept\",\"url\":\"https://example.test/other/-/other-%d-1.0.0.tgz\",\"entries\":[{\"integrity\":\"sha512-other%d\",\"package\":\"other-%d\",\"version\":\"1.0.0\",\"advisories\":[\"GHSA-other-%d\"]}],\"reason\":\"owner: an unrelated acceptance\",\"project\":\"/work/other\",\"tool_use_id\":null}\n", i, i, i, i }' \
+    >> "${home}/accepted-sources.jsonl"
+}
+accepted_beside() { # N
+  local started
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  unrelated_accepts "$1"
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  started="${SECONDS}"
+  scan_ok
+  printf '# beside %s entries of other packages the scan took %s s\n' "$1" "$((SECONDS - started))"
+  [[ "$(npm_findings)" == "[]" ]] || no "beside $1 entries of other packages the accepted advisory is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1 and .summary.open == 0' "accepted beside $1 entries of other packages" '{line: .summary.line, errors}'
+}
+row_accepted_beside_1() { accepted_beside 1; }
+row_accepted_beside_9000() { accepted_beside 9000; }
+row_accepted_beside_100000() { accepted_beside 100000; }
+row "beside 1 entry of another package the advisory the site entry names is no finding" row_accepted_beside_1
+row "beside 9,000 entries of other packages the advisory the site entry names is no finding" row_accepted_beside_9000
+row "beside 100,000 entries of other packages the advisory the site entry names is no finding" row_accepted_beside_100000
+
+# A ledger the watch cannot read covers nothing, and the run says so with an
+# accepted_sources_unreadable error row; a comparison that fails once the
+# ledger was read leaves that lockfile unread, with the reason "accepted
+# sources not compared". Each row breaks one step: the core is missing (G1),
+# fails (G2), stops part way (G3), its answer has no file to go to (G4) or is
+# not an index (G5), and the comparison fails before or after it printed
+# (G6). The core's steps are broken in a copy of this tree whose core is
+# missing, or a stand-in that answers `sources index` as STANDIN_INDEX says
+# and runs the real core for everything else.
+stand_in_tree() { # DIR [none]: a copy of this tree's CLI, with the stand-in core or none
+  local tree="$1" machine="${BASH_VERSINFO[5]:-}" os="" arch="" native
+  mkdir -p "${tree}/bin" "${tree}/scripts"
+  cp "${ROOT_DIR}/bin/safedeps" "${tree}/bin/safedeps"
+  cp -R "${ROOT_DIR}/lib" "${tree}/lib"
+  cp "${ROOT_DIR}/scripts/safedeps-recheck-alert.sh" "${tree}/scripts/safedeps-recheck-alert.sh"
+  [[ "${2:-}" != none ]] || return 0
+  case "${machine}" in *-darwin*) os=darwin ;; *-linux*) os=linux ;; esac
+  case "${machine%%-*}" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; esac
+  [[ -n "${os}" && -n "${arch}" ]] || no "no core is built for ${machine}"
+  native="${tree}/bin/native/${os}-${arch}"
+  mkdir -p "${native}"
+  {
+    printf '#!/usr/bin/env bash\nreal=%q\n' "${ROOT_DIR}/bin/native/${os}-${arch}/safedeps-core"
+    cat <<'CORE'
+if [[ "${1:-} ${2:-}" == "sources index" ]]; then
+  case "${STANDIN_INDEX:-}" in
+    fails) printf '%s\n' 'safedeps-core: the accepted-source ledger could not be read: stand-in' >&2; exit 1 ;;
+    cut) "${real}" "$@" | head -c 24; exit 0 ;;
+    empty) exit 0 ;;
+    not-an-index) printf '%s\n' '{"present":true,"entries":{},"broken":0}'; exit 0 ;;
+  esac
+fi
+exec "${real}" "$@"
+CORE
+  } > "${native}/safedeps-core"
+  chmod +x "${native}/safedeps-core"
+}
+site_world() { # the site lockfile, the entry that covers it and the advisory it names
+  new_world; register a
+  site_lock "${d}/p/a" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+}
+tree_scan() { # TREE ENV...: one scan by that tree's CLI. rc and out hold its answer.
+  local tree="$1"; shift
+  rc=0
+  out=$(cd "${d}" && envd "$@" "${tree}/bin/safedeps" --json watch scan 2> "${d}/stderr") || rc=$?
+}
+not_read() { # WHAT: the scan said the ledger was not read, and the advisory is a finding
+  [[ "${rc}" == 1 ]] || no "$1: the scan exited ${rc}: $(head -c 400 "${d}/stderr")"
+  st '[.errors[] | select(.kind == "accepted_sources_unreadable")] | length == 1' "$1: the error row" '.errors'
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].state == "open"' > /dev/null \
+    || no "$1: the advisory is no finding: $(npm_findings)"
+  st '.summary.accepted_sources == 0' "$1: nothing is accepted"
+}
+row_ledger_g1_no_core() {
+  site_world
+  stand_in_tree "${d}/tree" none
+  tree_scan "${d}/tree"
+  not_read "G1, no core"
+}
+row "G1: with no core the ledger is not read: an accepted_sources_unreadable error row, and the advisory is a finding" row_ledger_g1_no_core
+row_ledger_stand_in() {
+  site_world
+  stand_in_tree "${d}/tree"
+  tree_scan "${d}/tree"
+  [[ "${rc}" == 0 ]] || no "the stand-in core's scan exited ${rc}: $(head -c 400 "${d}/stderr")"
+  st '.summary.accepted_sources == 1 and .summary.open == 0' 'the stand-in reads the ledger as the core does' '{line: .summary.line, errors}'
+  local mode
+  for mode in fails cut empty not-an-index; do
+    tree_scan "${d}/tree" STANDIN_INDEX="${mode}"
+    not_read "${mode}"
+  done
+}
+row "G2, G3, G5: a core that fails, an index cut part way, an empty index and one with no entries list are each said as the ledger not read" row_ledger_stand_in
+row_ledger_g4_no_file() {
+  site_world
+  printf '#!/bin/sh\nout=$(%s "$@") || exit $?\ncase "$*" in *safedeps-providers.*) mkdir -p "$out/npm/accepted-sources.json" || exit 1 ;; esac\nprintf "%%s\\n" "$out"\n' \
+    "$(PATH=/usr/bin:/bin command -v mktemp)" > "${d}/fakebin/mktemp"
+  chmod +x "${d}/fakebin/mktemp"
+  scan
+  not_read "G4, no file for the index"
+}
+row "G4: where the index cannot be written to its file the ledger is not read: the error row, and the advisory is a finding" row_ledger_g4_no_file
+# G6 has a second project, b, whose lockfile is measured, so the run goes on
+# to its findings, and a's comparison alone fails. What it printed before it
+# failed takes nothing out: a's advisory is an open finding.
+row_ledger_g6_not_compared() {
+  local before what
+  for before in 1 ''; do
+    if [[ -n "${before}" ]]; then what="G6, failing before it printed"; else what="G6, failing after it printed"; fi
+    site_world; register b
+    npm_lock "${d}/p/b" left@1.0.0
+    printf '#!/bin/sh\ncase "$*" in *"root %s "*"--slurpfile sources"*) [ -n "%s" ] || %s "$@"; exit 5 ;; esac\nexec %s "$@"\n' \
+      "${d}/p/a" "${before}" "$(command -v jq)" "$(command -v jq)" > "${d}/fakebin/jq"
+    chmod +x "${d}/fakebin/jq"
+    scan
+    [[ "${rc}" == 1 ]] || no "${what}: the scan exited ${rc}: $(head -c 400 "${d}/stderr")"
+    st '[.errors[] | select(.kind == "accepted_sources_unreadable")] | length == 0' "${what}: the ledger was read" '.errors'
+    st --arg r "${d}/p/a" '([.unmeasured[] | select(.kind == "lockfile_unreadable" and .root == $r and .path == "./package-lock.json"
+          and .reason == "accepted sources not compared")] | length == 1)
+        and .summary.complete == false' "${what}: a's lockfile is a gap, not compared" '.unmeasured'
+    st '([.roots[] | select(.name == "a") | .lockfiles[]? | select(.kind == "npm") | {path, status}] == [{path: "./package-lock.json", status: "unreadable"}])
+        and ([.roots[] | select(.name == "b") | .lockfiles[]? | select(.kind == "npm") | .status] == ["measured"])' \
+      "${what}: a's lockfile is unread and b's is measured" '[.roots[] | {name, lockfiles}]'
+    npm_findings | jq -e --arg r "${d}/p/a" '[.[] | select(.root == $r)]
+        | length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].state == "open" and .[0].closed_reason == null' > /dev/null \
+      || no "${what}: a's advisory is not an open finding: $(npm_findings)"
+    st '.summary.accepted_sources == 0' "${what}: nothing is accepted" '.summary'
+  done
+}
+row "G6: a comparison that fails, before or after it printed, leaves the lockfile unread with the reason accepted sources not compared, and takes nothing out" row_ledger_g6_not_compared
+
+# ---- which npm lockfile ----------------------------------------------------------------
+# A directory is measured by the npm lockfile npm reads there
+# (lib/npm/closure.sh, safedeps_npm_project_lockfile), read once:
+# npm-shrinkwrap.json where it holds a byte, else package-lock.json where it
+# holds a byte. The other one, and one with no byte in it, is `ignored`: no
+# finding comes from it, it is no gap in the run, and a finding an earlier run
+# made of it is stale for that reason. Each row names the file the findings
+# come from and whether the accepted source still takes its advisory out. A
+# full scan always lists the hosts it does not measure (`other_hosts`), so a
+# run with no gap here is one whose only gap is that one (`no_gap_here`).
+site_lock_at() { # FILE INTEGRITY
+  jq -n --arg url "${site_url}" --arg integrity "$2" '{name: "fixture", lockfileVersion: 3, packages: {
+    "": {name: "fixture"},
+    "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity},
+    "node_modules/left": {version: "1.0.0"}}}' > "$1"
+}
+no_gap_here='.summary.unmeasured_by_kind == {"other_hosts": 1}'
+npm_rows() { jq -c '[.roots[] | .lockfiles[]? | select(.kind == "npm") | {path, status}] | sort_by(.path)' "${home}/watch/state.json"; }
+both_rows() { # SHRINKWRAP_STATUS LOCK_STATUS
+  printf '[{"path":"./npm-shrinkwrap.json","status":"%s"},{"path":"./package-lock.json","status":"%s"}]' "$1" "$2"
+}
+row_shrinkwrap_beside_empty_lock() {
+  new_world; register a
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes100
+  : > "${d}/p/a/package-lock.json"
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and the empty package-lock.json ignored: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "the shrinkwrap's accepted advisory is a finding: $(npm_findings)"
+  st ".summary.accepted_sources == 1 and ${no_gap_here}" \
+    'the accepted source counts and the empty file is no gap' '.unmeasured'
+}
+row "npm-shrinkwrap.json beside an empty package-lock.json: the shrinkwrap is measured and its accepted source takes the advisory out; the empty file is ignored and no gap" row_shrinkwrap_beside_empty_lock
+
+row_shrinkwrap_beside_other_lock() {
+  new_world; register a
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes100
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and package-lock.json ignored: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "other bytes in a package-lock.json npm does not read are a finding: $(npm_findings)"
+  # Other bytes in the shrinkwrap, the file npm reads, are a finding of it.
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes101
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].advisory == "GHSA-site-aaaa-bbbb" and .[0].lockfile == "./npm-shrinkwrap.json" and .[0].state == "open"' > /dev/null \
+    || no "other bytes in the shrinkwrap are its finding: $(npm_findings)"
+}
+row "npm-shrinkwrap.json beside a package-lock.json with other bytes: the shrinkwrap is measured, the other file makes no finding, and other bytes in the shrinkwrap do" row_shrinkwrap_beside_other_lock
+
+row_empty_shrinkwrap_beside_lock() {
+  new_world; register a
+  : > "${d}/p/a/npm-shrinkwrap.json"
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows ignored measured)" ]] || no "package-lock.json is measured and the empty shrinkwrap ignored: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "the accepted advisory is a finding: $(npm_findings)"
+  st ".summary.accepted_sources == 1 and ${no_gap_here}" \
+    'the accepted source counts and the empty shrinkwrap is no gap' '.unmeasured'
+}
+row "an empty npm-shrinkwrap.json beside package-lock.json: package-lock.json is measured and its accepted source takes the advisory out; the empty shrinkwrap is ignored and no gap" row_empty_shrinkwrap_beside_lock
+
+row_lock_npm_stops_reading() {
+  new_world; register a
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  npm_findings | jq -e 'length == 1 and .[0].lockfile == "./package-lock.json" and .[0].state == "open"' > /dev/null \
+    || no "other bytes in package-lock.json are a finding: $(npm_findings)"
+  # A shrinkwrap appears, holding the accepted bytes: npm reads it from now on.
+  site_lock_at "${d}/p/a/npm-shrinkwrap.json" sha512-siteBytes100
+  scan_ok
+  [[ "$(npm_rows)" == "$(both_rows measured ignored)" ]] || no "the shrinkwrap is measured and package-lock.json ignored: $(npm_rows)"
+  npm_findings | jq -e 'length == 1 and .[0].lockfile == "./package-lock.json" and .[0].stale_measurement == true and .[0].unmeasured_reason == "ignored"' > /dev/null \
+    || no "the finding of a lockfile npm no longer reads is stale, for that reason: $(npm_findings)"
+  st ".summary.accepted_sources == 1 and ${no_gap_here}" \
+    'the shrinkwrap'"'"'s accepted source counts, and the package-lock.json npm stopped reading is no gap' '.unmeasured'
+}
+row "a finding of a package-lock.json npm stops reading, when a shrinkwrap appears, is stale for that reason and not closed" row_lock_npm_stops_reading
+
+row_unreadable_shrinkwrap() {
+  new_world; register a
+  mkdir "${d}/p/a/npm-shrinkwrap.json"
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan
+  [[ "$(npm_rows)" == '[{"path":"./package-lock.json","status":"unreadable"}]' ]] \
+    || no "a shrinkwrap that cannot be read leaves package-lock.json unread, as it leaves npm: $(npm_rows)"
+  st '.summary.complete == false and ([.unmeasured[] | select(.kind == "lockfile_unreadable" and .path == "./package-lock.json")] | length == 1)' \
+    'the directory is a gap' '.unmeasured'
+}
+row "an npm-shrinkwrap.json that cannot be read: npm reads no lockfile there, so package-lock.json is not measured and the directory is a gap" row_unreadable_shrinkwrap
+
+row_lock_beside_other_managers() {
+  new_world; register a
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  printf '%s\n' '__metadata:' '  version: 8' > "${d}/p/a/yarn.lock"
+  printf '%s\n' "lockfileVersion: '9.0'" > "${d}/p/a/pnpm-lock.yaml"
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan
+  [[ "$(npm_rows)" == '[{"path":"./package-lock.json","status":"measured"}]' ]] || no "package-lock.json is measured beside yarn.lock and pnpm-lock.yaml: $(npm_rows)"
+  [[ "$(npm_findings)" == "[]" ]] || no "the accepted advisory is a finding: $(npm_findings)"
+  st '.summary.accepted_sources == 1' 'the accepted source counts'
+}
+row "package-lock.json beside a yarn.lock and a pnpm-lock.yaml is measured as npm's lockfile, and its accepted source takes the advisory out" row_lock_beside_other_managers
+
+row_workspace_member_lock() {
+  new_world; register a
+  printf '%s\n' '{"name":"fixture","private":true,"workspaces":["packages/member"]}' > "${d}/p/a/package.json"
+  mkdir -p "${d}/p/a/packages/member"
+  printf '%s\n' '{"name":"member","version":"1.0.0"}' > "${d}/p/a/packages/member/package.json"
+  site_lock_at "${d}/p/a/package-lock.json" sha512-siteBytes100
+  site_lock_at "${d}/p/a/packages/member/package-lock.json" sha512-siteBytes101
+  site_accept GHSA-site-aaaa-bbbb
+  fx ".osv[\"site@1.0.0\"] = [$(osv_record GHSA-site-aaaa-bbbb '' site 1.0.1)]"
+  scan_ok
+  # Each directory is measured by its own lockfile: npm reads the member's
+  # where it runs in the member with workspaces off, and the watch does not
+  # know how npm is run.
+  npm_findings | jq -e 'length == 1 and .[0].lockfile == "./packages/member/package-lock.json"' > /dev/null \
+    || no "the member's own package-lock.json is measured as its directory's: $(npm_findings)"
+  st '.summary.accepted_sources == 1' "the root's accepted source counts"
+}
+row "a workspace member's own package-lock.json is measured as its directory's lockfile, beside the root's, whose accepted source takes the advisory out" row_workspace_member_lock
+
 if (( failures > 0 )); then
   printf '# %d row(s) did not pass\n' "${failures}" >&2
   exit 1

@@ -422,9 +422,33 @@ def accepted(path, project, command, reason, call_id):
     return 0
 
 
+def sources(path, url, project, call_id):
+    """The accepted-source ledger's last line is the one accept line this
+    call wrote: it names the URL, the project and the call, and holds at
+    least one entry, each with exactly its four fields."""
+    try:
+        with open(path, "rb") as handle:
+            lines = [l for l in handle.read().decode("utf-8", "surrogateescape").split("\n") if l]
+        last = json.loads(lines[-1])
+    except (OSError, ValueError, IndexError):
+        return 1
+    want = {"op": "accept", "url": url, "project": project, "tool_use_id": call_id or None}
+    if not isinstance(last, dict) or any(last.get(key) != value for key, value in want.items()):
+        return 1
+    if set(last) != {"at", "op", "url", "entries", "reason", "project", "tool_use_id"}:
+        return 1
+    entries = last.get("entries")
+    if not (isinstance(entries, list) and entries):
+        return 1
+    files = {"integrity", "package", "version", "advisories"}
+    return 0 if all(isinstance(e, dict) and set(e) == files and isinstance(e.get("advisories"), list) for e in entries) else 1
+
+
 def main():
     if sys.argv[1] == "accepted":
         return accepted(*sys.argv[2:7])
+    if sys.argv[1] == "sources":
+        return sources(*sys.argv[2:6])
     if sys.argv[1] == "native-io-before":
         return native_io_before(sys.argv[2], sys.argv[3])
     if sys.argv[1] == "native-io-result":

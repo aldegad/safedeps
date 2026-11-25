@@ -3,7 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/safedeps-gate-audit-contract.XXXXXX")"
-trap 'rm -rf -- "$tmp_root"' EXIT
+server_pid=""
+cleanup() {
+  if [ -n "${server_pid}" ]; then kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true; fi
+  rm -rf -- "$tmp_root"
+}
+trap cleanup EXIT
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -15,6 +20,14 @@ mkdir -p "${fakebin}" "${fixture_home}/.codex/skills/safedeps"
 cat > "${fakebin}/npm" <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FAKE_NPM_ARGS_LOG:?}"
+# The directory npm audits, as npm says it: the one it runs in, or with
+# FAKE_NPM_PREFIX the root of the workspace that directory is a member of,
+# which npm audits from a member. FAKE_NPM_PREFIX_FAILS: npm says nothing.
+if [ "${1:-}" = "prefix" ]; then
+  [ -z "${FAKE_NPM_PREFIX_FAILS:-}" ] || exit 1
+  printf '%s\n' "${FAKE_NPM_PREFIX:-$PWD}"
+  exit 0
+fi
 if [ "${1:-}" = "run" ]; then
   [ "${2:-}" != "security:audit" ] || exit 99
   exit 0
@@ -25,6 +38,11 @@ case "${FAKE_NPM_MODE:-clean}" in
   vuln)  printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":4,"high":0,"critical":0}}}'; exit 1 ;;
   low)   printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":2,"moderate":0,"high":0,"critical":0}}}'; exit 1 ;;
   failed) printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}'; exit 5 ;;
+  # One moderate advisory of a package from a site, as npm 7+ reports it.
+  site) printf '%s\n' '{"vulnerabilities":{"site":{"name":"site","severity":"moderate","via":[{"source":1,"name":"site","url":"https://github.com/advisories/GHSA-site-aaaa-bbbb","severity":"moderate"}],"nodes":["node_modules/site"]}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":1,"high":0,"critical":0,"total":1}}}'; exit 1 ;;
+  # The same advisory where a public package brings the site package in: npm
+  # counts the parent too, for its dependency.
+  site-nested) printf '%s\n' '{"vulnerabilities":{"site":{"name":"site","severity":"moderate","via":[{"source":1,"name":"site","url":"https://github.com/advisories/GHSA-site-aaaa-bbbb","severity":"moderate"}],"nodes":["node_modules/parent/node_modules/site"]},"parent":{"name":"parent","severity":"moderate","via":["site"],"nodes":["node_modules/parent"]}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":2,"high":0,"critical":0,"total":2}}}'; exit 1 ;;
 esac
 exit 98
 FAKE
@@ -82,12 +100,34 @@ fi
 exit 5
 STUB
 
+# mktemp, with the directory the audit makes for its copies holding a
+# directory named STUB_MKTEMP_HOLDS, so a file of that name cannot be written
+# there.
+real_mktemp="$(command -v mktemp)"
+cat > "${fakebin}/mktemp" <<STUB
+#!/usr/bin/env bash
+out="\$("${real_mktemp}" "\$@")" || exit \$?
+if [ -n "\${STUB_MKTEMP_HOLDS:-}" ] && [[ "\$*" == *safedeps-audit.* ]]; then
+  mkdir -p "\${out}/\${STUB_MKTEMP_HOLDS}" || exit 1
+fi
+printf '%s\n' "\${out}"
+STUB
+
 cat > "${fakebin}/pip-audit" <<'FAKE'
 #!/usr/bin/env bash
 exit 0
 FAKE
 
-chmod +x "${fakebin}/npm" "${fakebin}/yarn" "${fakebin}/jq" "${fakebin}/find" "${fakebin}/pip-audit"
+# pnpm, with a clean report: a pnpm-lock.yaml beside an npm lockfile is
+# audited by pnpm on its own.
+cat > "${fakebin}/pnpm" <<'FAKE'
+#!/usr/bin/env bash
+[ "${1:-}" = "audit" ] || exit 0
+printf '%s\n' '{"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}'
+exit 0
+FAKE
+
+chmod +x "${fakebin}/npm" "${fakebin}/yarn" "${fakebin}/pnpm" "${fakebin}/jq" "${fakebin}/find" "${fakebin}/mktemp" "${fakebin}/pip-audit"
 
 make_fixture() {
   local manager="$1" fixture="${tmp_root}/${1}-repo"
@@ -165,12 +205,14 @@ pass "strict gate and canonical audit share npm/Yarn verdicts; Yarn Berry is who
 # runs under `||` in the audit, where errexit is off, so each read answers for
 # itself: a jq that failed here read as zero findings, and a tool that printed a
 # clean report and then failed read as clean.
+# The tree whose audit runs: this checkout, or a copy of it (audit_tree below).
+audit_tree="${ROOT_DIR}"
 audit_rc() {
   local fixture="$1"; shift
   run_with_rc "${tmp_root}/audit.out" env \
     PATH="${fakebin}:${PATH}" HOME="${fixture_home}" \
     FAKE_NPM_ARGS_LOG="${tmp_root}/npm-args.log" FAKE_YARN_ARGS_LOG="${tmp_root}/yarn-args.log" "$@" \
-    bash "${ROOT_DIR}/lib/gates/audit.sh" --root "${fixture}" --level moderate
+    bash "${audit_tree}/lib/gates/audit.sh" --root "${fixture}" --level moderate
 }
 assert_audit() {
   local expected="$1" name="$2" fixture="$3"; shift 3
@@ -188,6 +230,240 @@ assert_audit 2 "yarn classic: a clean summary from an audit that failed is no ve
 assert_audit 0 "yarn classic: a clean summary from an audit that finished is clean" "${yarn_fixture}" FAKE_YARN_VERSION=1.22.22 FAKE_YARN_MODE=clean
 assert_audit 2 "yarn Berry: advisory lines jq printed and failed on are no verdict" "${yarn_fixture}" STUB_MATCH='.children.Severity? != null' FAKE_YARN_MODE=advisory
 assert_audit 2 "yarn Berry: advisory lines jq failed on before printing are not clean" "${yarn_fixture}" STUB_MATCH='.children.Severity? != null' STUB_BEFORE=1 FAKE_YARN_MODE=advisory
+
+# An advisory of a package the accepted-source ledger covers is taken out of
+# npm's counts and named on one line; other bytes, an advisory no entry names
+# and no entry at all leave the count as npm gave it. Each covered package is
+# asked of OSV and the KEV catalog, here the fixture provider: a KEV listing,
+# or no answer, leaves it counted. The entry is written here as an install
+# would write it.
+site_fixture="${tmp_root}/site-repo"
+mkdir -p "${site_fixture}"
+git -C "${site_fixture}" init -q
+printf '%s\n' '{"name":"gate-audit-contract","private":true}' > "${site_fixture}/package.json"
+site_home="${tmp_root}/site-home"
+mkdir -p "${site_home}"
+site_state="${tmp_root}/site-provider.json"
+printf '%s\n' '{"vulnerable":["site@1.0.0"]}' > "${site_state}"
+( cd "${tmp_root}" && exec python3 "${ROOT_DIR}/scripts/test/fixture-provider.py" "${tmp_root}/site-provider.port" "${site_state}" ) &
+server_pid=$!
+for _ in $(seq 50); do [ -s "${tmp_root}/site-provider.port" ] && break; sleep 0.1; done
+[ -s "${tmp_root}/site-provider.port" ] || fail "the fixture provider starts"
+site_osv="http://127.0.0.1:$(cat "${tmp_root}/site-provider.port")"
+site_env=(SAFEDEPS_HOME="${site_home}" SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=0
+  SAFEDEPS_OSV_API_URL="${site_osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${site_osv}/osv/v1/querybatch"
+  SAFEDEPS_KEV_CATALOG_URL="${site_osv}/kev.json" SAFEDEPS_GHSA_API_URL="${site_osv}/advisories")
+site_url='https://example.test/site/-/site-1.0.0.tgz'
+site_lock() { # INTEGRITY [KEY]
+  jq -n --arg url "${site_url}" --arg integrity "$1" --arg key "${2:-node_modules/site}" '{name: "gate-audit-contract", lockfileVersion: 3, packages: ({
+    "": {name: "gate-audit-contract"},
+    "node_modules/parent": {version: "2.0.0", resolved: "https://registry.npmjs.org/parent/-/parent-2.0.0.tgz", integrity: "sha512-parentBytes200"}}
+    + {($key): {version: "1.0.0", resolved: $url, integrity: $integrity}})}' > "${site_fixture}/package-lock.json"
+}
+site_entry() {
+  jq -nc --arg url "${site_url}" --arg id "$1" '{at: "2026-01-02T03:04:05Z", op: "accept", url: $url,
+    entries: [{integrity: "sha512-siteBytes100", package: "site", version: "1.0.0", advisories: [$id]}],
+    reason: "owner: the fix is on the maker site only", project: "/work/site", tool_use_id: null}' > "${site_home}/accepted-sources.jsonl"
+}
+site_said() { grep -qxF "safedeps audit: $1" "${tmp_root}/audit.out" || fail "$2: $(cat "${tmp_root}/audit.out")"; }
+site_lock sha512-siteBytes100
+assert_audit 1 "npm: an advisory of a package from a site, with no accepted source, counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+site_entry GHSA-site-aaaa-bbbb
+assert_audit 0 "npm: an advisory an accepted-source entry names is not counted" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+site_said 'npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)' "npm: the accepted advisory is named on one line"
+site_lock sha512-siteBytes100 node_modules/parent/node_modules/site
+assert_audit 0 "npm: a package npm counts only for an accepted dependency is not counted" "${site_fixture}" FAKE_NPM_MODE=site-nested "${site_env[@]}"
+site_said 'npm: accepted sources (safedeps sources), not counted: parent@2.0.0; site@1.0.0 (GHSA-site-aaaa-bbbb)' "npm: the dependent package is named with it"
+printf '%s\n' '{"kev":["site@1.0.0"]}' > "${site_state}"
+assert_audit 1 "npm: an accepted package that KEV lists counts, and so does its dependent" "${site_fixture}" FAKE_NPM_MODE=site-nested "${site_env[@]}"
+site_said 'npm: site@1.0.0 has an accepted source, and CISA KEV lists one of its advisories, so it is counted.' "npm: the KEV listing is said"
+printf '%s\n' '{"vulnerable":["site@1.0.0"]}' > "${site_state}"
+site_lock sha512-siteBytes100
+assert_audit 1 "npm: an accepted package OSV cannot be asked about counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" SAFEDEPS_OSV_API_URL=http://127.0.0.1:9/osv/v1/query
+site_said 'npm: site@1.0.0 has an accepted source, and OSV or the KEV catalog could not be asked about it, so it is counted.' "npm: the provider that did not answer is said"
+site_entry GHSA-site-cccc-dddd
+assert_audit 1 "npm: an advisory no accepted-source entry names counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+site_entry GHSA-site-aaaa-bbbb
+site_lock sha512-siteBytes101
+assert_audit 1 "npm: other bytes under an accepted URL count" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+
+# What the ledger holds reaches the audit's jq through a file, never as an
+# argument: a command's arguments have a limit the system sets, and a ledger
+# has none. The site entry beside 1, 9,000 and 100,000 entries of other
+# packages is judged the same, and each row says how long the audit took.
+unrelated_entries() { # N: that many acceptances of other packages, added to the ledger
+  awk -v n="$1" 'BEGIN { for (i = 1; i <= n; i++) printf "{\"at\":\"2026-01-02T03:04:05Z\",\"op\":\"accept\",\"url\":\"https://example.test/other/-/other-%d-1.0.0.tgz\",\"entries\":[{\"integrity\":\"sha512-other%d\",\"package\":\"other-%d\",\"version\":\"1.0.0\",\"advisories\":[\"GHSA-other-%d\"]}],\"reason\":\"owner: an unrelated acceptance\",\"project\":\"/work/other\",\"tool_use_id\":null}\n", i, i, i, i }' \
+    >> "${site_home}/accepted-sources.jsonl"
+}
+site_lock sha512-siteBytes100
+for n in 1 9000 100000; do
+  site_entry GHSA-site-aaaa-bbbb
+  unrelated_entries "${n}"
+  started="${SECONDS}"
+  assert_audit 0 "npm: beside ${n} entries of other packages, the advisory the site entry names is not counted" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+  printf '# beside %s entries of other packages the audit took %s s\n' "${n}" "$((SECONDS - started))"
+  site_said 'npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)' "npm: the accepted advisory is named beside ${n} entries of other packages"
+done
+site_entry GHSA-site-aaaa-bbbb
+
+# A ledger the audit cannot read takes nothing out, and the audit says it was
+# not read; a comparison that fails once the ledger was read is said as not
+# compared. Each row breaks one step: the core is missing (G1), fails (G2),
+# stops part way (G3), its answer has no file to go to (G4) or is not an
+# index (G5), and the comparison fails before or after it printed (G6). The
+# core's steps are broken in a copy of this tree whose core is missing, or a
+# stand-in that answers `sources index` as STANDIN_INDEX says and runs the
+# real core for everything else.
+core_platform() {
+  local machine="${BASH_VERSINFO[5]:-}" os="" arch=""
+  case "${machine}" in *-darwin*) os=darwin ;; *-linux*) os=linux ;; esac
+  case "${machine%%-*}" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; esac
+  [ -n "${os}" ] && [ -n "${arch}" ] || fail "no core is built for ${machine}"
+  printf '%s-%s\n' "${os}" "${arch}"
+}
+platform="$(core_platform)"
+no_core_tree="${tmp_root}/no-core-tree"
+mkdir -p "${no_core_tree}"
+cp -R "${ROOT_DIR}/lib" "${no_core_tree}/lib"
+stand_in_tree="${tmp_root}/stand-in-tree"
+mkdir -p "${stand_in_tree}/bin/native/${platform}"
+cp -R "${ROOT_DIR}/lib" "${stand_in_tree}/lib"
+{
+  printf '#!/usr/bin/env bash\nreal=%q\n' "${ROOT_DIR}/bin/native/${platform}/safedeps-core"
+  cat <<'CORE'
+if [ "${1:-} ${2:-}" = "sources index" ]; then
+  case "${STANDIN_INDEX:-}" in
+    fails) printf '%s\n' 'safedeps-core: the accepted-source ledger could not be read: stand-in' >&2; exit 1 ;;
+    cut) "${real}" "$@" | head -c 24; exit 0 ;;
+    empty) exit 0 ;;
+    not-an-index) printf '%s\n' '{"present":true,"entries":{},"broken":0}'; exit 0 ;;
+  esac
+fi
+exec "${real}" "$@"
+CORE
+} > "${stand_in_tree}/bin/native/${platform}/safedeps-core"
+chmod +x "${stand_in_tree}/bin/native/${platform}/safedeps-core"
+not_read='npm: the accepted-source ledger could not be read, so every advisory npm reported is counted.'
+site_lock sha512-siteBytes100
+audit_tree="${no_core_tree}"
+assert_audit 1 "npm: G1, with no core the ledger is not read, and the advisory counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+site_said "${not_read}" "npm: G1, the ledger not read is said"
+audit_tree="${stand_in_tree}"
+assert_audit 0 "npm: the stand-in core reads the ledger as the core does" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+for mode in fails cut empty not-an-index; do
+  case "${mode}" in
+    fails) g=G2 what="a core that fails" ;;
+    cut) g=G3 what="an index cut part way" ;;
+    empty) g=G5 what="an empty index" ;;
+    not-an-index) g=G5 what="an index with no entries list" ;;
+  esac
+  assert_audit 1 "npm: ${g}, with ${what} the ledger is not read, and the advisory counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" STANDIN_INDEX="${mode}"
+  site_said "${not_read}" "npm: ${g}, ${what} is said as the ledger not read"
+done
+audit_tree="${ROOT_DIR}"
+assert_audit 1 "npm: G4, where the index cannot be written to its file the ledger is not read, and the advisory counts" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" STUB_MKTEMP_HOLDS=sources.json
+site_said "${not_read}" "npm: G4, an index with no file is said as the ledger not read"
+for before in 1 ''; do
+  assert_audit 1 "npm: G6, a comparison that fails${before:+ before it printed} counts the advisory" "${site_fixture}" FAKE_NPM_MODE=site "${site_env[@]}" STUB_MATCH='--slurpfile sources' STUB_BEFORE="${before}"
+  grep -qE '^safedeps audit: npm: the accepted-source ledger could not be compared with /.+/site-repo/package-lock\.json, so every advisory npm reported is counted\.$' "${tmp_root}/audit.out" \
+    || fail "npm: G6, the failed comparison is said as not compared: $(cat "${tmp_root}/audit.out")"
+  ! grep -qF "${not_read}" "${tmp_root}/audit.out" || fail "npm: G6, a ledger that was read is not said as not read: $(cat "${tmp_root}/audit.out")"
+  pass "npm: G6, the failed comparison${before:+ before it printed} is said as not compared"
+done
+
+# Which lockfile npm's advisories are compared with: the one npm reads
+# (lib/npm/closure.sh, safedeps_npm_project_lockfile) in the directory npm
+# audits (`npm prefix`), read once. npm reads npm-shrinkwrap.json where it
+# holds a byte, else package-lock.json where it holds a byte. Each row names
+# the file the advisory is judged by and whether the accepted source still
+# takes it out. The first two are the two runs of a review: a shrinkwrap
+# alone, then the same beside a package-lock.json whose packages are empty,
+# which was compared in its place. The third puts a file with no byte in it
+# there. A row that fails is said and the rows go on, so one run shows each
+# of them.
+shape_fixture="${tmp_root}/shape-repo"
+shape_failed=0
+shape_reset() { # PACKAGE_JSON: a project with that manifest and nothing else
+  rm -rf -- "${shape_fixture}"
+  mkdir -p "${shape_fixture}"
+  git -C "${shape_fixture}" init -q
+  printf '%s\n' "$1" > "${shape_fixture}/package.json"
+}
+shape_lock() { # FILE INTEGRITY: an npm lockfile whose site record holds those bytes
+  jq -n --arg url "${site_url}" --arg integrity "$2" '{name: "gate-audit-contract", lockfileVersion: 3, packages: {
+    "": {name: "gate-audit-contract"},
+    "node_modules/site": {version: "1.0.0", resolved: $url, integrity: $integrity}}}' > "$1"
+}
+shape_row() { # EXPECTED NAME SAID FIXTURE ENV...: the audit's exit, and a line its output holds (none where SAID is empty)
+  local expected="$1" name="$2" said="$3" fixture="$4"; shift 4
+  audit_rc "${fixture}" "$@"
+  if [ "${RUN_RC}" = "${expected}" ] && { [ -z "${said}" ] || grep -qF -- "${said}" "${tmp_root}/audit.out"; }; then
+    pass "${name}"
+  else
+    printf 'not ok - %s: audit expected %s and got %s%s: %s\n' "${name}" "${expected}" "${RUN_RC}" "${said:+, saying '${said}'}" "$(tr '\n' ' ' < "${tmp_root}/audit.out")"
+    shape_failed=$((shape_failed + 1))
+  fi
+}
+shape_accepted='safedeps audit: npm: accepted sources (safedeps sources), not counted: site@1.0.0 (GHSA-site-aaaa-bbbb)'
+site_entry GHSA-site-aaaa-bbbb
+shape_reset '{"name":"gate-audit-contract","private":true}'
+shape_lock "${shape_fixture}/npm-shrinkwrap.json" sha512-siteBytes100
+shape_row 0 "npm: npm-shrinkwrap.json alone is judged, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+printf '%s\n' '{"name":"gate-audit-contract","lockfileVersion":3,"packages":{}}' > "${shape_fixture}/package-lock.json"
+shape_row 0 "npm: beside a package-lock.json whose packages are empty, npm-shrinkwrap.json is judged, and the accepted source still takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+: > "${shape_fixture}/package-lock.json"
+shape_row 0 "npm: beside an empty package-lock.json, npm-shrinkwrap.json is judged, and the accepted source still takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+shape_lock "${shape_fixture}/npm-shrinkwrap.json" sha512-siteBytes101
+shape_row 1 "npm: npm-shrinkwrap.json is judged over a package-lock.json npm does not read, so other bytes in the shrinkwrap count" "" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+: > "${shape_fixture}/npm-shrinkwrap.json"
+shape_row 0 "npm: beside an empty npm-shrinkwrap.json, package-lock.json is judged, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+: > "${shape_fixture}/package-lock.json"
+shape_row 1 "npm: where neither lockfile holds a byte, nothing is compared, the advisory counts, and the empty lockfiles are said" \
+  "holds a byte, so no accepted source covers an advisory npm reported, and every one is counted." \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+rm -f -- "${shape_fixture}/npm-shrinkwrap.json"
+mkdir "${shape_fixture}/npm-shrinkwrap.json"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+shape_row 1 "npm: an npm-shrinkwrap.json that cannot be read stops the choice as it stops npm's, so the package-lock.json beside it is not judged, the advisory counts, and the shrinkwrap is said" \
+  "/npm-shrinkwrap.json could not be read, so every advisory npm reported is counted." \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+rmdir "${shape_fixture}/npm-shrinkwrap.json"
+shape_row 1 "npm: where npm does not say which project it audits, nothing is compared, the advisory counts, and that is said" \
+  'safedeps audit: npm: npm did not say which project it audits (npm prefix), so every advisory npm reported is counted.' \
+  "${shape_fixture}" FAKE_NPM_MODE=site FAKE_NPM_PREFIX_FAILS=1 "${site_env[@]}"
+shape_row 0 "control: the same package-lock.json, where npm says which project it audits, has its accepted advisory taken out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+# A workspace member: npm audits the root's lockfile from it, and ignores a
+# package-lock.json the member holds of its own.
+shape_reset '{"name":"gate-audit-contract","private":true,"workspaces":["packages/member"]}'
+mkdir -p "${shape_fixture}/packages/member"
+printf '%s\n' '{"name":"member","version":"1.0.0"}' > "${shape_fixture}/packages/member/package.json"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+shape_lock "${shape_fixture}/packages/member/package-lock.json" sha512-siteBytes101
+shape_row 0 "npm: in a workspace member, the root's package-lock.json is judged, as npm audits it, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}/packages/member" FAKE_NPM_MODE=site FAKE_NPM_PREFIX="${shape_fixture}" "${site_env[@]}"
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes101
+shape_lock "${shape_fixture}/packages/member/package-lock.json" sha512-siteBytes100
+shape_row 1 "npm: in a workspace member, other bytes in the root's package-lock.json count, whatever the member's own package-lock.json holds" "" \
+  "${shape_fixture}/packages/member" FAKE_NPM_MODE=site FAKE_NPM_PREFIX="${shape_fixture}" "${site_env[@]}"
+# A yarn.lock or a pnpm-lock.yaml beside: npm's advisories are judged by
+# package-lock.json, and Yarn and pnpm audit their own lockfiles.
+shape_reset '{"name":"gate-audit-contract","private":true}'
+shape_lock "${shape_fixture}/package-lock.json" sha512-siteBytes100
+printf '%s\n' '__metadata:' '  version: 8' > "${shape_fixture}/yarn.lock"
+shape_row 0 "npm: beside a yarn.lock, package-lock.json is judged for npm's advisories, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site FAKE_YARN_MODE=clean "${site_env[@]}"
+rm -f -- "${shape_fixture}/yarn.lock"
+printf '%s\n' "lockfileVersion: '9.0'" > "${shape_fixture}/pnpm-lock.yaml"
+shape_row 0 "npm: beside a pnpm-lock.yaml, package-lock.json is judged for npm's advisories, and the accepted source takes its advisory out" "${shape_accepted}" \
+  "${shape_fixture}" FAKE_NPM_MODE=site "${site_env[@]}"
+[ "${shape_failed}" -eq 0 ] || fail "${shape_failed} lockfile-shape row(s) did not pass"
 
 # The release gate's two reads of the Python surface. A find that failed is no
 # "no surface", and a list it printed first may be missing what it could not read.

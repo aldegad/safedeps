@@ -1,0 +1,252 @@
+# The census of what bin/safedeps, lib/*.sh and lib/*/*.sh hand a command as
+# an argument: scripts/test/argv-census.sh holds the code to it, both ways,
+# with scripts/test/lib/argv-census.py, which says what each column means.
+#
+# The rule: a file's contents, or a value whose length nothing bounds, reaches
+# a command through a file, standard input or a pipe, never as an argument or
+# in the environment. macOS counts the arguments and the environment together
+# against ARG_MAX; Linux refuses one string longer than MAX_ARG_STRLEN. Shell
+# builtins, shell functions, here-strings and pipes are not bounded that way.
+#
+# A new jq value argument, or one whose count moved, is a mismatch until a row
+# here names it with its class and why. `argv-census.py list --root .` prints
+# the forms as the check reads them. A follow-up row is a place the rule does
+# not hold yet; the change that takes it is named in its why. The environment
+# carries no file contents in this scope: its exports and prefix assignments
+# are paths and fixed values.
+#
+# kind	file	count	class	form	why
+jq	bin/safedeps	1	bounded	--arg approved_at "${approved_at}"	a time
+jq	bin/safedeps	1	bounded	--arg candidate "${candidate}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	1	bounded	--arg command "${command}"	the name of the subcommand
+jq	bin/safedeps	1	bounded	--arg ecosystem "${ecosystem}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	5	bounded	--arg ecosystem "${eco}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	2	bounded	--arg error "${failure}"	one word of a fixed set safedeps names
+jq	bin/safedeps	1	bounded	--arg error "${resolution_status}"	a status word safedeps wrote into its own closure source
+jq	bin/safedeps	3	bounded	--arg expires_at "${expires_at}"	a time
+jq	bin/safedeps	2	bounded	--arg expires_at "${expires_at}")	a time
+jq	bin/safedeps	2	bounded	--arg file "${f##*/}"	one file name
+jq	bin/safedeps	2	bounded	--arg file "${file}"	one path
+jq	bin/safedeps	6	bounded	--arg hash "${hash}"	a digest of fixed length
+jq	bin/safedeps	1	bounded	--arg kind "${SAFEDEPS_CHECK_PROVIDER_UNAVAILABLE}"	a constant of this tree
+jq	bin/safedeps	1	bounded	--arg package "${package_name}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	1	bounded	--arg package "${package}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	6	bounded	--arg package "${pkg}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	1	bounded	--arg patched "${last_patched}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	2	bounded	--arg patched "${patched_version}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	1	bounded	--arg range "${range}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	3	bounded	--arg reason "${reason}"	a value given on the command line, passed on whole
+jq	bin/safedeps	1	bounded	--arg result "${result}"	one word of a fixed set safedeps names
+jq	bin/safedeps	1	bounded	--arg status "${last_status}"	one word of a fixed set safedeps names
+jq	bin/safedeps	1	bounded	--arg url "$2"	a value given on the command line, passed on whole
+jq	bin/safedeps	1	bounded	--arg v "${SAFEDEPS_VERSION}"	a constant of this tree
+jq	bin/safedeps	15	bounded	--arg version "${version}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	5	bounded	--arg version "${ver}"	one package coordinate: a name, version, range or ecosystem
+jq	bin/safedeps	1	follow-up	--argjson approvals_store "${store_json}"	B: the approvals store's list (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	bounded	--argjson checked "${checked}"	a number
+jq	bin/safedeps	3	follow-up	--argjson closure_source "${closure_source_json}"	B: the closure source file's contents, which for yarn lists its input files (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	follow-up	--argjson errors "${errors_arr}"	B: grows with the approvals (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	bounded	--argjson i "${n}"	a number
+jq	bin/safedeps	1	follow-up	--argjson kev_hit "${kev_hit_arr}"	B: grows with the approvals (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	follow-up	--argjson newly_vulnerable "${newly_vuln_arr}"	B: grows with the approvals (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	bounded	--argjson now_epoch "$(date +%s)"	a number
+jq	bin/safedeps	1	follow-up	--argjson project_context "${project_context}"	B: the project context a ledger spec carries (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	2	follow-up	--argjson resolved_closure "${resolved_closure_json}")	B: the resolved closure, one entry a package (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	follow-up	--argjson resolved_closure "${resolved_closure}"	B: the resolved closure, one entry a package (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	follow-up	--argjson revoked "${revoked_arr}"	B: grows with the approvals (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	follow-up	--argjson specs "${merged}"	B: every approval (ledger --json) (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	1	bounded	--argjson still_clean "${still_clean}"	a number
+jq	bin/safedeps	1	follow-up	--argjson suspected_forgery "${suspected_forgery_arr}"	B: grows with the approvals (safedeps/argv-carries-no-unbounded-content-1125)
+jq	bin/safedeps	2	bounded	--argjson transitive_count "${transitive_count}"	a number
+jq	lib/gates/audit.sh	1	bounded	--arg lvl "$AUDIT_LEVEL"	one word of a fixed set safedeps names
+jq	lib/gates/audit.sh	1	bounded	--arg n "$n"	one package coordinate: a name, version, range or ecosystem
+jq	lib/gates/audit.sh	1	bounded	--arg rel "$lock"	one path
+jq	lib/gates/audit.sh	1	bounded	--arg root "$prefix"	one path
+jq	lib/gates/audit.sh	1	bounded	--argjson counts "$counts"	npm's count for each severity
+jq	lib/gates/doctor.sh	1	bounded	--arg label "$label"	a check's label, which doctor names
+jq	lib/gates/doctor.sh	1	bounded	--arg lane "$lane"	one word of a fixed set safedeps names
+jq	lib/gates/doctor.sh	1	bounded	--arg profile "$DOCTOR_PROFILE"	one word of a fixed set safedeps names
+jq	lib/gates/doctor.sh	1	bounded	--arg remedy "$remedy"	a check's remedy, which doctor names
+jq	lib/gates/doctor.sh	1	bounded	--arg repo "$REPO_ROOT"	one path
+jq	lib/gates/doctor.sh	1	bounded	--arg status "$status"	one word of a fixed set safedeps names
+jq	lib/gates/doctor.sh	1	bounded	--argjson checks "$rows_json"	doctor's own fixed list of checks
+jq	lib/gates/doctor.sh	1	bounded	--argjson gaps "$GAPS"	a number
+jq	lib/ledger/ledger.sh	2	bounded	--arg approved_at "${approved_at}"	a time
+jq	lib/ledger/ledger.sh	2	bounded	--arg approved_by "${approved_by}"	who approved: a name safedeps reads from the engine or the user
+jq	lib/ledger/ledger.sh	2	bounded	--arg checked_at "${now_iso}"	a time
+jq	lib/ledger/ledger.sh	3	bounded	--arg context_hash "${context_hash}"	a digest of fixed length
+jq	lib/ledger/ledger.sh	4	bounded	--arg ecosystem "${ecosystem}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/ledger/ledger.sh	2	bounded	--arg expires_at "${expires_at}"	a time
+jq	lib/ledger/ledger.sh	6	bounded	--arg hash "${expected_hash}"	a digest of fixed length
+jq	lib/ledger/ledger.sh	2	bounded	--arg hash "${hash}"	a digest of fixed length
+jq	lib/ledger/ledger.sh	1	bounded	--arg owner_hash "$(printf '%s' "	a digest of fixed length
+jq	lib/ledger/ledger.sh	1	bounded	--arg owner_package "$(printf '%s' "	one package coordinate: a name, version, range or ecosystem
+jq	lib/ledger/ledger.sh	1	bounded	--arg owner_version "$(printf '%s' "	one package coordinate: a name, version, range or ecosystem
+jq	lib/ledger/ledger.sh	3	bounded	--arg package "${package_name}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/ledger/ledger.sh	1	bounded	--arg reason "${reason}"	a value given on the command line, passed on whole
+jq	lib/ledger/ledger.sh	1	bounded	--arg revoked_at "${revoked_at}"	a time
+jq	lib/ledger/ledger.sh	1	bounded	--arg stored_context_hash "${stored_context_hash}"	a digest of fixed length
+jq	lib/ledger/ledger.sh	1	bounded	--arg stored_hash "${stored_hash}"	a digest of fixed length
+jq	lib/ledger/ledger.sh	3	bounded	--arg version "${version}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/ledger/ledger.sh	2	bounded	--arg version_range "${version_range}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/ledger/ledger.sh	1	bounded	--argjson evidence '{}')	the literal {}
+jq	lib/ledger/ledger.sh	1	bounded	--argjson now_epoch "$(date +%s)"	a number
+jq	lib/ledger/ledger.sh	2	bounded	--argjson now_epoch "${now_epoch}"	a number
+jq	lib/ledger/ledger.sh	1	bounded	--argjson project_context 'null')	the literal null
+jq	lib/ledger/ledger.sh	1	bounded	--argjson transitive_specs '[]')	the literal []
+jq	lib/npm/closure.sh	1	bounded	--arg candidate "${package_name}@npm:${version}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/npm/closure.sh	2	bounded	--arg context_hash "sha256:${context_hex}"	a digest of fixed length
+jq	lib/npm/closure.sh	3	bounded	--arg deny_only "${SAFEDEPS_NPM_DENY_ONLY}"	one word of a fixed set safedeps names
+jq	lib/npm/closure.sh	1	bounded	--arg direct_package "${direct_package}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/npm/closure.sh	1	bounded	--arg key "${key}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/npm/closure.sh	1	bounded	--arg lockfile_path "${lockfile}"	one path
+jq	lib/npm/closure.sh	1	bounded	--arg manifest_path "${manifest}"	one path
+jq	lib/npm/closure.sh	3	bounded	--arg name "${package_name}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/npm/closure.sh	1	bounded	--arg overrides_source "${overrides_source}"	one path
+jq	lib/npm/closure.sh	2	bounded	--arg package "${package_name}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/npm/closure.sh	1	bounded	--arg project_root "${dir}"	one path
+jq	lib/npm/closure.sh	1	bounded	--arg project_root "${project_root}"	one path
+jq	lib/npm/closure.sh	2	bounded	--arg reason "${reason}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/npm/closure.sh	2	bounded	--arg root "${package_name}@npm:${version}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/npm/closure.sh	1	bounded	--arg type "${SAFEDEPS_CONTEXT_YARN_LOCKFILE}"	a constant of this tree
+jq	lib/npm/closure.sh	1	bounded	--arg type "${SAFEDEPS_CONTEXT_YARN_MATERIALIZED}"	a constant of this tree
+jq	lib/npm/closure.sh	2	bounded	--arg type "${type}"	one word of a fixed set safedeps names
+jq	lib/npm/closure.sh	2	bounded	--arg version "${version}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/npm/closure.sh	1	follow-up	--argjson input_files "${input_files}"	B: one entry for each input file of a workspace (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/npm/closure.sh	1	follow-up	--argjson input_files "${input_json}"	B: one entry for each input file of a workspace (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/npm/closure.sh	3	follow-up	--argjson overrides "${overrides_json}"	B: the project's overrides, from its package.json (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/providers/providers.sh	4	bounded	--arg ecosystem "${ecosystem}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/providers/providers.sh	2	bounded	--arg ecosystem "${osv_ecosystem}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/providers/providers.sh	1	bounded	--arg id "$2"	one advisory id
+jq	lib/providers/providers.sh	1	bounded	--arg modified "${3:-}"	a time
+jq	lib/providers/providers.sh	2	bounded	--arg observed_at "${observed_at}"	a time
+jq	lib/providers/providers.sh	5	bounded	--arg package "${package_name}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/providers/providers.sh	9	bounded	--arg queried_at "${queried_at}"	a time
+jq	lib/providers/providers.sh	1	bounded	--arg status "${http_status:-none}"	an HTTP status
+jq	lib/providers/providers.sh	2	bounded	--arg status "${status}"	one word of a fixed set safedeps names
+jq	lib/providers/providers.sh	1	bounded	--arg value "$1"	one package coordinate: a name, version, range or ecosystem
+jq	lib/providers/providers.sh	5	bounded	--arg version "${version}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/providers/providers.sh	1	bounded	--arg warning "${warning}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/providers/providers.sh	1	follow-up	--argjson add "${answer}"	B: OSV's whole answer for one Go prefix (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/providers/providers.sh	1	follow-up	--argjson cves "${cve_array}"	B: the CVE ids of an OSV answer (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/providers/providers.sh	1	bounded	--argjson direct "${direct}"	true or false
+jq	lib/providers/providers.sh	1	bounded	--argjson index "${index}"	a number
+jq	lib/providers/providers.sh	2	follow-up	--argjson kev "${kev_json}"	B: the KEV overlap answer, with the entries it matched (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/providers/providers.sh	1	bounded	--argjson query "${payload}"	the OSV query: a name, a version and OSV's page token
+jq	lib/watch/lock.sh	1	bounded	--arg command "${command}"	the watch subcommand's name
+jq	lib/watch/lock.sh	1	bounded	--arg lock "$(safedeps_watch_dir)/lock"	one path
+jq	lib/watch/lock.sh	1	bounded	--arg reason "${reason}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/lockfiles.sh	2	bounded	--arg counts "${counts}"	the first severities line of a native audit's summary
+jq	lib/watch/lockfiles.sh	5	bounded	--arg eco "${eco}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/watch/lockfiles.sh	1	bounded	--arg reason "$(if [[ "	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/lockfiles.sh	1	bounded	--arg reason "$(if [[ -n "	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/lockfiles.sh	1	bounded	--arg reason "$(safedeps_watch_unmeasured_reason npm_lock_v1)"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/lockfiles.sh	1	bounded	--arg reason "${reason}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/lockfiles.sh	20	bounded	--arg rel "${rel}"	one path
+jq	lib/watch/lockfiles.sh	20	bounded	--arg root "${root}"	one path
+jq	lib/watch/lockfiles.sh	1	bounded	--argjson from "${i}"	a number
+jq	lib/watch/lockfiles.sh	1	follow-up	--argjson kev "${kev_ids}"	B: every CVE id of the KEV catalog, which grows every year (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/lockfiles.sh	1	bounded	--argjson kev_ok "${kev_ok}"	true or false
+jq	lib/watch/lockfiles.sh	1	bounded	--argjson size "${SAFEDEPS_WATCH_OSV_CHUNK}"	a number
+jq	lib/watch/population.sh	1	bounded	--arg at "${now}"	a time
+jq	lib/watch/population.sh	1	bounded	--arg key "$1"	one config key safedeps names
+jq	lib/watch/population.sh	2	bounded	--arg reason "${reason}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/population.sh	3	bounded	--arg source "${source}"	the population command the owner configured, which runs as arguments itself
+jq	lib/watch/population.sh	2	bounded	--argjson exit "${rc}"	a number
+jq	lib/watch/population.sh	1	follow-up	--argjson roots "${roots_json}"	B: one entry for each root of this machine (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/runtime.sh	1	bounded	--arg date "${date}"	one date from the advisory index's links
+jq	lib/watch/runtime.sh	1	bounded	--arg error "${openjdk_error}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/runtime.sh	1	bounded	--arg error "status ${http}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/runtime.sh	2	bounded	--arg f "${feature}"	a JDK feature number
+jq	lib/watch/runtime.sh	1	bounded	--arg implementor "${implementor}"	the IMPLEMENTOR value of one JDK release file, its first such line
+jq	lib/watch/runtime.sh	1	bounded	--arg index_url "${index_url}"	one path
+jq	lib/watch/runtime.sh	1	bounded	--arg kind "${kind}"	one word of a fixed set safedeps names
+jq	lib/watch/runtime.sh	1	bounded	--arg location "${real}"	one path
+jq	lib/watch/runtime.sh	1	bounded	--arg path "${dir}"	one path
+jq	lib/watch/runtime.sh	1	bounded	--arg path "${rel}"	one path
+jq	lib/watch/runtime.sh	1	bounded	--arg pin "${value}"	the first java word of one pin file
+jq	lib/watch/runtime.sh	1	bounded	--arg rel "${rel}"	one path
+jq	lib/watch/runtime.sh	2	bounded	--arg root "${root}"	one path
+jq	lib/watch/runtime.sh	1	bounded	--arg source "${f%%|*}"	one pin file's kind, a word safedeps names
+jq	lib/watch/runtime.sh	1	follow-up	--arg text "${text}"	D1: the text of an OpenJDK advisory page, fetched; its length is the page's. Past the limit jq fails and the run records that the advisory names no affected versions, which is not true (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/runtime.sh	1	bounded	--arg today "${now:0:10}"	a time
+jq	lib/watch/runtime.sh	1	bounded	--arg url "${page}"	one URL safedeps builds from the advisory index and a date
+jq	lib/watch/runtime.sh	1	bounded	--arg vendor "${vendor}"	one word of a fixed set safedeps names
+jq	lib/watch/runtime.sh	2	bounded	--arg version "${version}"	one package coordinate: a name, version, range or ecosystem
+jq	lib/watch/runtime.sh	1	bounded	--argjson window "${SAFEDEPS_WATCH_PRE_ANNOUNCE_DAYS}"	a number
+jq	lib/watch/scan.sh	4	bounded	--arg at "${started}"	a time
+jq	lib/watch/scan.sh	1	bounded	--arg class "${skip_class}"	one word of a fixed set safedeps names
+jq	lib/watch/scan.sh	2	bounded	--arg detail "${detail}"	the class word and mount path of one root
+jq	lib/watch/scan.sh	2	bounded	--arg file "$(safedeps_watch_state_file)"	one path
+jq	lib/watch/scan.sh	3	bounded	--arg fin "${finished}"	a time
+jq	lib/watch/scan.sh	1	bounded	--arg finished "${finished}"	a time
+jq	lib/watch/scan.sh	1	bounded	--arg floor "$(date -u -v-"	a time
+jq	lib/watch/scan.sh	1	bounded	--arg from "$(sed -n 's/^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' "	the image words of at most five FROM lines
+jq	lib/watch/scan.sh	2	bounded	--arg fs "${skip_fs}"	one word of a fixed set safedeps names
+jq	lib/watch/scan.sh	1	bounded	--arg host "$(hostname -s 2>/dev/null || hostname)"	the host's name
+jq	lib/watch/scan.sh	3	bounded	--arg id "${run_id}"	an identifier safedeps makes
+jq	lib/watch/scan.sh	1	bounded	--arg kind "${fkind}"	one word of a fixed set safedeps names
+jq	lib/watch/scan.sh	4	bounded	--arg kind "${kind}"	one word of a fixed set safedeps names
+jq	lib/watch/scan.sh	2	bounded	--arg moved "$(safedeps_watch_runtime_feeds_moved)"	the two feed URLs the environment moved, each already an environment value
+jq	lib/watch/scan.sh	1	bounded	--arg mp "${skip_path}"	one path
+jq	lib/watch/scan.sh	4	bounded	--arg name "${name}"	a root's name from the population list
+jq	lib/watch/scan.sh	1	bounded	--arg now "${digest_now}"	a digest of fixed length
+jq	lib/watch/scan.sh	2	bounded	--arg now "${now}"	a time
+jq	lib/watch/scan.sh	2	bounded	--arg only "${only}"	a root path given on the command line
+jq	lib/watch/scan.sh	1	bounded	--arg p "${path}"	one path
+jq	lib/watch/scan.sh	4	bounded	--arg path "${path}"	one path
+jq	lib/watch/scan.sh	1	bounded	--arg prefix "${skip_rel}/"	one path
+jq	lib/watch/scan.sh	1	bounded	--arg reason "$(safedeps_watch_unmeasured_reason "	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/scan.sh	1	bounded	--arg reason "$(safedeps_watch_unmeasured_reason container_image)"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/scan.sh	2	bounded	--arg reason "${detail}"	the class word and mount path of one root
+jq	lib/watch/scan.sh	1	bounded	--arg reason "${skip_class}"	a short reason safedeps composes from fixed words and a name, path or code
+jq	lib/watch/scan.sh	2	bounded	--arg rel "${rel}"	one path
+jq	lib/watch/scan.sh	2	bounded	--arg rel "${skip_rel}"	one path
+jq	lib/watch/scan.sh	1	bounded	--arg resolved "${resolved}"	one path
+jq	lib/watch/scan.sh	12	bounded	--arg root "${path}"	one path
+jq	lib/watch/scan.sh	1	bounded	--arg root "${root}"	one path
+jq	lib/watch/scan.sh	2	bounded	--arg run_id "${run_id}"	an identifier safedeps makes
+jq	lib/watch/scan.sh	1	bounded	--arg said "$(jq -r '.error? // empty' "	the first line of the re-check's error, a code safedeps writes
+jq	lib/watch/scan.sh	2	bounded	--arg since "${since}"	a time
+jq	lib/watch/scan.sh	1	bounded	--arg started "${started}"	a time
+jq	lib/watch/scan.sh	1	bounded	--arg step "${step}"	one word of a fixed set safedeps names
+jq	lib/watch/scan.sh	2	bounded	--arg version "${SAFEDEPS_VERSION}"	a constant of this tree
+jq	lib/watch/scan.sh	1	bounded	--argjson excluded "${excluded_count}"	a number
+jq	lib/watch/scan.sh	2	bounded	--argjson exit "${rc}"	a number
+jq	lib/watch/scan.sh	1	follow-up	--argjson followups "${followups}"	B: the follow-up settings, which grow over time (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/scan.sh	1	follow-up	--argjson ledger "${ledger}"	B: the whole re-check report (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/scan.sh	1	bounded	--argjson partial "$([[ "	true or false
+jq	lib/watch/scan.sh	1	follow-up	--argjson population "${population}"	B: grows with the roots (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/scan.sh	1	bounded	--argjson rc "${ledger_rc}"	a number
+jq	lib/watch/scan.sh	1	follow-up	--argjson retired "${retired}"	B: the retired roots, which grow over time (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/scan.sh	1	follow-up	--argjson runtime "${runtime}"	B: the JDKs and the advisories read for them (safedeps/argv-carries-no-unbounded-content-1125)
+jq	lib/watch/scan.sh	1	bounded	--argjson runtime_info "${runtime_info}"	the runtime's version, digest and paths, and at most the first three lines of a step
+jq	lib/watch/scan.sh	1	bounded	--argjson unreadable "${unreadable}"	a step's record: its name, exit status and at most its first three lines
+jq	lib/watch/scan.sh	2	bounded	--argjson walk "${walk}"	find's exit status and at most its first three lines
+jq	lib/watch/watch.sh	4	bounded	--arg consumer "${consumer}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	1	bounded	--arg detail "${detail}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	1	bounded	--arg evidence "${evidence}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	1	bounded	--arg expect "${expect}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	2	bounded	--arg id "${event}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	2	bounded	--arg key "${finding}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	1	bounded	--arg last_receipt "$(ls -1 "	one file name
+jq	lib/watch/watch.sh	4	bounded	--arg now "${now}"	a time
+jq	lib/watch/watch.sh	2	bounded	--arg outcome "${outcome}"	one word of a fixed set safedeps names
+jq	lib/watch/watch.sh	1	bounded	--arg root "${root}"	one path
+jq	lib/watch/watch.sh	1	bounded	--arg runs "$(safedeps_watch_dir)/runs"	one path
+jq	lib/watch/watch.sh	2	bounded	--arg state "${state}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	3	bounded	--arg task "${task}"	a value given on the command line, passed on whole
+jq	lib/watch/watch.sh	1	bounded	--arg token "${token}"	a token safedeps makes from the time, its pid and a random number
+jq	lib/watch/watch.sh	1	bounded	--arg token "${token}")	a token safedeps makes from the time, its pid and a random number
+jq	lib/watch/watch.sh	1	bounded	--argjson limit "${limit}"	a number
+site	lib/gates/audit.sh	1	file	--slurpfile sources "$index"	the accepted-source ledger index, the core's answer in a file of this run's own
+site	lib/gates/audit.sh	2	file	--slurpfile covered "$covered"	the packages the entries cover, in a file of this run's own
+site	lib/gates/audit.sh	1	file	--slurpfile dropped "$dropped"	the names KEV lists or no provider answered for, one a line in a file of this run's own
+site	lib/watch/lockfiles.sh	1	file	--slurpfile sources "${sources}"	the accepted-source ledger index, read once for the run into a file of its own
+site	lib/watch/lockfiles.sh	1	follow-up	"${prunes[@]+${prunes[@]/#${root}/.}}"	D2: find's prune arguments, one for each root under this root and each excluded path; nothing bounds their number. Past the limit find does not start, and the walk is recorded as not complete (safedeps/argv-carries-no-unbounded-content-1125)
+site	lib/providers/providers.sh	1	bounded	-d "${payload}"	D3: the OSV query, the same small object as --argjson query
+site	lib/ledger/ledger.sh	1	bounded	"${program}" "${files[@]}"	D4: approval files, at most one hundred a call, each one path
+site	lib/watch/scan.sh	1	bounded	shasum -a 256 "${files[@]}"	D5: the files of the shipped tree: bin, lib, one script and the core
+site	lib/watch/population.sh	1	bounded	"${argv[@]}" || rc=$?	D6: the population command the owner configured, run as written
+site	lib/watch/watch.sh	1	bounded	"${locked_json[@]+"${locked_json[@]}"}" "$@"	D6: the arguments this command was given, passed on
+site	bin/safedeps	1	bounded	approvals migrate "${core_args[@]+"${core_args[@]}"}" "$@"	D6: the arguments this command was given, passed on

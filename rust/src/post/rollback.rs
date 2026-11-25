@@ -48,7 +48,7 @@ impl<'a> Rollback<'a>{
     /// Construct before restoring any file: comparisons are against the
     /// command's snapshot, even when the rollback target is an older one.
     pub fn new(store:&'a Store,report:&'a mut Report,trace:&'a mut Install,pre:Vec<u8>,target:Vec<u8>,backstop:bool,before:Before)->Self{
-        let npm_project=["package.json",rec::RECORDS[0],rec::RECORDS[1]].iter().any(|n|sh::is_file(&store.project.join(n)));
+        let npm_project=["package.json"].into_iter().chain(rec::RECORDS).any(|n|sh::is_file(&store.project.join(n)));
         let mut out=Self{store,report,trace,pre,target,backstop,before,npm_project,wrote:None,compared:Vec::new(),different:Vec::new(),refused:HashSet::new(),stepped:HashSet::new()};
         if out.pre.is_empty()||!sh::is_file(&store.path(&out.pre,b"meta.json")){return out}
         if !out.trace.records.is_empty(){out.wrote=Some(true);return out}

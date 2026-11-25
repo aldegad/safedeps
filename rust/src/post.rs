@@ -6,7 +6,8 @@ mod jv;
 mod sh;
 pub use sh::fnmatch as shell_pattern_matches;
 mod closure;
-#[cfg(test)]
+mod lockfile;
+mod accepted;
 pub(crate) use closure::public_registry_url;
 mod report;
 mod workspaces;
@@ -97,7 +98,7 @@ pub fn probe(input: &[u8]) -> i32 {
                 .map(|xs| xs.iter().map(|s| jv::s(s.as_bytes())).collect());
             let origins = |url: &Value| crate::ask::fetch_origins(get("facts"), &String::from_utf8_lossy(jv::text(url).ok_or(())?))
                 .map(|xs| xs.iter().map(|x| x.value()).collect());
-            tree::judge(&path, &crate::state::guard_dir(), &query, get("withheld"), &problems, &origins)
+            tree::judge(&path, &crate::state::guard_dir(), &lockfile::Records::read(&path), &query, get("withheld"), &problems, &origins, &|_, _| false)
                 .map(|ls| { let mut b = ls.join(&b'\n'); if !b.is_empty() { b.push(b'\n'); } b }).map_err(|_| 1)
         }
         b"path" => Ok(report::path(&path)),

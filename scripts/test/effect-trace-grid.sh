@@ -1085,7 +1085,7 @@ new_un1() { new_project; quiet_first "unset npm_config_userconfig; HOME=${XH_HOM
 # itself, so safedeps did not add the flag; "(on Codex it cannot)" is said of a
 # Codex call only (RH3x).
 # The warning a later command gets for the impostor an earlier one fetched.
-WITHHELD_EVIL="the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from ${EVIL_REG}, which is not the public npm registry. They are kept. safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry. If you trust that registry, confirm with the user before running \`npm rebuild sd-approved\` yourself; do not rebuild without asking"
+WITHHELD_EVIL="the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from ${EVIL_REG}, which is not the public npm registry. They are kept. safedeps has recorded these bytes and withholds their install scripts in every project on this machine. Only an accepted-source entry releases them, and only for a package whose own lock record names the entry's URL, off the public registry, with this integrity: no other tree that holds them is rebuilt automatically. If you trust that registry, confirm with the user before running \`npm rebuild sd-approved\` yourself; do not rebuild without asking"
 printf '# install scripts over the whole tree (id engine command | outcome)\n'
 failures_before=${#FAILURES[@]}
 while IFS= read -r row; do
@@ -1641,6 +1641,45 @@ if shard_row "the backstop rolls back an npm run that installed (BT2) and nothin
   grep -qF "post-verify BACKSTOP traced: ${CASE_PROJECT}/" "${CASE_HOME}/advisory.log" \
     || note_failure "BT2: advisory.log says what the trace was"
   pass "the backstop rolls back an npm run that installed (BT2) and nothing after one that did not (BT1)"
+fi
+
+# An accepted-source entry binds the lockfile's integrity, and the reinstall
+# of an entry runs install scripts. That rests on what npm does with bytes its
+# lockfile names by another integrity: it checks the bytes it fetched before
+# it extracts them, and runs no script of bytes that fail the check. Measured
+# here with npm itself and no hook, from a cold cache. NI0 is the control:
+# the lockfile names sd-victim's own integrity, and its scripts run, so the
+# marks can show a script. NI1 names another integrity for the same tarball.
+if shard_row "npm runs no script of bytes whose integrity is not the lockfile's (NI0 control, NI1)"; then
+  ni_integrity() { node -e 'process.stdout.write("sha512-" + require("crypto").createHash("sha512").update(require("fs").readFileSync(process.argv[1])).digest("base64"))' "$1"; }
+  ni_victim=$(ni_integrity "${tmp_root}/tarballs/sd-victim-1.0.0.tgz")
+  ni_other="sha512-$(node -e 'process.stdout.write(require("crypto").createHash("sha512").update("bytes no registry serves").digest("base64"))')"
+  [[ "${ni_victim}" == sha512-* && "${ni_other}" != "${ni_victim}" ]] || fail "NI: the two integrities are read"
+  for ni_case in "NI0|${ni_victim}" "NI1|${ni_other}"; do
+    ni_id="${ni_case%%|*}" ni_value="${ni_case#*|}"
+    new_project
+    jq -n '{name:"proj", version:"1.0.0", dependencies:{"sd-victim":"1.0.0"}}' > "${CASE_PROJECT}/package.json"
+    jq -n --arg i "${ni_value}" '{name:"proj", version:"1.0.0", lockfileVersion:3, requires:true, packages:{
+      "": {name:"proj", version:"1.0.0", dependencies:{"sd-victim":"1.0.0"}},
+      "node_modules/sd-victim": {version:"1.0.0", resolved:"https://registry.npmjs.org/sd-victim/-/sd-victim-1.0.0.tgz", integrity:$i, hasInstallScript:true}}}' \
+      > "${CASE_PROJECT}/package-lock.json"
+    rm -rf "${npm_config_cache}"
+    : > "${MARKS}"
+    ni_rc=0
+    ni_out=$(cd "${CASE_PROJECT}" && npm ci 2>&1) || ni_rc=$?
+    ni_marks=$(grep -c '^sd-victim@1.0.0' "${MARKS}" || true)
+    printf '%s  npm ci, lockfile integrity %s | exit=%s sd-victim scripts=%s\n' "${ni_id}" \
+      "$([[ "${ni_id}" == NI0 ]] && echo "of the tarball" || echo "of other bytes")" "${ni_rc}" "${ni_marks}"
+    if [[ "${ni_id}" == NI0 ]]; then
+      [[ "${ni_rc}" == 0 && "${ni_marks}" -gt 0 ]] || note_failure "NI0: with the tarball's own integrity npm installs it and runs its scripts (exit ${ni_rc}, marks ${ni_marks}): ${ni_out:0:300}"
+    else
+      [[ "${ni_rc}" != 0 ]] || note_failure "NI1: npm refuses bytes whose integrity is not the lockfile's"
+      grep -q 'EINTEGRITY' <<< "${ni_out}" || note_failure "NI1: npm says the integrity check failed: ${ni_out:0:300}"
+      [[ "${ni_marks}" == 0 ]] || note_failure "NI1: npm runs no script of bytes that fail the integrity check (${ni_marks} ran)"
+      [[ ! -e "${CASE_PROJECT}/node_modules/sd-victim/package.json" ]] || note_failure "NI1: npm extracts nothing of bytes that fail the check"
+    fi
+  done
+  pass "npm runs no script of bytes whose integrity is not the lockfile's (NI0 control, NI1)"
 fi
 
 # A list run (--shard-list) installs nothing, so nothing reached the registry.

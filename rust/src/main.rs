@@ -119,6 +119,7 @@ mod pre;
 mod query;
 #[allow(dead_code)]
 mod sha256;
+mod sources;
 mod srchash;
 mod stamp;
 #[allow(dead_code)]
@@ -541,6 +542,9 @@ fn main() {
         // The CLI's approvals store. It writes and reads SAFEDEPS_HOME, and
         // no hook runs it.
         Some("approvals") => approvals::cli(&args[2..]),
+        // The accepted-source ledger, for the CLI's listing and revoke and
+        // the watch. The post hook writes it in-process; no hook runs this.
+        Some("sources") => sources::cli(&args[2..]),
         // Read-only queries: none is on a hook's path, and none takes an
         // argument or an environment variable that changes an answer.
         Some("budget-config") => {
@@ -562,7 +566,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals commit <hash> <staged> <entry> | approvals revoke <hash> <staged> <entry> <seen> | approvals index | approvals migrate [--json] [--] [<archive>...] | advisory-log rotate | kat [<path>] | stamp [--check] | version");
+            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | approvals commit <hash> <staged> <entry> | approvals revoke <hash> <staged> <entry> <seen> | approvals index | approvals migrate [--json] [--] [<archive>...] | sources index | sources revoke <url> | advisory-log rotate | kat [<path>] | stamp [--check] | version");
             2
         }
     };

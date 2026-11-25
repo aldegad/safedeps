@@ -701,8 +701,21 @@ impl<'c> Run<'c> {
     }
 
     /// What a `SAFEDEPS_ACCEPT_RISK=<who decided and why>` assignment says in
-    /// this reading. A command that does not hold the name is `Absent`, and
-    /// nothing else is read. One that holds it counts only in one shape:
+    /// this reading (`prefix_override`).
+    pub fn accept_risk(&mut self, cmd: &[u8]) -> AcceptRisk {
+        self.prefix_override(cmd, ACCEPT_RISK)
+    }
+
+    /// What a `SAFEDEPS_ACCEPT_SOURCE=<url> <who decided and why>` assignment
+    /// says in this reading (`prefix_override`). The value is read whole
+    /// here; the post hook's record holds it, and install.rs splits it.
+    pub fn accept_source(&mut self, cmd: &[u8]) -> AcceptRisk {
+        self.prefix_override(cmd, crate::sources::ACCEPT_SOURCE)
+    }
+
+    /// The one reader of an override a person puts in front of each npm
+    /// install, `name=<value>`, in this reading. A command that does not hold
+    /// the name is `Absent`, and nothing else is read. One that holds it counts only in one shape:
     /// the command hands no text on, and every statement of it is an npm
     /// install or one of the inert builtins (`inert_builtin`). Every npm
     /// install carries the assignment among its own prefix assignments, read
@@ -713,9 +726,9 @@ impl<'c> Run<'c> {
     /// another. The statements are the pieces view's, and the prefixes are
     /// the target statements' tokens, joined by their ordinal as
     /// `target_statements` joins them.
-    pub fn accept_risk(&mut self, cmd: &[u8]) -> AcceptRisk {
+    fn prefix_override(&mut self, cmd: &[u8], name: &[u8]) -> AcceptRisk {
         use AcceptRisk::{Absent, Invalid, Reason};
-        if !cmd.windows(ACCEPT_RISK.len()).any(|w| w == ACCEPT_RISK) {
+        if !cmd.windows(name.len()).any(|w| w == name) {
             return Absent;
         }
         if !self.raw_text_walk(cmd).is_empty() {
@@ -742,7 +755,7 @@ impl<'c> Run<'c> {
             };
             rd.read(&statement.manager_words());
             if self.recognized(&statement.rec) && rd.family == "npm" && rd.kind == Kind::Install {
-                let value = match accept_risk_value(&statement.tokens) {
+                let value = match prefix_value(&statement.tokens, name) {
                     Ok(Some(value)) => value,
                     Ok(None) => return Invalid("an npm install in this command does not carry it among its own prefix assignments"),
                     Err(why) => return Invalid(why),
@@ -1014,7 +1027,7 @@ fn inert_builtin(reading: Option<Reading>, text: &[u8], piece: &lex::PieceSpan) 
 /// The shell variable that accepts the risk of one npm install.
 pub const ACCEPT_RISK: &[u8] = b"SAFEDEPS_ACCEPT_RISK";
 
-/// What `Run::accept_risk` read in one reading.
+/// What `Run::prefix_override` read in one reading, for either override.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcceptRisk {
     Absent,
@@ -1022,11 +1035,11 @@ pub enum AcceptRisk {
     Reason(W),
 }
 
-/// The value of the last `SAFEDEPS_ACCEPT_RISK=` among a statement's
-/// leading assignment words (its tokens, quotes removed, a word the shell
-/// decides at run time marked by \001 at its end), the way the shell keeps
-/// the last one. None where no leading assignment names it.
-fn accept_risk_value(tokens: &[W]) -> Result<Option<W>, &'static str> {
+/// The value of the last `<name>=` among a statement's leading assignment
+/// words (its tokens, quotes removed, a word the shell decides at run time
+/// marked by \001 at its end), the way the shell keeps the last one. None
+/// where no leading assignment names it.
+fn prefix_value(tokens: &[W], name: &[u8]) -> Result<Option<W>, &'static str> {
     let mut found = None;
     for token in tokens {
         if !assign_word(token) {
@@ -1034,7 +1047,7 @@ fn accept_risk_value(tokens: &[W]) -> Result<Option<W>, &'static str> {
         }
         let eq = token.iter().position(|&b| b == b'=').unwrap_or(token.len());
         let key = &token[..eq];
-        if key.strip_suffix(b"+").unwrap_or(key) != ACCEPT_RISK {
+        if key.strip_suffix(b"+").unwrap_or(key) != name {
             continue;
         }
         if key.ends_with(b"+") {

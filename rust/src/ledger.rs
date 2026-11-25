@@ -344,7 +344,7 @@ fn context_kinds_match_cli() {
     // no assignment of any form follows it; the shell's scoping predicate and
     // each jq function they define are defined there and nowhere else.
     let npm: Vec<&str> = closure.lines().filter(|line| line.starts_with("SAFEDEPS_NPM_")).collect();
-    assert_eq!(npm.len(), 5, "the closure source's declarations: {npm:?}");
+    assert_eq!(npm.len(), 6, "the closure source's declarations: {npm:?}");
     let declarations: Vec<&str> = kinds.lines().filter(|line| line.starts_with("SAFEDEPS_")).chain(npm.iter().copied()).collect();
     for line in &declarations {
         let name = line.split_once('=').unwrap().0;

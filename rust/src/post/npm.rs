@@ -1,15 +1,14 @@
 //! npm records, fetch answers, and the machine-wide record of withheld bytes.
-use super::{jv,sh,closure,workspaces,tree,trace::{self,Install},snapshot::Store,report::{self,Report,cat}};
+use super::{jv,sh,closure,workspaces,tree,accepted::Sources,lockfile::{self,Records},trace::Install,snapshot::Store,report::{self,Report,cat}};
 use crate::{ask,callid::record as rec,json::Value,state,os,sha256,outcome::{Outcome,Action,Form}};
 use std::{fs,path::Path,time::{Duration,Instant}};
 type W=Vec<u8>;
-pub const WITHHELD_SCOPE:&[u8]=b"safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry";
+pub const WITHHELD_SCOPE:&[u8]=b"safedeps has recorded these bytes and withholds their install scripts in every project on this machine. Only an accepted-source entry releases them, and only for a package whose own lock record names the entry's URL, off the public registry, with this integrity: no other tree that holds them is rebuilt automatically";
 fn strval(v:&Value)->W{jv::tostring(v)}
 fn field<'a>(v:&'a Value,k:&str)->Result<&'a Value,()>{jv::field(v,k)}
 fn alt(v:&Value,d:Value)->Value{if jv::truthy(v){v.clone()}else{d}}
 fn val_str(v:&Value,k:&str,default:&[u8])->Result<W,()>{Ok(strval(&alt(field(v,k)?,jv::s(default))))}
 fn pretty(v:&Value)->W{crate::jq::pretty(&jv::to_j(v)).into_bytes()}
-fn digest(p:&Path)->Option<String>{fs::read(p).ok().map(|b|sha256::hex(&b))}
 fn sourced(current:&Value)->bool{matches!(jv::path(current,&[rec::NPM_FETCH,"cause"]),Ok(Value::Str(s)) if s==b"sourced")}
 pub fn unread_note(meta:&Path)->W{if report::inert_unread(meta){cat(&[b". ",report::UNREAD])}else{Vec::new()}}
 
@@ -32,12 +31,26 @@ impl Npm{
             self.facts=Some(Value::Arr(vec![pre,post]));
         }self.facts.as_ref().unwrap()
     }
-    pub fn collect(&mut self,store:&Store,reasons:&mut Vec<W>){
-        let earlier:Vec<_>=["package-lock.json","npm-tree-record.json"].iter().map(|n|store.path(&store.id,n.as_bytes())).filter(|p|sh::is_file(p)).collect();
+    /// What npm read before the command: the lockfile it chose then, from
+    /// the snapshot's copies (lockfile::earlier), and the tree record's
+    /// copy. Err where a copy that is there could not be read.
+    fn earlier(store:&Store)->Result<Vec<jv::Stream>,()>{
+        let mut out=Vec::new();
+        if let Some(lock)=lockfile::earlier(store).map_err(|_|())?{out.push(lock.stream);}
+        let tree=store.path(&store.id,b"npm-tree-record.json");
+        if sh::is_file(&tree){out.push(jv::read_file(&tree).ok_or(())?);}
+        Ok(out)
+    }
+    /// What the install brought, from `records`, the records the post hook
+    /// read once, against what npm read before the command. A record that
+    /// could not be read is the effect gate's reason (`effect::check`).
+    pub fn collect(&mut self,store:&Store,records:&Records,reasons:&mut Vec<W>){
+        let earlier=Self::earlier(store);
         let mut directories=Vec::new();
-        for record in trace::RECORDS{
-            let file=store.project.join(record);if !sh::is_file(&file){continue}
-            let Ok(new)=closure::new_records(&file,&earlier)else{reasons.push(cat(&[b"npm record ",record.as_bytes(),b" could not be compared with the records before the command; fail-closed"]));continue};
+        for read in records.each(){
+            let record=read.rel;
+            let new=earlier.as_ref().map_err(|_|()).and_then(|e|closure::new_records_of(&read.stream,&e.iter().collect::<Vec<_>>()));
+            let Ok(new)=new else{reasons.push(cat(&[b"npm record ",record.as_bytes(),b" could not be compared with the records before the command; fail-closed"]));continue};
             for line in new.split(|b|*b==b'\n'){
                 let row=sh::read_tab(line,3);
                 match row[0].as_slice(){
@@ -67,35 +80,37 @@ impl Npm{
         let st=jv::read_file(&store.home.join("npm-observed").join(format!("{}.json",store.hash)))?;
         (!st.failed&&st.values.last().is_some_and(|v|jv::path(v,&["project"]).is_ok_and(|p|jv::eq(p,&jv::s(sh::bytes(&store.project))))&&jv::path(v,&["tree"]).is_ok_and(|t|jv::eq(t,&jv::s(hash.as_bytes()))))).then_some(bytes)
     }
-    fn observe(store:&Store,copy:&Path){
+    /// The hash of the tree record as it was judged: the bytes the post hook
+    /// read once.
+    fn observe(store:&Store,tree:&[u8]){
         let dir=store.home.join("npm-observed");
-        let ok=digest(copy).is_some_and(|hash|{
-            let v=jv::obj(vec![("project",jv::s(sh::bytes(&store.project))),("tree",jv::s(hash.as_bytes())),("at",jv::num(os::wall(os::WallRole::NpmObserved).seconds()))]);
-            state::write_state_file(&dir.join(format!("{}.json",store.hash)),&jv::dump(&v)).is_ok()
-        });
+        let hash=sha256::hex(tree);
+        let v=jv::obj(vec![("project",jv::s(sh::bytes(&store.project))),("tree",jv::s(hash.as_bytes())),("at",jv::num(os::wall(os::WallRole::NpmObserved).seconds()))]);
+        let ok=state::write_state_file(&dir.join(format!("{}.json",store.hash)),&jv::dump(&v)).is_ok();
         if !ok{state::log_advisory(&store.home,&cat(&[b"post-verify: could not keep the hash of the tree record judged in ",sh::bytes(&store.project),b" (",sh::bytes(&dir),b"), so the next install there counts every integrity in it as new."]));}
     }
-    fn fresh_integrities(store:&Store,tree:&Path)->Result<Vec<Value>,()>{
-        let paths:Vec<_>=[store.project.join(trace::RECORDS[0]),tree.into()].into_iter().filter(|p|sh::is_file(p)).collect();
-        if paths.is_empty(){return Ok(Vec::new())}
+    /// The integrities the install brought, from the records read. A record
+    /// that could not be read names none here (`record_inner` answers for it).
+    fn fresh_integrities(store:&Store,records:&Records,accepted:&Sources)->Result<Vec<Value>,()>{
+        if records.each().next().is_none(){return Ok(Vec::new())}
         let before=store.path(&store.id,b"npm-tree-record.json");
         let mut judged=None;
         if sh::is_file(&before){
             judged=Self::judged_before(store,&before);
             if judged.is_none(){state::log_advisory(&store.home,&cat(&[b"post-verify: the tree record in ",sh::bytes(&store.project),b" before this command is not one safedeps judged at the end of an install here, so every integrity in it counts as brought in by this install."]));}
         }
-        let mut files=Vec::new();
-        for path in paths{files.push((jv::read_file(&path).ok_or(())?,false));}
-        if let Some(bytes)=judged{files.push((jv::read(&bytes),true));}
+        let judged=judged.map(|bytes|jv::read(&bytes));
+        let files:Vec<(&jv::Stream,bool)>=records.each().map(|r|(&r.stream,false)).chain(judged.iter().map(|st|(st,true))).collect();
         let mut all=Vec::new();let mut seen=std::collections::HashSet::new();
         for (st,before) in files{
             if st.failed{return Err(())}
-            for v in st.values{
-                let Value::Obj(entries)=field(&v,"packages")? else{continue};
+            for v in &st.values{
+                let Value::Obj(entries)=field(v,"packages")? else{continue};
                 for(key,value) in entries{
                     if !jv::in_tree(key)||!matches!(value,Value::Obj(_))||matches!(field(value,"link")?,Value::Bool(true)){continue}
                     let tokens=jv::tokens(value);if tokens.is_empty(){continue}
                     if before&&tokens.len()==1{seen.insert(tokens[0].clone());}
+                    if !before&&accepted.record_covered(key,value){continue}
                     let name=alt(field(value,"name")?,jv::s(jv::after_last_node_modules(key).unwrap_or(b"")));
                     all.push(jv::obj(vec![("before",Value::Bool(before)),("name",name),("version",alt(field(value,"version")?,jv::s(b"?"))),
                         ("resolved",field(value,"resolved")?.clone()),("tokens",Value::Arr(tokens.iter().map(|t|jv::s(t)).collect()))]));
@@ -137,24 +152,37 @@ impl Npm{
     /// The record of withheld bytes is written on a rollback too: the bytes
     /// stay in npm's cache for the next project. Its npm answer waits only
     /// within `until`; past it the answer is `unknown` (see `facts`).
-    pub fn record(&mut self,store:&Store,current:&Value,trace:&Install,report:&mut Report,until:Instant){
+    ///
+    /// Bytes an accepted-source entry already covers are not recorded: the
+    /// entry released them. The install that makes the entry records its own
+    /// bytes as before, so a revoke of the entry leaves them withheld again.
+    ///
+    /// The integrities are read from `records`, the records the post hook
+    /// read once, and the hash kept of the tree record is of those bytes.
+    pub fn record(&mut self,store:&Store,records:&Records,current:&Value,trace:&Install,report:&mut Report,until:Instant,accepted:&Sources){
         if trace.absent{return}
-        let hidden=store.project.join(trace::RECORDS[1]);
-        let judged=if sh::is_file(&hidden){sh::mktemp(&cat(&[sh::bytes(&store.home),b"/snapshots/.",&store.id,b"_judged."])).and_then(|p|if sh::cp(&hidden,&p)==0{Some(p)}else{sh::rm_f(&p);None})}else{None};
-        let tree=judged.as_deref().unwrap_or(&hidden);
-        let success=self.record_inner(store,current,tree,report,until);
-        if success&&!sourced(current)&&trace.records.iter().any(|r|r==trace::RECORDS[1].as_bytes()){
-            if let Some(j)=&judged{Self::observe(store,j);}
+        let success=self.record_inner(store,records,current,report,until,accepted);
+        if success&&!sourced(current)&&trace.records.iter().any(|r|r==rec::HIDDEN.as_bytes()){
+            if let Some(tree)=&records.tree{Self::observe(store,&tree.bytes);}
         }
-        if let Some(j)=judged{sh::rm_f(&j);}
     }
-    fn record_inner(&mut self,store:&Store,current:&Value,tree:&Path,report:&mut Report,until:Instant)->bool{
+    /// A record that could not be read is the effect gate's reason, and the
+    /// install is rolled back for it (`effect::check`). The bytes only that
+    /// record names cannot be recorded, and advisory.log says so. The bytes
+    /// the records read beside it name are recorded, since a withheld entry
+    /// only adds a restriction, and the record is not whole: the tree record
+    /// is not kept as one safedeps judged.
+    fn record_inner(&mut self,store:&Store,records:&Records,current:&Value,report:&mut Report,until:Instant,accepted:&Sources)->bool{
         let project=sh::bytes(&store.project);
-        let found=match Self::fresh_integrities(store,tree){Ok(f)=>f,Err(_)=>{
+        let whole=match &records.unread{
+            Some(unread)=>{state::log_advisory(&store.home,&cat(&[b"post-verify: npm record ",&unread.text(&store.project),b", so the bytes only it names were not recorded as withheld."]));false}
+            None=>true,
+        };
+        let found=match Self::fresh_integrities(store,records,accepted){Ok(f)=>f,Err(_)=>{
             state::log_advisory(&store.home,&cat(&[b"post-verify: the npm records in ",project,b" could not be read for the bytes this install brought in, so none of them were recorded as withheld."]));
             report.say(cat(&[b"safedeps could not read which bytes this install brought into ",project,b", so if npm fetched any of them from a registry that is not the public npm registry, it has not recorded them, and another project that receives the same bytes may rebuild them"]));return false;
         }};
-        if found.is_empty(){return true}
+        if found.is_empty(){return whole}
         let mut facts=self.facts(store,current,until).clone();
         if sourced(current){
             if let Value::Arr(fs)=&mut facts{fs.retain(|f|!matches!(field(f,"cause"),Ok(Value::Str(c)) if c==b"sourced"));}
@@ -164,7 +192,7 @@ impl Npm{
             state::log_advisory(&store.home,&cat(&[b"post-verify: safedeps could not tell where npm fetched the bytes this install brought into ",project,b", so none of them were recorded as withheld."]));
             report.say(cat(&[b"safedeps could not tell where npm fetched the bytes this install brought into ",project,b", so it has not recorded them as withheld, and another project that receives the same bytes may rebuild them"]));return false;
         }};
-        let Value::Obj(rows)=&recorded else{return false};if rows.is_empty(){return true}
+        let Value::Obj(rows)=&recorded else{return false};if rows.is_empty(){return whole}
         let mut descriptions=Vec::new();let mut packages=Vec::new();
         for(_,v)in rows{
             let name=field(v,"package").unwrap_or(&jv::NULL);packages.push(name.clone());
@@ -184,7 +212,7 @@ impl Npm{
             report.say(cat(&[b"safedeps could not record the bytes this install fetched from a registry that is not the public npm registry (",sh::bytes(&dir),b"), so another project that receives the same bytes may rebuild them"]));return false;
         }
         self.recorded.extend(jv::unique(packages).iter().map(strval).filter(|s|!s.is_empty()));
-        state::log_advisory(&store.home,&cat(&[b"post-verify: recorded as withheld on this machine, by integrity: ",&summary,b" (into ",project,b")."]));true
+        state::log_advisory(&store.home,&cat(&[b"post-verify: recorded as withheld on this machine, by integrity: ",&summary,b" (into ",project,b")."]));whole
     }
 }
 
@@ -237,12 +265,16 @@ impl Npm{
     /// an install that may be kept: what that judgment gives (a confirm line,
     /// and a log line that says the install is kept) is read by nothing on a
     /// rollback, so with a reason already given npm is not asked for it.
-    pub fn sources(&mut self,store:&Store,current:&Value,input:&[u8],codex:bool,reasons:&mut Vec<W>,confirm:&mut Vec<W>,until:Instant){
+    ///
+    /// A source every record of which an accepted source covers
+    /// (`Sources::url_covered`) is no reason and is not named: the person
+    /// accepted exactly those bytes from there.
+    pub fn sources(&mut self,store:&Store,current:&Value,input:&[u8],codex:bool,reasons:&mut Vec<W>,confirm:&mut Vec<W>,until:Instant,accepted:&Sources){
         if self.sources.is_empty(){return}
         let mut nonstandard=Vec::new();let mut public=Vec::new();
         for line in &self.sources{
             let url=line.windows(2).position(|x|x==b": ").map(|p|&line[p+2..]).unwrap_or(line);
-            if closure::public_registry_url(url){public.push(line.clone());}else{nonstandard.push(line.clone());}
+            if closure::public_registry_url(url){public.push(line.clone());}else if !accepted.url_covered(url){nonstandard.push(line.clone());}
         }
         if !public.is_empty()&&reasons.is_empty(){
             let facts=self.facts(store,current,until).clone();let mut fetched=Vec::new();let mut failed=false;
@@ -288,14 +320,14 @@ impl Npm{
         out.extend(cat(&[b". If you trust ",trust,b", confirm with the user before running `npm rebuild ",&names,b"` yourself; do not rebuild without asking"]));
         if !self.recorded.is_empty(){out.extend(cat(&[b". ",WITHHELD_SCOPE]));}out
     }
-    fn query_tree(&self,store:&Store,withheld:&Value)->Result<Vec<W>,W>{
+    fn query_tree(&self,store:&Store,records:&Records,withheld:&Value,accepted:&Sources)->Result<Vec<W>,W>{
         let Some(facts)=&self.facts else{return Err(b"safedeps did not ask npm which registry this tree came from".to_vec())};
         let answer=ask::query(&store.project,Instant::now()+Duration::from_secs(ask::POST_SECONDS)).map_err(|s|s.into_bytes())?;
         let problems=|url:&Value|ask::fetch_problems(facts,&String::from_utf8_lossy(jv::text(url).ok_or(())?)).map(|ps|ps.iter().map(|p|jv::s(p.as_bytes())).collect());
         let origins=|url:&Value|ask::fetch_origins(facts,&String::from_utf8_lossy(jv::text(url).ok_or(())?)).map(|os|os.iter().map(|o|o.value()).collect());
-        tree::judge(&store.project,&store.home,&jv::read(&answer.stdout),withheld,&problems,&origins).map_err(|_|b"npm query answered with something safedeps could not compare with the lockfiles".to_vec())
+        tree::judge(&store.project,&store.home,records,&jv::read(&answer.stdout),withheld,&problems,&origins,&|key,rec|accepted.record_covered(key,rec)).map_err(|_|b"npm query answered with something safedeps could not compare with the lockfiles".to_vec())
     }
-    pub fn rebuild(&mut self,store:&Store,current:&Value,trace:&mut Install,input:&[u8],report:&mut Report,until:Instant){
+    pub fn rebuild(&mut self,store:&Store,records:&Records,current:&Value,trace:&mut Install,input:&[u8],report:&mut Report,until:Instant,accepted:&Sources){
         if !meta_true(&store.meta(),"ignore_scripts_injected"){return}
         let meta=store.meta();let home=&store.home;let project=sh::bytes(&store.project);
         if trace.absent{report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&trace.line]));trace.said=true;return}
@@ -304,7 +336,7 @@ impl Npm{
             report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&why]));
             state::log_advisory(home,&cat(&[b"post-verify rebuild skipped: ",&why,b" -- project ",project]));return;
         }
-        if !sh::is_file(&store.project.join(trace::RECORDS[1])){
+        if records.tree.is_none(){
             state::log_advisory(home,&cat(&[b"post-verify: npm rebuild skipped in ",project," — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read.".as_bytes()]));
             report.say(cat(&[b"npm rebuild was not run: ",project,b"/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
         }
@@ -316,7 +348,7 @@ impl Npm{
             state::log_advisory(home,&cat(&[b"post-verify: npm rebuild after the install skipped in ",project," — ".as_bytes(),&why,b", so it cannot tell that tree holds none of them."]));
             report.say(cat(&[b"npm rebuild was not run: ",&why,b", so it could not tell that the tree holds none of them. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
         }};
-        let blockers=match self.query_tree(store,&withheld){Ok(b)=>b,Err(why)=>{
+        let blockers=match self.query_tree(store,records,&withheld,accepted){Ok(b)=>b,Err(why)=>{
             state::log_advisory(home,&cat(&[b"post-verify: npm rebuild after the install skipped in ",project," — safedeps asked npm which packages a rebuild would run over and got no answer (".as_bytes(),&why,b"), so it cannot tell that tree is one it can vouch for."]));
             report.say(cat(&[b"npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (",&why,b"), so it could not tell they are the ones it read. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
         }};
@@ -347,8 +379,8 @@ mod tests {
         let rows:Vec<_>=names.iter().map(|n|format!("\"node_modules/{n}\":{{\"version\":\"1.0.0\",\"integrity\":\"sha512-{n}\"}}")).collect();
         format!("{{\"packages\":{{{}}}}}\n",rows.join(","))
     }
-    fn fresh_names(store:&Store,lock:&Path)->Vec<W>{
-        Npm::fresh_integrities(store,lock).unwrap().iter().map(|v|strval(field(v,"name").unwrap())).collect()
+    fn fresh_names(store:&Store)->Vec<W>{
+        Npm::fresh_integrities(store,&Records::read(&store.project),&Sources::default()).unwrap().iter().map(|v|strval(field(v,"name").unwrap())).collect()
     }
 
     // The file that keeps the hash is a fifo, so the read of it waits while the
@@ -361,10 +393,10 @@ mod tests {
         for dir in [home.join("snapshots"),home.join("npm-observed"),project.clone()] {fs::create_dir_all(dir).unwrap();}
         let store=Store::new(home.clone(),project.clone(),b"call".to_vec());
         let before=store.path(&store.id,b"npm-tree-record.json");
-        let lock=project.join(trace::RECORDS[0]);
+        let lock=project.join(rec::LOCKFILES[1]);
         fs::write(&lock,record(&["kept","brought"])).unwrap();
         fs::write(&before,record(&["kept"])).unwrap();
-        Npm::observe(&store,&before);
+        Npm::observe(&store,&fs::read(&before).unwrap());
         let observed=home.join("npm-observed").join(format!("{}.json",store.hash));
         let kept=fs::read(&observed).unwrap();
         fs::remove_file(&observed).unwrap();
@@ -377,14 +409,32 @@ mod tests {
             fs::write(&file,body).unwrap();
             fifo.write_all(&entry).unwrap();
         });
-        assert_eq!(fresh_names(&store,&lock),vec![b"brought".to_vec()],"the bytes the hash was taken of are the ones read");
+        assert_eq!(fresh_names(&store),vec![b"brought".to_vec()],"the bytes the hash was taken of are the ones read");
         assert_eq!(fs::read_to_string(&before).unwrap(),replacement,"the record was replaced after its hash");
 
         // The same replacement in place from the start: the hash does not match,
         // and the record vouches for nothing.
         fs::remove_file(&observed).unwrap();
         fs::write(&observed,&kept).unwrap();
-        assert_eq!(fresh_names(&store,&lock),vec![b"brought".to_vec(),b"kept".to_vec()],"a record with no hash of its own counts for nothing");
+        assert_eq!(fresh_names(&store),vec![b"brought".to_vec(),b"kept".to_vec()],"a record with no hash of its own counts for nothing");
+        let _=fs::remove_dir_all(&root);
+    }
+
+    // A lockfile that cannot be read names no byte here, and the effect gate
+    // rolls the install back for it. The tree record read beside it still
+    // names the bytes this install brought, and they are recorded as
+    // withheld, since an entry there only adds a restriction.
+    #[test]
+    fn a_lockfile_that_cannot_be_read_leaves_the_tree_records_bytes_to_record(){
+        let root=sh::mktemp_dir(&cat(&[sh::bytes(&std::env::temp_dir()),b"/safedeps-unread-lock."])).unwrap();
+        let (home,project)=(root.join("home"),root.join("project"));
+        for dir in [home.join("snapshots"),project.join(rec::LOCKFILES[1]),project.join("node_modules")] {fs::create_dir_all(dir).unwrap();}
+        let store=Store::new(home.clone(),project.clone(),b"call".to_vec());
+        fs::write(project.join(rec::HIDDEN),record(&["brought"])).unwrap();
+        assert!(Records::read(&store.project).unread.is_some(),"a package-lock.json that is a directory is a record that could not be read");
+        let names=Npm::fresh_integrities(&store,&Records::read(&store.project),&Sources::default())
+            .map(|found|found.iter().map(|v|strval(field(v,"name").unwrap())).collect::<Vec<_>>());
+        assert_eq!(names,Ok(vec![b"brought".to_vec()]),"the tree record still names the bytes this install brought");
         let _=fs::remove_dir_all(&root);
     }
 }

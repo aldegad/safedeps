@@ -181,6 +181,10 @@ def osv_response(package_name, version, page_token):
         return {'vulns': [], 'next_page_token': 'page-2'}
     if package_name == 'fixture-paged':
         return {'vulns': [osv_vuln('CVE-2026-1002', None)]}
+    # A package listed under `vulnerable_more` (name@version) answers the
+    # advisory `vulnerable` gives and one more, as after OSV published another.
+    if listed('vulnerable_more'):
+        return {'vulns': [osv_vuln('CVE-2026-1000', None), osv_vuln('CVE-2026-1002', None)]}
     if isinstance(current.get('kev'), list) and key in current['kev']:
         return {'vulns': [osv_vuln('CVE-2026-9999', None)]}
     if isinstance(current.get('vulnerable'), list) and key in current['vulnerable']:

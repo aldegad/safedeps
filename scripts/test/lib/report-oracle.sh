@@ -120,6 +120,7 @@ journal-differs journal-gone journal-extra journal-no-list
 file-line file-line-absent
 log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated log-record-gone log-record-empty log-record-unread
 head-accepted accepted-reason audit-line skip-fact-accepted log-accepted
+accepted-source
 "
 
 # The native owner API supplies integer start times, so the ps empty/date
@@ -153,6 +154,7 @@ ORACLE_PROSE=(
   "prose-fetch-unknown|rollback confirm accepted|0|safedeps could not tell where npm fetched the bytes this install brought into "
   "prose-record-failed|rollback confirm accepted|0|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
   "prose-fetched-elsewhere|confirm accepted|3|this install fetched packages from a registry that is not the public npm registry ("
+  "prose-rebuild-held|confirm|2|safedeps did not run npm rebuild in "
 )
 oracle_prose_field() {
   local entry="$1" n="$2"
@@ -229,7 +231,10 @@ oracle_trace_state() {
   [[ -n "${project}" ]] || project="${2:-}"
   [[ -n "${baseline}" ]] || { printf 'unset'; return; }
   [[ -f "${baseline}" ]] || { printf 'gone'; return; }
-  for rel in package-lock.json node_modules/.package-lock.json; do
+  # The npm records the core traces (rust/src/callid.rs, record::RECORDS):
+  # npm writes the lockfile it reads, which may be the shrinkwrap, and the
+  # tree record.
+  for rel in package-lock.json node_modules/.package-lock.json npm-shrinkwrap.json; do
     file="${project}/${rel}"
     [[ -e "${file}" ]] || continue
     recorded=$(jq -r --arg rel "${rel}" '.npm_trace.inodes[$rel] // ""' "${pending}" 2>/dev/null)
@@ -1234,6 +1239,37 @@ oracle_line() {
     return 0
   fi
 
+  # The one line an install that makes accepted-source entries says, in the
+  # message of an install that is kept. The URL is the one this call's record
+  # holds, the ledger is the one under SAFEDEPS_HOME, and its last line is the
+  # accept line of that URL, this project and this call. After the ledger
+  # comes one clause for each step after the line's commit that failed
+  # (rust/src/post/run.rs, doubt_words): the entries stand, what the step
+  # returned, and what that leaves open. A clause is one of the three forms.
+  local re_accepted='^Accepted source: (https://[^ ]+) for (.+), recorded in (/[^;]+)((; the entries stand, and .+)?)$'
+  if [[ "${line}" =~ ${re_accepted} ]]; then
+    oracle_count accepted-source
+    [[ "${O_BLOCK}" == confirm || "${O_BLOCK}" == accepted ]] || oracle_red "an Accepted source line outside the message of a kept install"
+    [[ "$(python3 "${ORACLE_READ}" string "${O_CONSUMED}" accept_source url 2>/dev/null)" == "${BASH_REMATCH[1]}" ]] \
+      || oracle_red "the URL is not the one this call's record holds"
+    [[ "${BASH_REMATCH[3]}" == "${O_HOME}/accepted-sources.jsonl" ]] || oracle_red "not the accepted-source ledger under SAFEDEPS_HOME"
+    local doubts="${BASH_REMATCH[4]}" ledger="${BASH_REMATCH[3]}" url="${BASH_REMATCH[1]}" step at open
+    local re_doubt='^; the entries stand, and the (sync|close|open) of (/[^ ]+) returned [^;:]+: (until the system writes them, a power loss can take them away|this write made the ledger, and until the system writes its directory, a power loss can take the file away), and the next install of those bytes is then judged as this one was'
+    while [[ -n "${doubts}" ]]; do
+      [[ "${doubts}" =~ ${re_doubt} ]] || { oracle_red "a clause after the ledger that is not one of the doubt forms"; break; }
+      step="${BASH_REMATCH[1]}" at="${BASH_REMATCH[2]}" open="${BASH_REMATCH[3]}"
+      doubts="${doubts:${#BASH_REMATCH[0]}}"
+      case "${step}:${open}" in
+        sync:until*|close:until*) [[ "${at}" == "${ledger}" ]] || oracle_red "a doubt of the ledger's own write names another file" ;;
+        sync:this*|open:this*) [[ "${at}" == "${O_HOME}" ]] || oracle_red "a doubt of the ledger's directory names another directory" ;;
+        *) oracle_red "a doubt that pairs a step with what another step leaves open" ;;
+      esac
+    done
+    python3 "${ORACLE_READ}" sources "${ledger}" "${url}" "${O_PROJECT}" "${O_CALL_ID}" \
+      || oracle_red "the ledger's last line is not the accept line of this URL, project and call"
+    return 0
+  fi
+
   # A rollback or a confirm block.
   if [[ "${line}" =~ ${re_snap_confirmed} ]]; then
     oracle_count snapshot-confirmed; O_SNAP="${BASH_REMATCH[1]}"
@@ -1363,7 +1399,8 @@ oracle_line() {
   elif [[ "${line}" =~ ${re_reason_trace} ]]; then
     oracle_count reason-trace
     [[ "${O_TRACE}" == present ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}'"
-    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/package-lock.json" || "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules/.package-lock.json" ]] || oracle_red "not one of the project's two npm lockfiles"
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/package-lock.json" || "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules/.package-lock.json" \
+      || "${BASH_REMATCH[1]}" == "${O_PROJECT}/npm-shrinkwrap.json" ]] || oracle_red "not one of the npm records the project's trace watches"
   elif [[ "${line}" =~ ${re_reason_file} ]]; then
     oracle_count reason-file
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another project or another snapshot"

@@ -40,9 +40,9 @@ impl Snapshot {
             .filter(|e|e.file_type().is_ok_and(|t|t.is_file())).map(|e|e.file_name())
             .filter(|s|s.as_bytes().ends_with(b".csproj")).collect();
         csproj.sort();for name in csproj{snap.file(name.as_bytes())?;}
-        let tree=dir.join(crate::callid::record::RECORDS[1]);
+        let tree=dir.join(crate::callid::record::HIDDEN);
         if tree.is_file() && state::copy_state_file(&tree,&snap.path(b"npm-tree-record.json")).is_err() {
-            state::log_advisory(&call.guard_dir,&cat(&[b"pre-guard: could not keep a copy of ",tree.as_os_str().as_bytes(),b", so the effect gate will compare this install with package-lock.json alone and may read packages already installed as new. Command: ",&call.command]));
+            state::log_advisory(&call.guard_dir,&cat(&[b"pre-guard: could not keep a copy of ",tree.as_os_str().as_bytes(),b", so the effect gate will compare this install with the earlier lockfile alone and may read packages already installed as new. Command: ",&call.command]));
         }
         if let Err(e)=snap.members(&dir) { snap.discard();return Err(Error::Workspace(e.to_string().into_bytes())); }
         let node=dir.join("node_modules"); let mut packages=Vec::new();
@@ -179,11 +179,13 @@ pub fn probe(input:&[u8])->i32 {
         let bytes=|name|record.get(name).and_then(Value::as_bytes).unwrap_or_default();
         let cwd=bytes("cwd");let attribution=bytes("attribution");let fetch_why=bytes("fetch_why");
         let accept=record.get("accept_risk").and_then(Value::as_bytes);
+        let source=record.get("accept_source").and_then(|v|Some((v.get("url")?.as_bytes()?,v.get("reason")?.as_bytes()?)));
         let record=super::pending::Record { cwd:&cwd,
             project_from:record.get("project_from").and_then(Value::as_str).unwrap_or("cwd"),
             npm_install:matches!(record.get("npm_install").or(record.get("trace")),Some(Value::Bool(true))),
             runner_only:matches!(record.get("runner_only"),Some(Value::Bool(true))), attribution:&attribution,
-            fetch:record.get("fetch"),fetch_why:&fetch_why,accept_risk:accept.as_deref() };
+            fetch:record.get("fetch"),fetch_why:&fetch_why,accept_risk:accept.as_deref(),
+            accept_source:source.as_ref().map(|(url,reason)|(url.as_slice(),reason.as_slice())) };
         if super::pending::write(&call,&snap,&record).is_err(){return 1}
     }
     if let Some(Value::Str(rewrite))=value.get("rewrite") {

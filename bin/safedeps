@@ -1754,6 +1754,70 @@ cmd_approvals() {
   fi
 }
 
+# ---- sources ------------------------------------------------------------------
+
+# The accepted-source ledger, ${SAFEDEPS_HOME}/accepted-sources.jsonl: the npm
+# bytes from outside the public registry that a person accepted, one install
+# at a time, with SAFEDEPS_ACCEPT_SOURCE. The core is its one reader and
+# writer (`safedeps-core sources`, rust/src/sources.rs). This lists what
+# `sources index` prints and asks `sources revoke` to take a URL's entries
+# back; it never opens the file itself.
+cmd_sources() {
+  local index answer revoked doubts doubt broken
+  case "${1:-}" in
+    ""|list) [[ $# -le 1 ]] || { sf_eprintf "safedeps: sources lists the ledger and takes no argument. Try 'safedeps help sources'."; return 4; } ;;
+    revoke) [[ $# -eq 2 && -n "$2" ]] || { sf_eprintf "safedeps: sources revoke takes one URL. Try 'safedeps help sources'."; return 4; } ;;
+    -h|--help) cmd_help sources; return 0 ;;
+    *) sf_eprintf "safedeps: sources takes no subcommand but revoke <URL>. Try 'safedeps help sources'."; return 4 ;;
+  esac
+  if ! sf_core; then
+    sf_eprintf "safedeps: core-missing: ${SF_CORE_MISSING}. The accepted-source ledger is the core's, so it was not read."
+    return 4
+  fi
+  if [[ "${1:-}" == revoke ]]; then
+    answer=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources revoke "$2") || return 4
+    # The core answers how many entries the revoke took back, and what each
+    # step after its line's commit returned where one failed. The revoke
+    # stands either way; a doubt is said beside it, and the exit is 4.
+    if ! revoked=$(jq -er '.revoked | numbers' <<< "${answer}") \
+      || ! doubts=$(jq -er '.doubts | arrays | select(all(.[]; type == "string")) | length' <<< "${answer}"); then
+      sf_eprintf "safedeps: the core answered the revoke with something this CLI cannot read: ${answer}"
+      return 4
+    fi
+    if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+      jq -c --arg url "$2" '{command:"sources", action:"revoke", url:$url, revoked:.revoked, doubts:.doubts}' <<< "${answer}"
+    elif [[ "${revoked}" -eq 0 ]]; then
+      printf 'safedeps: no accepted-source entry names %s, so nothing was revoked.\n' "$2"
+    else
+      printf 'safedeps: revoked %s accepted-source entr%s for %s. The next install that brings those bytes is judged as before.\n' \
+        "${revoked}" "$([[ "${revoked}" -eq 1 ]] && printf y || printf ies)" "$2"
+    fi
+    if [[ "${doubts}" -gt 0 ]]; then
+      while IFS= read -r doubt; do
+        sf_eprintf "safedeps: WARNING: the revoke line was written, and ${doubt}: until the system writes it, a power loss can bring the entries back. Check 'safedeps sources' after a restart."
+      done < <(jq -r '.doubts[]' <<< "${answer}")
+      return 4
+    fi
+    [[ "${revoked}" -gt 0 ]] || return 1
+    return 0
+  fi
+  index=$(SAFEDEPS_HOME="${SAFEDEPS_HOME}" "${SF_CORE}" sources index) || return 4
+  broken=$(jq -er '.broken | numbers' <<< "${index}") || {
+    sf_eprintf "safedeps: the core answered the listing with something this CLI cannot read: ${index}"
+    return 4
+  }
+  if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+    jq -c '{command:"sources"} + .' <<< "${index}"
+  elif jq -e '.entries == []' <<< "${index}" > /dev/null; then
+    printf 'safedeps: no accepted source.\n'
+  else
+    jq -r '.entries[] | "\(.url)\n  \(.package)@\(.version) \(.integrity)\n  advisories when accepted: \(if .advisories == [] then "none" else (.advisories | join(", ")) end)\n  accepted \(.at) in \(.project): \(.reason)"' <<< "${index}"
+  fi
+  if [[ "${broken}" -gt 0 ]]; then
+    sf_eprintf "safedeps: WARNING: ${broken} line(s) of ${SAFEDEPS_HOME}/accepted-sources.jsonl stand for nothing; no entry is read from them."
+  fi
+}
+
 # ---- help / version ----------------------------------------------------------
 
 cmd_version() {
@@ -1863,6 +1927,36 @@ safedeps watch <scan|status|claim|claimed|ack|remediation|retire> [--json]
   reported as unmeasured.
 EOF
       ;;
+    sources)
+      cat <<'EOF'
+safedeps sources [--json]
+safedeps sources revoke <URL> [--json]
+
+  The accepted-source ledger, ~/.safedeps/accepted-sources.jsonl. An npm
+  package from outside the public registry rolls an install back. One
+  install can keep it when a person says so in front of the command:
+
+    SAFEDEPS_ACCEPT_SOURCE='<https URL> <who decided and why>' npm install <https URL>
+
+  The install that is kept writes one entry for each package it brought from
+  that URL: the URL, the lockfile's integrity, the name and version, and the
+  advisory ids OSV named then. From then on the same bytes from the same URL,
+  under the same name and version, install as an approved package, and the
+  watch and audit list them on one line that is not a warning. Other bytes,
+  another URL, another name, a record with no integrity, a new advisory id
+  and a KEV listing are judged as before. http, git and file: sources are
+  never accepted. On Codex the override is refused: Codex cannot withhold
+  install scripts.
+
+  safedeps sources           Lists the entries that stand.
+  safedeps sources revoke U  Takes back every entry of the URL U. Exit 1
+                             when no entry names it. Exit 4 when the revoke
+                             was written and a step after it failed: the
+                             entries are taken back, and a power loss
+                             before the system writes the line can bring
+                             them back.
+EOF
+      ;;
     approvals)
       cat <<'EOF'
 safedeps approvals migrate [<archive>...] [--json]
@@ -1938,6 +2032,7 @@ COMMANDS
   watch <scan|status|claim|ack|...>          Daily scan of projects and runtimes.
   migrate                                  Migrate legacy npm-reorg-guard state.
   approvals migrate [<archive>...]          Move pre-store approvals into the approvals store.
+  sources [revoke <URL>]                    List or revoke accepted npm sources outside the public registry.
   gates [run]                               Release-time repo gates: secret scan, dep audit, hook/CI check.
   scan secrets [--repo|--worktree|--staged] Run gitleaks secret scan (repo profile aware).
   audit [npm|pnpm|yarn|bun]                 Audit dependency lockfiles (auto-detects ecosystem).
@@ -2020,6 +2115,7 @@ main() {
     watch)    cmd_watch    "$@" ;;
     migrate)  cmd_migrate  "$@" ;;
     approvals) cmd_approvals "$@" ;;
+    sources)  cmd_sources  "$@" ;;
     gates)    cmd_gates    "$@" ;;
     scan)     cmd_scan     "$@" ;;
     audit)    cmd_audit    "$@" ;;

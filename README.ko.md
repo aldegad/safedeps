@@ -120,7 +120,7 @@ Claude Code 또는 Codex CLI가 `npm install`, `pip install`, `cargo add`, `go g
 4. 명시적 `pkg@version` 설치 명령에 대해 승인된 spec ledger를 **빠르게 확인**합니다.
 5. 사전 비행 체크를 수행하고 다음 조건을 감지하면 실행을 **차단**합니다.
    - 타이포스쿼팅 패키지명 (`lod_sh`, `reacct`, `axois` 등)
-   - 명령줄의 `--registry` 로 적은 비표준 registry(`registry.npmjs.org`, `registry.yarnpkg.com` 외부). npm 이 `.npmrc` 나 `npm_config_registry` 에서 읽는 registry 는 막지 않습니다. 사내 registry, 미러, 프록시가 그렇게 설정되고, 아직 registry 를 승인할 길이 없기 때문입니다. 설치 자신의 인자와 환경으로 npm 에게 어느 registry 에서 받는지 묻고, 설치 후 훅은 그런 registry 가 공개 registry URL 로 내준 것을 그대로 두되, safedeps 는 그것을 `npm rebuild` 하지 않습니다. registry 자신의 URL 로 기록된 새 패키지는 비표준 출처라 롤백됩니다(아래 표). safedeps 는 그대로 둔 바이트를 기록하므로 같은 바이트를 받은 이 머신의 다른 프로젝트도 그것을 rebuild 하지 않고, 이 버전에는 그 기록을 풀 길이 없습니다(경계 참고)
+   - 명령줄의 `--registry` 로 적은 비표준 registry(`registry.npmjs.org`, `registry.yarnpkg.com` 외부). npm 이 `.npmrc` 나 `npm_config_registry` 에서 읽는 registry 는 막지 않습니다. 사내 registry, 미러, 프록시가 그렇게 설정되고, 아직 registry 를 승인할 길이 없기 때문입니다. 설치 자신의 인자와 환경으로 npm 에게 어느 registry 에서 받는지 묻고, 설치 후 훅은 그런 registry 가 공개 registry URL 로 내준 것을 그대로 두되, safedeps 는 그것을 `npm rebuild` 하지 않습니다. registry 자신의 URL 로 기록된 새 패키지는 비표준 출처라 롤백됩니다(아래 표). safedeps 는 그대로 둔 바이트를 기록하므로 같은 바이트를 받은 이 머신의 다른 프로젝트도 그것을 rebuild 하지 않습니다. 수용 출처 항목은 자체 락 레코드에 공개 registry 외부의 해당 항목 URL 이 적힌 패키지에 대해서만 그 기록을 해제합니다. 사내 registry 나 미러가 공개 registry URL 로 내준 바이트에 대해서는 이 버전에서도 여전히 그 기록을 풀 길이 없습니다(경계 참고).
    - 파이프 기반 원격 실행 패턴 (`curl ... | bash`)
    - 설치 스크립트 안전성 명시적 비활성 (`npm config set ignore-scripts false`)
 
@@ -154,7 +154,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
    - 민감 경로 접근 (`~/.ssh`, `.env`, `.aws`, `credentials`)
    - 난독화된 내용 (`base64`, `atob`, `Buffer.from`, 16진수/유니코드 이스케이프)
 
-3. **Lock file diff analysis** — lock 파일을 명령 전에 떠 둔 사본과 비교합니다. npm 에서는 출처를 두 기록 모두에서 읽고, 명령 전 어느 기록에도 없던 출처만 셉니다:
+3. **Lock file diff analysis** — lock 파일을 명령 전에 떠 둔 사본과 비교합니다. npm 에서는 출처를 npm이 읽는 락파일과 트리 기록(`node_modules/.package-lock.json`)에서 읽고, 명령 전 npm이 읽던 락파일과 트리 기록 어느 쪽에도 없던 출처만 셉니다:
    - 비표준 registry를 가리키는 resolved URL. `https://registry.npmjs.org/` 나 `https://registry.yarnpkg.com/` 으로 시작하는 URL 만 공개 registry 이고, 그것도 npm 이 실제로 거기서 받았다고 답할 때만입니다(`replace-registry-host` 가 `never` 가 아니면 npm 은 그런 URL 을 설정된 registry 에서 받습니다). 설치가 링크한 디렉터리 의존성도 프로젝트가 선언한 워크스페이스가 아니면 비표준 출처입니다
    - resolved URL의 보안 취약 프로토콜 (`http://`, `git://`)
    - 과도한 의존성 증가(의존성 혼란 공격 가능성): `package-lock.json` 에 명령 전 사본에 없던 패키지 이름이 50개를 넘는 경우입니다. 이름은 패키지가 `node_modules` 안에 설치된 이름이거나 그 항목이 주는 `name` 입니다. 워크스페이스 멤버나 링크된 디렉터리의 폴더는 이름이 아닙니다. 폴더와 이름이 달라지면 npm 이 그 자리에 `name` 을 쓰므로, 폴더를 옮겨도 새 이름이 생기지 않습니다. 이미 있던 패키지가 다른 버전·자리·출처로 들어온 것은 새 이름이 아닙니다. 그 버전은 closure 검사가 판정하고, 출처 검사와 설치 스크립트 검사가 읽습니다. 읽을 수 없는 `package-lock.json` 은 0개로 세지 않고 사유가 됩니다
@@ -272,9 +272,88 @@ SAFEDEPS_ACCEPT_RISK='<who decided and why>' npm ci
 | `Audit record: <path of accepted-risk.jsonl>` | 감사 기록 파일의 경로입니다. |
 | `Details log: <path of reorg.log>` | 상세 로그 파일의 경로입니다. |
 
-CISA KEV에 등재된 패키지는 오버라이드 대상에 포함되지 않습니다. 읽을 수 없는 클로저, 읽을 수 없는 KEV 카탈로그, 실행할 수 없는 원장 검사 또는 실행할 수 없는 OSV 일괄 검사도 대상에 포함되지 않습니다. 의심스러운 설치 스크립트, 비표준 또는 안전하지 않은 확인 소스, 락파일의 비정상적인 대규모 추가, 네이티브 바이너리 발견도 대상에 포함되지 않습니다. 이러한 항목은 오버라이드 유무와 관계없이 항상 설치를 롤백합니다. 오버라이드가 설정되었으나 롤백되는 경우, 롤백 메시지의 문제 라인은 다음 문장으로 끝납니다: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. 오버라이드가 수용할 수 있었던 문제들도 여기에 함께 나열됩니다.
+CISA KEV에 등재된 패키지는 오버라이드 대상에 포함되지 않습니다. 읽을 수 없는 클로저, 읽을 수 없는 KEV 카탈로그, 실행할 수 없는 원장 검사 또는 실행할 수 없는 OSV 일괄 검사도 대상에 포함되지 않습니다. 의심스러운 설치 스크립트, 비표준 또는 안전하지 않은 확인 소스, 락파일의 비정상적인 대규모 추가, 네이티브 바이너리 발견도 대상에 포함되지 않습니다. 공개 레지스트리 외부의 출처는 대신 `SAFEDEPS_ACCEPT_SOURCE`로 수용합니다(아래 참고). 이러한 항목은 오버라이드 유무와 관계없이 항상 설치를 롤백합니다. 오버라이드가 설정되었으나 롤백되는 경우, 롤백 메시지의 문제 라인은 다음 문장으로 끝납니다: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. 오버라이드가 수용할 수 있었던 문제들도 여기에 함께 나열됩니다.
 
 오버라이드는 단 하나의 명령어에만 적용됩니다. 사유는 `tool_use_id`로 식별되는 해당 호출의 보류 레코드에만 존재합니다. 원장 항목이나 승인은 영구 저장되지 않습니다. 오버라이드가 없는 후속 설치는 기존과 동일하게 판단되므로 미승인 클로저는 다시 롤백됩니다. 위험을 수용하는 것은 패키지를 승인하는 것이 아니며, `safedeps check`와 원장은 변경되지 않습니다. 오버라이드는 오직 npm 효과 게이트에만 적용됩니다. pip, cargo, go, gem, maven, nuget, pnpm, yarn, bun에는 오버라이드가 없습니다. 사전 설치 훅이 설치로 읽지 못한 명령어는 레코드 없이 사후 백스톱에 도달하므로 오버라이드가 적용되지 않습니다.
+
+### 공개 레지스트리 외부 출처 수용: `SAFEDEPS_ACCEPT_SOURCE`
+
+프로젝트에 따라 `https://example.test/pkg/-/pkg-1.0.0.tgz`처럼 공개 npm 레지스트리 외부의 HTTPS URL에서 npm 타르볼을 설치해야 하는 경우가 있습니다. safedeps의 설치 후 게이트는 공개 레지스트리 외부에서 확인된 모든 패키지를 비표준 출처로 간주하고 설치를 롤백합니다. `SAFEDEPS_ACCEPT_SOURCE`는 사람이 기록한 결정으로 해당 URL을 한 번 수용하고, 수용된 바이트를 원장 파일에 기록하여 이후 같은 바이트를 설치할 때는 오버라이드 없이 통과할 수 있게 합니다.
+
+오버라이드는 명령어 내 각 npm 설치 구문 앞에 할당문을 배치하는 형식으로 지정하며, 값은 URL, 공백 한 칸, 그리고 누가 어떤 이유로 결정했는지를 적습니다:
+
+```sh
+SAFEDEPS_ACCEPT_SOURCE='https://example.test/pkg/-/pkg-1.0.0.tgz <who decided and why>' npm install https://example.test/pkg/-/pkg-1.0.0.tgz
+```
+
+락파일에 해당 URL이 명시된 경우 `npm ci`나 인자 없는 `npm install` 앞에서도 동일하게 동작합니다.
+
+이 오버라이드는 위의 `SAFEDEPS_ACCEPT_RISK`와 완전히 동일한 조건에서 유효하게 인정됩니다. 즉, 명령어 내 모든 npm 설치 구문이 선두 할당문에 동일한 단일 값으로 해당 할당을 포함해야 하고, bash, zsh, dash 해석기 모두에서 입력된 그대로 해석되어야 하며, 제어 문자를 포함할 수 없고, 허용된 동일한 셸 내장 명령만 사용할 수 있으며, `sh -c`, `eval`, 명령어 치환을 사용할 수 없고, 모든 npm 설치는 npm이 락파일에 기록하는 위치에 설치되어야 합니다(전역 설치 불가). `export SAFEDEPS_ACCEPT_SOURCE=...`, `env SAFEDEPS_ACCEPT_SOURCE=...`, 그리고 에이전트나 훅의 환경 변수에 설정된 값은 결코 인정되지 않으며, safedeps는 오직 명령어 텍스트만 읽습니다.
+
+설치가 실행되기 전 사전 설치 훅은 다음 규칙을 적용합니다:
+- 명령어에 `SAFEDEPS_ACCEPT_SOURCE`가 포함되어 있으나 유효 조건을 만족하지 못하거나, safedeps가 수용할 수 없는 URL이거나, URL 뒤에 사유가 없는 경우 사전 설치 훅은 설치 실행 전에 이를 거부합니다. 거부 메시지는 `safedeps: SAFEDEPS_ACCEPT_SOURCE is in this command and does not count:`로 시작하여 이유가 이어지고 `The install was not run.`으로 끝납니다. safedeps는 오버라이드 없이 설치를 실행하는 방식으로 물러서지 않습니다.
+- safedeps가 수용할 수 있는 URL은 `https://`로 시작하고, 사용자 이름이나 비밀번호 부분 없이 비어 있지 않은 호스트를 명시하며, 공백 없는 출력 가능한 ASCII 문자를 사용하고, 공개 레지스트리 URL(대소문자 구분 없이 `https://registry.npmjs.org/` 또는 `https://registry.yarnpkg.com/`)이 아니어야 합니다. `http://`, `git+https://`, `git://`, `file:` 및 공개 레지스트리 URL은 결코 수용되지 않습니다.
+- Claude Code에서는 모든 npm 설치와 마찬가지로 `--ignore-scripts`와 함께 설치가 실행되며, `~/.safedeps/advisory.log`에 `pre-guard: SAFEDEPS_ACCEPT_SOURCE is set for this npm install` 라인이 기록됩니다.
+- Codex CLI에서는 사전 설치 훅이 설치 실행 전에 오버라이드를 거부합니다: `safedeps: SAFEDEPS_ACCEPT_SOURCE does not count on Codex.` Codex는 설치 스크립트 실행을 보류할 수 없으므로, 어떤 검사도 통과하지 않은 바이트의 스크립트가 검사 전에 실행될 수 있기 때문입니다. 설치가 `--ignore-scripts`와 함께 실행되는 Claude Code에서 먼저 출처를 수용하십시오. 원장에 항목이 기록되면, 이후 Codex에서 `npm ci` 등 락파일 기반으로 설치할 때 같은 바이트가 승인된 패키지로 설치됩니다.
+
+오버라이드를 사용한 설치에서는 `resolved`가 지정된 URL과 바이트 단위로 일치하고 `integrity`를 가진 각 락 레코드가 대상에 포함됩니다. npm이 읽는 락파일(1바이트라도 있으면 `npm-shrinkwrap.json`, 아니면 `package-lock.json`)과 `node_modules/.package-lock.json`의 모든 레코드가 대상에 포함되는 패키지는 미승인 패키지로 집계되지 않고, 현재 OSV가 해당 패키지에 대해 알리는 모든 권고가 수용되며, 해당 출처가 롤백 사유가 되지 않습니다. npm이 읽지 않는 `package-lock.json`은 판정하지 않습니다.
+
+이 오버라이드는 CISA KEV 등재, 읽을 수 없거나 실행할 수 없는 클로저, KEV 카탈로그, 원장 검사 또는 OSV 일괄 검사, 의심스러운 설치 스크립트(휴리스틱), 락파일의 비정상적인 대규모 추가, 네이티브 바이너리 발견, 안전하지 않은 `http://` 또는 `git://` 출처, 공개 레지스트리 외부의 다른 URL, `integrity`가 없는 해당 URL 레코드는 결코 덮지 않습니다.
+
+검사에서 발견된 모든 문제가 오버라이드로 덮이는 경우:
+1. safedeps는 설치 유지가 의존하는 마지막 쓰기로 `~/.safedeps/accepted-sources.jsonl`에 항목을 한 라인으로 기록합니다. 그 라인에는 URL 아래의 무결성, 이름, 버전마다 항목이 하나씩 들어 있습니다. 쓰기는 라인의 개행이 파일에 들어간 때 확정됩니다. 라인을 온전히 쓰지 못하면 safedeps는 설치를 롤백하고 어떤 항목도 유효하지 않습니다. 확정 뒤의 단계가 실패해도 설치는 롤백되지 않습니다. 파일의 sync, 이 쓰기가 파일을 만든 경우 그 디렉터리의 sync, 닫기가 각각 실행되며, 실패한 단계는 `Accepted source` 라인과 권고 로그에 적힙니다.
+2. 그다음 설치는 정상적인 설치와 마찬가지로 확정됩니다. 대상 패키지는 재빌드 검사에서 승인된 패키지로 취급되므로 검증된 기준점이 이동하고 `npm rebuild`가 실행됩니다. 휴리스틱 검사는 여전히 적용됩니다.
+3. 수용을 수행한 설치는 가져온 바이트를 `~/.safedeps/npm-withheld`에 계속 기록하므로, 나중에 철회하면 해당 바이트는 다시 보류됩니다.
+4. `~/.safedeps/advisory.log`에 사유와 명령어가 포함된 `post-verify ACCEPTED SOURCE in <project>: ...` 라인이 기록됩니다.
+
+에이전트는 항목을 기록하는 해당 설치에서만 다음 메시지 라인을 수신합니다:
+
+| 메시지 라인 | 의미 |
+|---|---|
+| `safedeps: this install was not rolled back.` | 설치 후 게이트가 `SAFEDEPS_ACCEPT_SOURCE`를 사용하여 설치를 확정했음을 알립니다. |
+| `Accepted source: <URL> for <name>@<version> (advisories accepted: <ids>), recorded in <path of accepted-sources.jsonl>` | 수용된 각 패키지와 수용된 OSV 권고 ID를 나열합니다. 권고가 없으면 `(no advisory)`로 표시되며, 여러 패키지는 `; `로 연결됩니다. 확정 뒤에 실패한 단계마다 `; the entries stand, and the <step> of <path> returned <what>: ...`가 붙으며, 정전이 아직 무엇을 앗아 갈 수 있는지 알립니다. |
+
+그럼에도 설치가 롤백되는 경우 문제 라인은 `SAFEDEPS_ACCEPT_SOURCE was set for this install, and it accepts a source only for an install no other check rolls back, so no entry was written`으로 끝납니다. 두 npm 레코드 모두에 지정된 URL이 없는 경우에는 `SAFEDEPS_ACCEPT_SOURCE was set for this install and names <URL>, which neither npm record holds, so it accepted nothing`으로 끝납니다.
+
+한 명령어에 `SAFEDEPS_ACCEPT_SOURCE`와 `SAFEDEPS_ACCEPT_RISK`를 함께 사용할 수 있습니다. `SAFEDEPS_ACCEPT_RISK`로 설치를 유지하는 경우 쓰기는 순서대로 실행됩니다. 먼저 `SAFEDEPS_ACCEPT_RISK` 감사 기록(`~/.safedeps/accepted-risk.jsonl`)을 쓰고, 그다음 수용 출처 항목(`~/.safedeps/accepted-sources.jsonl`)을 쓴 뒤에 설치를 유지합니다. 이때도 재빌드는 실행되지 않고 검증된 기준점도 이동하지 않습니다.
+- 감사 기록을 쓸 수 없으면 safedeps는 설치를 롤백하고 수용 출처 항목을 기록하지 않습니다. 문제 라인에는 `SAFEDEPS_ACCEPT_RISK was set for this install, and its audit record <path> could not be written (<error>), so the install was not kept`와 `SAFEDEPS_ACCEPT_SOURCE was set for this install, and it accepts a source only for an install no other check rolls back, so no entry was written`이 담깁니다.
+- 감사 기록을 쓴 뒤에 수용 출처 항목을 쓸 수 없으면 safedeps는 설치를 롤백하며, 감사 기록은 아무것도 해제하지 않으므로 그대로 남습니다. 문제 라인에는 `SAFEDEPS_ACCEPT_SOURCE was set for this install, and the accepted-source ledger <path> could not take its entries (<why>), so the install was not kept`와 `the audit record of SAFEDEPS_ACCEPT_RISK for this install was written to <path> before the entries failed, and it stays`가 담깁니다.
+
+수용된 출처는 `~/.safedeps/accepted-sources.jsonl`에 저장되며, 경로는 오직 `SAFEDEPS_HOME`에서만 파생됩니다. 이 파일은 추가 전용 JSON 라인 파일입니다:
+- 수용 라인은 정확히 `at`, `op`(`"accept"`), `url`, `entries`, `reason`, `project`, `tool_use_id` 키를 가집니다. `entries`는 정확히 `integrity`, `package`, `version`, `advisories` 키를 가진 객체 하나 이상의 목록입니다. 설치 하나가 수용 라인 하나를 쓰므로, 그 항목들은 함께 유효하거나 모두 유효하지 않습니다.
+- 철회 라인은 정확히 `at`, `op`(`"revoke"`), `url` 키를 가지며, 해당 URL의 이전 항목을 모두 되돌립니다.
+- 작성자와 읽는 쪽 모두 쓰기나 읽기 내내 파일 자체에 배타적 `flock(2)`을 걸므로 읽기끼리도 서로 기다립니다. 쓰기는 한 번의 덧붙이기이며, 개행이 파일에 들어간 때 확정됩니다. 그 뒤로 sync, 쓰기가 파일을 만든 경우 그 디렉터리의 sync, 닫기가 이어집니다. 작성자가 끝마치지 못한 마지막 라인은 다음 작성자가 마감하고 손상된 라인으로 읽힙니다. 두 형식 중 어느 것에도 해당하지 않는 라인은 아무 효력도 가지지 않으며 손상된 라인으로 집계됩니다.
+- 런타임은 훅이 라인을 쓰기 전이나 쓰는 도중에 훅을 종료시킬 수 있습니다. 그러면 아무도 설치를 롤백하지 않고 그 바이트를 덮는 항목도 없습니다. 쓰기의 어떤 규칙도 종료 뒤에는 작동할 수 없기 때문입니다. 이 경우는 판정 표시가 답합니다. 다음 설치 후 실행이 `~/.safedeps/advisory.log`에 `post-verify NOT JUDGED` 라인을 쓰고, 이후 설치는 그 바이트를 덮이지 않은 것으로 판정합니다.
+- 코어가 유일한 읽기 및 쓰기 주체입니다(`safedeps-core sources index`, `safedeps-core sources revoke <url>`). CLI와 watch는 코어를 통해 이 파일을 읽습니다.
+- 예를 들어 같은 URL 아래의 다른 바이트를 다시 수용한 경우 등 하나의 URL에 대해 여러 항목이 유효할 수 있습니다.
+- 승인 원장과 마찬가지로, 동일 사용자 공격자에 대한 보안 경계가 아니라 동일 사용자를 위한 편의 기록입니다.
+
+이후의 설치에서는 `resolved` URL, `integrity`, 패키지 이름(레코드의 `name` 또는 키가 가리키는 이름), `version` 네 가지 값이 항목과 바이트 단위로 모두 일치할 때 해당 항목이 락 레코드를 덮습니다. npm이 읽는 락파일과 `node_modules/.package-lock.json`에 있는 모든 레코드가 덮이는 패키지가 대상에 포함됩니다. 대상 패키지는 오버라이드 없이, 별도 출력도 없이 승인된 패키지처럼 설치됩니다. 즉, 미승인 패키지로 집계되지 않고, 항목에 명시된 권고는 집계되지 않으며, 출처가 롤백 사유가 되지 않고, `Accepted source` 라인도 출력되지 않으며, `npm rebuild`가 실행됩니다. 보류된 바이트 기록도 해당 패키지를 막지 않으며, 항목으로 덮인 이후 설치에서는 그 바이트를 다시 보류 대상으로 기록하지 않습니다.
+
+다음 경우에는 이후 설치도 기존과 동일하게 롤백됩니다:
+- 항목에 명시되지 않은 권고(신규 권고) 또는 CISA KEV 등재.
+- 같은 URL 아래의 다른 바이트: `... has an integrity no accepted-source entry of that URL names, so its bytes are not the ones accepted`.
+- 무결성 정보가 없는 레코드: `... has no integrity, so no accepted source can cover it`.
+- 다른 패키지 이름이나 버전으로 된 같은 바이트: `... has the integrity an accepted-source entry names under another package or version, and an entry covers only the package and version it names`.
+- 표기가 다른 URL(대소문자 변경, 쿼리 추가, 다른 경로 등)은 기존과 같이 비표준 출처로 처리됩니다.
+- 원장이 필요한 시점에 원장을 읽을 수 없는 경우: `the accepted-source ledger <path> could not be read (...), so no accepted source covers what this install brought from outside the public registry`.
+
+다른 URL 아래의 같은 바이트는 덮이지 않습니다. 공개 레지스트리 레코드가 해당 바이트를 가리키는 경우 설치는 유지되지만 보류 대상으로 기록되어 있으므로 `npm rebuild`는 보류됩니다.
+
+항목을 조회하거나 철회하려면 다음 명령을 사용합니다:
+- `safedeps sources`는 활성 항목을 각각 나열합니다: URL, `<name>@<version> <integrity>`, `advisories when accepted: <ids or none>`, `accepted <at> in <project>: <reason>`. 항목이 없으면 `safedeps: no accepted source.`를 출력합니다. `--json`은 코어의 인덱스를 출력합니다. 손상된 라인이 있으면 stderr에 `WARNING`을 출력합니다.
+- `safedeps sources revoke <URL>`은 해당 URL의 모든 항목을 되돌리고 `safedeps: revoked <N> accepted-source entr(y|ies) for <URL>. The next install that brings those bytes is judged as before.`를 출력합니다. 대상 항목이 없으면 철회된 항목이 없다고 알리고 종료 코드 1로 종료합니다. 철회는 그 라인의 개행이 파일에 들어간 때 확정됩니다. 그 뒤의 단계가 실패하면 stderr에 `safedeps: WARNING: the revoke line was written, and the <step> of <path> returned <what>: until the system writes it, a power loss can bring the entries back. Check 'safedeps sources' after a restart.`를 출력하고 종료 코드 4로 종료합니다. `--json`에는 `doubts` 목록이 추가됩니다.
+- 항목을 직접 추가하는 명령은 없으며, 오버라이드를 사용한 설치에서만 항목이 기록됩니다.
+
+watch에서는 각 디렉터리를 그곳에서 npm이 읽는 락파일로 측정합니다. 다른 npm 락파일과 바이트가 하나도 없는 락파일은 해당 락파일 행에 `ignored` 상태가 부여됩니다. 이는 finding을 만들지 않고 gap도 아니며, 이전 finding은 `unmeasured_reason`이 `ignored`인 `stale_measurement`로 열려 있습니다. 선택된 락파일을 읽을 수 없으면 그 디렉터리의 모든 npm 락파일 행이 사유와 함께 `unreadable`이 되고, `lockfile_unreadable` 종류의 오류 행이 기록되며, 그 디렉터리는 gap이 됩니다. watch는 워크스페이스 멤버 디렉터리에서 npm이 어떻게 실행되는지 알지 못하므로, 워크스페이스 멤버 자체의 `package-lock.json`은 그 디렉터리의 락파일로 측정됩니다. 락파일의 대상 패키지는 해당 락파일 상태 행에 `accepted`로 표시되고, 요약에 집계되며(`accepted_sources`, 요약 라인에 `; accepted sources <N>` 추가), 항목에 명시된 권고에 대해 KEV가 등재되지 않았다고 응답하면 finding을 생성하지 않고 `source_accepted`로 닫습니다. 신규 권고, KEV 등재, 읽을 수 없는 KEV 카탈로그는 계속 finding으로 남습니다. 원장을 읽을 수 없으면 아무것도 덮지 않고 `accepted_sources_unreadable` 오류 행을 기록합니다. 코어가 없거나 실패한 경우, 또는 코어의 응답을 실행의 파일에 쓰거나 그 파일에서 읽을 수 없는 경우가 이에 해당합니다. 원장을 읽은 뒤 비교가 실패하면 그 락파일은 `accepted sources not compared` 사유와 함께 `unreadable`이 되고, `lockfile_unreadable` 오류 행이 기록되며, 그 디렉터리는 gap이 됩니다. 실패하기 전에 출력한 내용은 어떤 finding도 닫지 않습니다. 원장은 인자가 아니라 파일로 비교에 전달되므로, 크기와 관계없이 비교됩니다.
+
+`safedeps audit`(npm 전용)에서는 `npm prefix`가 가리키는 디렉터리(워크스페이스 멤버의 경우 멤버 자체의 `package-lock.json`이 아니라 워크스페이스 루트)에서 npm이 읽는 락파일의 단일 사본과 npm의 권고를 비교합니다. npm이 보고한 모든 권고가 항목에 명시된 대상 취약 패키지는 npm 집계에서 제외하고 비경고 라인 `npm: accepted sources (safedeps sources), not counted: <name>@<version> (<ids>); ...`에 나열합니다. 반면 KEV에 등재되었거나 OSV 및 KEV 대조 검사를 수행할 수 없는 패키지는 안내 문구와 함께 집계에 유지됩니다. 의존성 때문에만 집계된 패키지는 해당 의존성이 모두 제외되면 함께 제외됩니다. 원장과 락파일은 인자가 아니라 audit 전용 디렉터리의 파일로 비교에 전달되므로, 원장은 크기와 관계없이 비교됩니다. 원장을 읽을 수 없으면 아무것도 제외하지 않고 `npm: the accepted-source ledger could not be read, so every advisory npm reported is counted.`를 출력합니다. 코어가 없거나 실패한 경우, 또는 코어의 응답을 audit의 파일에 쓰거나 그 파일에서 읽을 수 없는 경우가 이에 해당합니다. 원장을 읽은 뒤 비교가 실패하면 `npm: the accepted-source ledger could not be compared with <path>, so every advisory npm reported is counted.`를 출력합니다. 다음 네 가지 경우에는 아무것도 비교하지 않으며 모든 권고가 안내 문구와 함께 집계에 유지됩니다:
+- npm이 어떤 프로젝트를 감사하는지 알리지 않은 경우: `npm: npm did not say which project it audits (npm prefix), so every advisory npm reported is counted.`
+- 선택된 파일을 읽을 수 없는 경우: `npm: <path> could not be read, so every advisory npm reported is counted.`
+- 두 파일 모두 바이트가 하나도 없는 경우: `npm: neither npm-shrinkwrap.json nor package-lock.json in <dir> holds a byte, so no accepted source covers an advisory npm reported, and every one is counted.`
+- 사본을 만들거나 쓸 수 없는 경우: `npm: a directory for the copies this audit reads could not be made, so every advisory npm reported is counted.` 또는 `npm: a copy of the lockfile could not be written, so every advisory npm reported is counted.`
+
+원장에 무결성을 묶어 두는 것만으로 충분한 이유는 npm이 가져온 바이트를 압축 해제하기 전에 락파일의 `integrity`와 대조하여 검사하기 때문입니다. 테스트 모음(`scripts/test/effect-trace-grid.sh`, 행 NI0 및 NI1)은 콜드 캐시 상태에서 실제 npm으로 이를 측정합니다. 타르볼 자체의 무결성으로는 npm이 이를 설치하고 스크립트를 실행하지만, 다른 무결성을 지정하면 npm은 `EINTEGRITY`로 실패하며 아무것도 압축 해제하지 않고 스크립트도 실행하지 않습니다.
 
 ## Why "reorg"?
 
@@ -755,6 +834,7 @@ safedeps 가 다시 쓸 수 있게 쓰는 법입니다. 아래는 모두 등록�
 | `~/.safedeps/confirmed` | 현재 confirmed(안전) 스냅샷 ID |
 | `~/.safedeps/snapshots/` | 모든 스냅샷 파일(lock file, package.json 사본, 메타데이터) |
 | `~/.safedeps/accepted-risk.jsonl` | `SAFEDEPS_ACCEPT_RISK`에 의해 유지된 설치의 타임스탬프, 사유, 문제 목록, 패키지 목록을 담은 감사 기록 |
+| `~/.safedeps/accepted-sources.jsonl` | `SAFEDEPS_ACCEPT_SOURCE`로 수용된 공개 레지스트리 외부 출처와 철회 내역의 추가 전용 원장 |
 | `~/.safedeps/advisory.log` | 게이트가 내린 결정과 확인한 모든 우회 및 실패를 기록하는 감사 기록. 아래 설명된 로테이션에 따라 크기가 제한됨 |
 
 ```bash

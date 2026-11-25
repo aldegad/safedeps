@@ -57,7 +57,7 @@ pub fn unique_sorted(specs: Vec<Spec>) -> Vec<Spec> {
 }
 
 /// `package_name_from_path`: the package a key under node_modules names.
-fn name_from_path(key: &[u8]) -> Value {
+pub(super) fn name_from_path(key: &[u8]) -> Value {
     let tail = jv::after_last_node_modules(key).unwrap_or(b"");
     if tail.is_empty() {
         // `"" | split("/") | .[0]`
@@ -206,18 +206,23 @@ fn is_link(n: &Node) -> bool {
 ///   L<TAB><key><TAB><dir>  a link, and the directory it points at
 ///   T<TAB><key>            a directory outside node_modules
 pub fn new_records(current: &std::path::Path, earlier: &[std::path::PathBuf]) -> Result<Vec<u8>, ()> {
-    // `--slurpfile now`: a file jq cannot read whole stops jq before it runs.
     let now = jv::read_file(current).ok_or(())?;
+    let mut before_streams = Vec::new();
+    for e in earlier {
+        before_streams.push(jv::read_file(e).ok_or(())?);
+    }
+    new_records_of(&now, &before_streams.iter().collect::<Vec<_>>())
+}
+
+/// `new_records` over records already read: the post hook's own reads
+/// (post::lockfile), which nothing opens again.
+pub fn new_records_of(now: &Stream, before_streams: &[&Stream]) -> Result<Vec<u8>, ()> {
+    // `--slurpfile now`: a file jq cannot read whole stops jq before it runs.
     if now.failed {
         return Err(());
     }
-    let mut before_streams = Vec::new();
-    for e in earlier {
-        let st = jv::read_file(e).ok_or(())?;
-        before_streams.push(st);
-    }
     let mut before: Vec<Node> = Vec::new();
-    for st in &before_streams {
+    for st in before_streams {
         for v in &st.values {
             nodes(v, &mut before)?;
         }
