@@ -1611,7 +1611,7 @@ On a Mac Studio, a measurement harness outside the repository checked five prope
 | --- | --- | --- |
 | (a) 30-second mixed stream from core and CLI processes under a lowered bound | 0 of 2 passed; 29,784 and 29,364 lost, 76,351 and 76,062 duplicated, 2 and 49 cut | 2 of 2 passed; of 121,378 and 120,546 lines, none lost, duplicated or cut, no NUL byte, no gzip error; two of four archives compressed per trial while the stream ran |
 | (b) Lines appended while a rotation runs | 12 of 24 passed; all 12 append trials lost lines (204 to 252 core lines, 38 to 44 CLI lines per rotation) | 24 of 24 passed; those 12 trials wrote 18,470 lines around rotations and lost none |
-| (c) Log over the bound made only of non-INFO lines | 2 of 4 passed; rotated every time, all 37,217 INFO lines lost | 4 of 4 passed; no line lost |
+| (c) A log that its non-INFO lines alone put over the bound | 2 of 4 passed; rotated every time, all 37,217 INFO lines lost | 4 of 4 passed; no line lost |
 | (d) `kill -9` during a rotation | 0 of 16 passed; next rotation blocked 16 of 16 times, 9 of 16 left a broken `.gz` | 16 of 16 passed; next rotation ran every time, no line lost, no gzip error (all 16 kills landed in compression) |
 | (e) Two rotations in the same second | 0 of 10 passed; one archive, 4,149 lines lost per trial | 10 of 10 passed; two archives (stamp and `.1`), no line lost |
 
